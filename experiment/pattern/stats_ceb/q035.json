@@ -1,0 +1,102 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "votes"
+    },
+    {
+      "id": 3,
+      "label": "badges"
+    },
+    {
+      "id": 4,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 2,
+      "label": "votes_userid_users",
+      "src": 2,
+      "dst": 4
+    },
+    {
+      "id": 3,
+      "label": "badges_userid_users",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "score",
+      "op": "eq",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "bountyamount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410364800
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 4,
+      "property": "downvotes",
+      "op": "le",
+      "value": {
+        "Int64": 57
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1282784491
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1407639699
+      }
+    }
+  ]
+}

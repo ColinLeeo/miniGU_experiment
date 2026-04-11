@@ -1,0 +1,112 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "postlinks"
+    },
+    {
+      "id": 3,
+      "label": "posts"
+    },
+    {
+      "id": 4,
+      "label": "users"
+    },
+    {
+      "id": 5,
+      "label": "badges"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "postlinks_relatedpostid_posts",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "comments_postid_posts",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "badges_userid_users",
+      "src": 5,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "posts_owneruserid_users",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "linktypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1302593039
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 3,
+      "property": "score",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 3,
+      "property": "viewcount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 3,
+      "property": "favoritecount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1297159897
+      }
+    }
+  ]
+}

@@ -1,0 +1,152 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posts"
+    },
+    {
+      "id": 3,
+      "label": "votes"
+    },
+    {
+      "id": 4,
+      "label": "badges"
+    },
+    {
+      "id": 5,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 2,
+      "label": "posts_owneruserid_users",
+      "src": 2,
+      "dst": 5
+    },
+    {
+      "id": 3,
+      "label": "votes_userid_users",
+      "src": 3,
+      "dst": 5
+    },
+    {
+      "id": 4,
+      "label": "badges_userid_users",
+      "src": 4,
+      "dst": 5
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "score",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "ge",
+      "value": {
+        "Int64": -2
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "le",
+      "value": {
+        "Int64": 23
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 2,
+      "property": "viewcount",
+      "op": "le",
+      "value": {
+        "Int64": 2432
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 2,
+      "property": "commentcount",
+      "op": "eq",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 2,
+      "property": "favoritecount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 7,
+      "target": "vertex",
+      "id": 5,
+      "property": "reputation",
+      "op": "ge",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 8,
+      "target": "vertex",
+      "id": 5,
+      "property": "reputation",
+      "op": "le",
+      "value": {
+        "Int64": 113
+      }
+    },
+    {
+      "predicate_id": 9,
+      "target": "vertex",
+      "id": 5,
+      "property": "views",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 10,
+      "target": "vertex",
+      "id": 5,
+      "property": "views",
+      "op": "le",
+      "value": {
+        "Int64": 51
+      }
+    }
+  ]
+}

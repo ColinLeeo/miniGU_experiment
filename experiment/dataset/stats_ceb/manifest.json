@@ -1,0 +1,166 @@
+{
+  "vertices": [
+    {
+      "label": "users",
+      "file": { "path": "users.csv", "format": "csv" },
+      "properties": [
+        { "name": "reputation", "logical_type": "Int64", "nullable": true },
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "views", "logical_type": "Int64", "nullable": true },
+        { "name": "upvotes", "logical_type": "Int64", "nullable": true },
+        { "name": "downvotes", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "posts",
+      "file": { "path": "posts.csv", "format": "csv" },
+      "properties": [
+        { "name": "posttypeid", "logical_type": "Int64", "nullable": true },
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "score", "logical_type": "Int64", "nullable": true },
+        { "name": "viewcount", "logical_type": "Int64", "nullable": true },
+        { "name": "owneruserid", "logical_type": "Int64", "nullable": true },
+        { "name": "answercount", "logical_type": "Int64", "nullable": true },
+        { "name": "commentcount", "logical_type": "Int64", "nullable": true },
+        { "name": "favoritecount", "logical_type": "Int64", "nullable": true },
+        { "name": "lasteditoruserid", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "comments",
+      "file": { "path": "comments.csv", "format": "csv" },
+      "properties": [
+        { "name": "postid", "logical_type": "Int64", "nullable": true },
+        { "name": "score", "logical_type": "Int64", "nullable": true },
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "userid", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "badges",
+      "file": { "path": "badges.csv", "format": "csv" },
+      "properties": [
+        { "name": "userid", "logical_type": "Int64", "nullable": true },
+        { "name": "date", "logical_type": "String", "nullable": true }
+      ]
+    },
+    {
+      "label": "votes",
+      "file": { "path": "votes.csv", "format": "csv" },
+      "properties": [
+        { "name": "postid", "logical_type": "Int64", "nullable": true },
+        { "name": "votetypeid", "logical_type": "Int64", "nullable": true },
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "userid", "logical_type": "Int64", "nullable": true },
+        { "name": "bountyamount", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "posthistory",
+      "file": { "path": "posthistory.csv", "format": "csv" },
+      "properties": [
+        { "name": "posthistorytypeid", "logical_type": "Int64", "nullable": true },
+        { "name": "postid", "logical_type": "Int64", "nullable": true },
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "userid", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "postlinks",
+      "file": { "path": "postlinks.csv", "format": "csv" },
+      "properties": [
+        { "name": "creationdate", "logical_type": "String", "nullable": true },
+        { "name": "postid", "logical_type": "Int64", "nullable": true },
+        { "name": "relatedpostid", "logical_type": "Int64", "nullable": true },
+        { "name": "linktypeid", "logical_type": "Int64", "nullable": true }
+      ]
+    },
+    {
+      "label": "tags",
+      "file": { "path": "tags.csv", "format": "csv" },
+      "properties": [
+        { "name": "count", "logical_type": "Int64", "nullable": true },
+        { "name": "excerptpostid", "logical_type": "Int64", "nullable": true }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "label": "comments_postid_posts",
+      "src_label": "comments",
+      "dst_label": "posts",
+      "file": { "path": "comments_postid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "comments_userid_users",
+      "src_label": "comments",
+      "dst_label": "users",
+      "file": { "path": "comments_userid_users.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "badges_userid_users",
+      "src_label": "badges",
+      "dst_label": "users",
+      "file": { "path": "badges_userid_users.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "tags_excerptpostid_posts",
+      "src_label": "tags",
+      "dst_label": "posts",
+      "file": { "path": "tags_excerptpostid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "postlinks_postid_posts",
+      "src_label": "postlinks",
+      "dst_label": "posts",
+      "file": { "path": "postlinks_postid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "postlinks_relatedpostid_posts",
+      "src_label": "postlinks",
+      "dst_label": "posts",
+      "file": { "path": "postlinks_relatedpostid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "posthistory_postid_posts",
+      "src_label": "posthistory",
+      "dst_label": "posts",
+      "file": { "path": "posthistory_postid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "posthistory_userid_users",
+      "src_label": "posthistory",
+      "dst_label": "users",
+      "file": { "path": "posthistory_userid_users.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "votes_postid_posts",
+      "src_label": "votes",
+      "dst_label": "posts",
+      "file": { "path": "votes_postid_posts.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "votes_userid_users",
+      "src_label": "votes",
+      "dst_label": "users",
+      "file": { "path": "votes_userid_users.csv", "format": "csv" },
+      "properties": []
+    },
+    {
+      "label": "posts_owneruserid_users",
+      "src_label": "posts",
+      "dst_label": "users",
+      "file": { "path": "posts_owneruserid_users.csv", "format": "csv" },
+      "properties": []
+    }
+  ]
+}

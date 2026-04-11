@@ -1,0 +1,132 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posts"
+    },
+    {
+      "id": 3,
+      "label": "postlinks"
+    },
+    {
+      "id": 4,
+      "label": "votes"
+    },
+    {
+      "id": 5,
+      "label": "badges"
+    },
+    {
+      "id": 6,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "posts_owneruserid_users",
+      "src": 2,
+      "dst": 6
+    },
+    {
+      "id": 2,
+      "label": "postlinks_relatedpostid_posts",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "votes_postid_posts",
+      "src": 4,
+      "dst": 2
+    },
+    {
+      "id": 4,
+      "label": "comments_postid_posts",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 5,
+      "label": "badges_userid_users",
+      "src": 5,
+      "dst": 6
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "ge",
+      "value": {
+        "Int64": -1
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "le",
+      "value": {
+        "Int64": 14
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1403672706
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1233504000
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 5,
+      "property": "date",
+      "op": "ge",
+      "value": {
+        "Int64": 1280883031
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 5,
+      "property": "date",
+      "op": "le",
+      "value": {
+        "Int64": 1409597482
+      }
+    },
+    {
+      "predicate_id": 7,
+      "target": "vertex",
+      "id": 6,
+      "property": "downvotes",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    }
+  ]
+}

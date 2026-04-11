@@ -1,0 +1,52 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "posthistory"
+    },
+    {
+      "id": 2,
+      "label": "votes"
+    },
+    {
+      "id": 3,
+      "label": "users"
+    },
+    {
+      "id": 4,
+      "label": "badges"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "badges_userid_users",
+      "src": 4,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "posthistory_userid_users",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "votes_userid_users",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 3,
+      "property": "views",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    }
+  ]
+}

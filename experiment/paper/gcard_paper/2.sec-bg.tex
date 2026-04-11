@@ -1,0 +1,230 @@
+\section{Preliminaries}
+\label{sec:bg}
+
+We use the following notation: $\Sigma$ is a set of labels, $\Gamma$ is
+a set of property names, and $\mathcal{D}$ is a (possibly infinite)
+domain of property values.\looseness=-1
+
+\stitle{Property Graphs}. %%
+A property graph is a tuple $G=(V,E,\lambda,\rho)$, where $V$ is a
+finite vertex set, $E \subseteq V \times V$ is a set of \emph{undirected} edges,
+$\lambda: V \cup E \rightarrow \Sigma$ assigns labels to vertices and
+edges, and $\rho: (V \cup E)\times \Gamma \rightarrow \mathcal{D}$ is a
+partial property function. %
+We use $x.\kw{prop}$ for the value of property $\kw{prop}$ on a vertex
+or edge $x$.
+
+\stitle{Subgraph Matching Queries}. A subgraph matching query is represented by a pattern
+graph $Q_S=(V_Q,E_Q,\lambda_Q)$, where $V_Q$ and $E_Q$ are the query
+vertex and edge sets, and $\lambda_Q$ is the query labeling function. A
+\emph{subgraph match} of $Q_S$ in $G$ is an injective mapping
+$M:V_Q \rightarrow V$ such that $\lambda_Q(u)=\lambda(M(u))$ for all
+$u \in V_Q$, and for each $e=(u,v)\in E_Q$, there exists
+$e'=(M(u),M(v))\in E$ with $\lambda_Q(e)=\lambda(e')$. We denote the set
+of all such matches by $Q_S(G)$. %%
+A \emph{path query} is a special subgraph query whose pattern graph is a
+labeled path. We denote a path query by $P$ and a path query with $k$
+edges is written as $P=u_0e_1u_1\cdots e_ku_k$, where $e_i$ connects
+$u_{i-1}$ and $u_i$ for $i=1,\ldots,k$. We call $u_0$ and $u_k$ the
+endpoints  of $P$.\looseness=-1
+
+
+\eat{ %%
+\stitle{Path Degrees}. %%
+A \emph{path query} is a subgraph query whose pattern is a labeled path.
+We denote it by $P=u_0e_1u_1\cdots e_ku_k$ and write $P(G)$ for its
+match set in $G$. We refer to  $s=u_0$ as the source node of $P$ and
+$t=u_k$ as the target node. 
+For each vertex $v\in V$, define
+$d_s^P(v)=\bigl|\{M\in P(G)\mid M(s)=v\}\bigr|$ and
+$d_t^P(v)=\bigl|\{M\in P(G)\mid M(t)=v\}\bigr|$,
+called the source and target \emph{path degrees} of $v$ \wrt $P$, respectively.
+For a path degree $d>0$, we write $\operatorname{rank}(d)=k$ if $2^{k-1}<d\le 2^k$. %%
+}%% 
+
+\stitle{Graph Queries.}
+A graph query augments a subgraph matching query with constraints on properties
+ of query vertices and edges. Formally, a graph query is  a pair
+ $Q=(Q_S,\psi)$, where $Q_S=(V_Q,E_Q,\lambda_Q)$ is a subgraph matching
+ query and
+ $\psi$ is a Boolean formula over literals on query vertices and edges.
+ %%
+A \emph{vertex literal} is an atomic condition on a query vertex $u\in
+V_Q$ (\eg~$u.\kw{age}>30$), and an \emph{edge literal} is an atomic
+condition on a query edge $e\in E_Q$ (\eg~$e.\kw{timestamp}<2025$). We
+call both predicate literals. %%zh
+A match of $Q$ in $G$ is any $M\in Q_S(G)$ with $M\models\psi$. For a
+predicate literal $\ell$, $M\models\ell$ iff $\ell$ evaluates to true
+under $M$; for vertex literal on $u$, evaluate on $M(u)$; for edge
+literal on $e=(u,v)$, evaluate on $(M(u),M(v))$; $\neg,\land,\lor$ are
+interpreted in standard semantics. %%
+Hence, $Q(G)=\{M\in Q_S(G)\mid M\models\psi\}$.
+
+\stitle{Cardinality Estimation.} Given a graph $G$ and a graph query
+$Q$,  the \emph{cardinality estimation problem} aims to  compute an
+estimate $\hat{C}$ of $|Q(G)|$ without explicitly computeing $Q(G)$. %
+
+
+\begin{example}
+\todo{Add a running example graph and query to illustrate the 
+definitions and notations. @Xingzi}
+\end{example}
+
+\section{Path Degree Summary}
+
+In this section, we present {path degree summary}, a core
+summary data structure of our cardinality estimation framework. 
+
+\vspace{.25em}%% 
+We start with path degrees, which capture the exact distribution of
+path counts for each vertex.  Unless stated otherwise, all summaries are
+defined \wrt a fixed data graph $G=(V,E,\lambda,\rho)$. 
+
+\stitle{Path Degrees.} %
+Let $s$ and $t$ be the endpoints of a path query $P$. For each vertex
+$v\in V$, define $d_s^P(v)=\bigl|\{M\in P(G)\mid M(s)=v\}\bigr|$ and
+$d_t^P(v)=\bigl|\{M\in P(G)\mid M(t)=v\}\bigr|$, as the \emph{path
+degrees} of $v$ \wrt $P$, respectively. %
+The \emph{path degrees} of $P$ are the pair
+$(D_s^P,D_t^P)$, where
+\[D_s^P=\{(v,d_s^P(v))\mid d_s^P(v)>0\}, \quad D_t^P=\{(v,d_t^P(v))\mid
+d_t^P(v)>0\}.\] %
+For a degree value $d>0$, we write $\operatorname{rank}(d)=k$ if
+$2^{k-1}<d\le 2^k$.
+
+\stitle{Path Degree Summary.} %%
+Directly using path degrees for cardinality estimation is
+computationally and space expensive. %%
+We therefore introduce PathDS, a compact summary of
+path degrees that supports efficient estimation with low space
+overhead.\looseness=-1
+
+\begin{definitionx}\label{def:pathds} %%
+Let $P$ be a path query with endpoints $s$ and $t$. The \emph{path
+degree summary} (PathDS) of $P$ is a pair 
+$(\mathcal{S}_s^P,\mathcal{S}_t^P)$, where 
+\begin{mbi}%
+\item $\mathcal{S}_s^P=\bigl\{(k,c)\mid
+c=\lvert\{(v,d)\in D_s^P\mid
+\operatorname{rank}(d){=}k\}\rvert,\ c>0\bigr\}$,
+\item $\mathcal{S}_t^P=\bigl\{(k,c)\mid
+c=\lvert\{(v,d)\in D_t^P\mid
+\operatorname{rank}(d){=}k\}\rvert,\ c>0\bigr\}$. \qed\looseness=-1
+\end{mbi}
+\end{definitionx}
+
+\vspace{.25em}%%
+The PathDS summary $(\mathcal{S}_s^P,\mathcal{S}_t^P)$ can be
+constructed from path degrees $(D_s^P, D_t^P)$ with a single linear
+scan. %
+Conceptually, $(\mathcal{S}_s^P,\mathcal{S}_t^P)$ is a rank-grouped
+histogram of $(D_s^P, D_t^P)$ that groups path degrees by rank and
+records the number of vertices in each rank. %
+This design preserves the degree distribution at rank granularity while
+substantially reducing space overhead.
+
+\begin{example}
+\todo{illustrate the definitions with a running example}
+\end{example}
+
+PathDS admits a $2$-approximation guarantee: replacing each degree in
+rank $k$ by $2^k$ yields an estimate in $[|P(G)|,\,2|P(G)|]$.
+
+\begin{propx} Let $P$ be a path query with two endpoints $s$ and $t$. Then\looseness=-1
+\begin{mbi}
+\item $|P(G)| \leq \sum \{2^k
+\cdot c \mid {(k,c)\in \mathcal{S}_s^P} \}\leq 2|P(G)|$, and 
+\item $|P(G)| \leq \sum \{2^k
+\cdot c \mid {(k,c)\in \mathcal{S}_t^P} \}\leq 2|P(G)|$. \qed
+\end{mbi}
+\end{propx}
+
+\stitle{Remark}. %\todo{Compare PathDS with PathCE, SafeBound}
+Degree statistics have been widely used in cardinality estimation for
+relational and graph queries,
+\eg~\cite{deedsSafeBoundPracticalSystem2023,
+pathce,caiPessimisticCardinalityEstimation2019,glogs}. The most related
+methods are SafeBound~\cite{deedsSafeBoundPracticalSystem2023} and
+PathCE~\cite{pathce}. We highlight their key differences from PathDS as
+follows.
+
+\sstab (a)  %% SafeBound vs. PathDS
+SafeBound is designed for relational DBMS and uses ordered degree
+sequences on join attributes,  which are essentially edge-level
+statistics in graph terms. %%
+PathDS differs from SafeBound in two aspects: (i) it focuses on
+path-level degree statistics in contrast to edge-level statistics,  (ii)
+it summarizes degree distributions into rank buckets, which are easier
+to compute and maintain than the ordered degree sequences in
+SafeBound (see also Exp.~\tbf).
+
+\sstab (b) %% PathCE vs. PathDS
+Both PathCE and PathDS use path-level statistics, but they summarize
+them differently: (i) PathCE partitions vertices into summary groups
+and stores maximal-degree statistics for each group pair; (ii) PathDS
+groups path degrees by rank and stores per-rank counts, preserving
+rank-level distributions with lower space overhead.\looseness=-1
+
+\iffalse
+\subsection{Graphs and Queries}
+
+\noindent\textbf{Data Graph.} A data graph is defined as a triple $G = (V, E, L)$, where $V$ is a finite set
+of vertices, $E \subseteq V \times V$ is a set of directed edges, and
+$L$ is a labeling function that assigns each vertex $v \in V$ and edge
+$e \in E$ a label together with a set of attributes
+$(a_1, a_2, \ldots)$ from a domain $\mathcal{D}$.
+This model subsumes commonly used property graph representations.
+
+\noindent\textbf{Graph Query.} 
+A graph query is represented as a pattern graph
+$Q = (V_Q, E_Q, P)$, where $V_Q$ is a finite set of \emph{query vertices}
+and $E_Q \subseteq V_Q \times V_Q$ is a set of \emph{query edges}.
+Each query vertex represents a placeholder to be matched to a data
+vertex in the input graph.
+Each query edge $e = (u, v) \in E_Q$ specifies a structural constraint
+between two query vertices, which may correspond to a single edge,
+a fixed-length path, or a regular path expression (RPE).
+The set $P = P_V \cup P_E$ consists of selection predicates on query
+vertices and query edges, respectively.
+For each $u \in V_Q$, predicates in $P_u \subseteq P_V$ restrict the
+attributes of its matched data vertex, and for each $e \in E_Q$,
+predicates in $P_e \subseteq P_E$ restrict the attributes of edges or
+paths satisfying the structural constraint of $e$.
+
+\noindent\textbf{Predicates and Selectivity.}
+A predicate is a Boolean condition defined over vertex or edge attributes.
+For a vertex predicate $P_u$, its selectivity is defined as the fraction
+of vertices in $V$ that satisfy $P_u$.
+Similarly, for an edge or path predicate $P_e$, its selectivity is the
+fraction of candidate edges or paths satisfying the constraint.
+Selectivity quantifies the filtering strength of predicates and is
+fundamental to cardinality estimation.
+
+\noindent\textbf{Graph Pattern Match.} Given a query $Q$ and a data graph $G$, a match of $Q$ in $G$ is a mapping $\rho: V_Q \rightarrow V$ such that: (i) for every variable $u \in V_Q$, $\rho(u)$ satisfies the predicates in $\mathcal{P}_u$; and (ii) for every query edge $e = (u, v) \in E_Q$, there exists a path in $G$ from $\rho(u)$ to $\rho(v)$ that conforms to the structural constraint of $e$ and satisfies the predicates in $\mathcal{P}_e$. We denote the set of all matches as $Q(G)$, assuming bag semantics for the results.
+
+
+\subsection{PathSketch}
+
+\noindent To support cardinality estimation of graph queries, $GCard$ maintains a data structure called \textit{PathSketch}, which summarizes statistics of path queries without predicate constraint. We define this data structure in two forms: the exact \textit{FlatDS} and its summary version, \textit{CompressedDS}.
+
+\noindent\textbf{FlatDS.} Given a path pattern $P$ starting at variable $s$ and ending at $t$, let $V_s \subseteq V$ be the set of vertices matching $s$. The FlatDS of $P$ is defined as a sequence $f_P = (f_1, f_2, \dots, f_d)$, where $d = |V_s|$ and each element $f_i$ represents the number of distinct path instances of $P$ originating from the $i$-th vertex in $V_s$. Inspired by the degree sequence concept in SafeBound \cite{deedsSafeBoundPracticalSystem2023} and the short path statistics in PathCE\cite{full}, $f_P$ captures the exact frequency distribution of path endpoints. Notably, $f_P$ in our notation is an unordered list, where the elements are not required to be sorted by frequency.
+\noindent\textbf{CompressedDS.}
+To reduce storage overhead, the \textit{CompressedDS} represents
+the frequency distribution of FlatDS as a set of compact tuples
+$H = \{(\pi_1, \kappa_1), \dots, (\pi_d, \kappa_d)\}$.
+For each frequency $f_i \in f_P$, we first extract an $n$-bit prefix
+$\pi_i \in \{0,1\}^n$, corresponding to the most significant bits of
+$f_i$ in its binary representation.
+We then compute the bucket index
+$\kappa_i = \lceil \log_b f_i \rceil$, which captures the order of
+magnitude of $f_i$ under base $b$.
+Together, $(\pi_i, \kappa_i)$ provides a compact representation
+that preserves an upper bound on the original frequency while
+significantly reducing space usage.
+
+\eat{ %% EAT
+\subsection{Cardinality Estimation}
+
+\noindent\textbf{Problem Definition.} Following the standard definition in the field, the goal of cardinality estimation is to approximate the result size of a query without exhaustive execution \cite{harmouchCardinalityEstimationExperimental2017a, hanCardinalityEstimationDBMS2021}. Formally, given a data graph $G$ and a graph query $Q = (V_Q, E_Q, \mathcal{P})$, the problem is to compute an estimate $\hat{C}$ of the total number of matches $|Q(G)|$ . In the $GCard$ framework, the estimate $\hat{C}$ is derived by performing inference over PathSketch statistics while satisfying the structural constraints in $E_Q$ and the unified set of selection predicates $\mathcal{P}$. The objective is to produce $\hat{C}$ such that it remains as close as possible to the true cardinality $|Q(G)|$ while maintaining a negligible computational cost compared to the actual matching process.
+} %% EAT
+\fi

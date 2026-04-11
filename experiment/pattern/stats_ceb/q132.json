@@ -1,0 +1,162 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posts"
+    },
+    {
+      "id": 3,
+      "label": "posthistory"
+    },
+    {
+      "id": 4,
+      "label": "votes"
+    },
+    {
+      "id": 5,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "votes_userid_users",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 2,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 3,
+      "label": "posts_owneruserid_users",
+      "src": 2,
+      "dst": 5
+    },
+    {
+      "id": 4,
+      "label": "posthistory_userid_users",
+      "src": 3,
+      "dst": 5
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "viewcount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "answercount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "answercount",
+      "op": "le",
+      "value": {
+        "Int64": 5
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 3,
+      "property": "posthistorytypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1288891539
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410218052
+      }
+    },
+    {
+      "predicate_id": 7,
+      "target": "vertex",
+      "id": 4,
+      "property": "bountyamount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 8,
+      "target": "vertex",
+      "id": 4,
+      "property": "bountyamount",
+      "op": "le",
+      "value": {
+        "Int64": 100
+      }
+    },
+    {
+      "predicate_id": 9,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1280073600
+      }
+    },
+    {
+      "predicate_id": 10,
+      "target": "vertex",
+      "id": 5,
+      "property": "views",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 11,
+      "target": "vertex",
+      "id": 5,
+      "property": "views",
+      "op": "le",
+      "value": {
+        "Int64": 13
+      }
+    }
+  ]
+}

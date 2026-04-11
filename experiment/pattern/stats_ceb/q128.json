@@ -1,0 +1,152 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posts"
+    },
+    {
+      "id": 3,
+      "label": "postlinks"
+    },
+    {
+      "id": 4,
+      "label": "posthistory"
+    },
+    {
+      "id": 5,
+      "label": "votes"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "postlinks_postid_posts",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "votes_postid_posts",
+      "src": 5,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "posthistory_postid_posts",
+      "src": 4,
+      "dst": 2
+    },
+    {
+      "id": 4,
+      "label": "comments_postid_posts",
+      "src": 1,
+      "dst": 2
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1280635961
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "le",
+      "value": {
+        "Int64": 44
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "favoritecount",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 2,
+      "property": "favoritecount",
+      "op": "le",
+      "value": {
+        "Int64": 3
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1281506036
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1409716356
+      }
+    },
+    {
+      "predicate_id": 7,
+      "target": "vertex",
+      "id": 3,
+      "property": "linktypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 8,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1407749191
+      }
+    },
+    {
+      "predicate_id": 9,
+      "target": "vertex",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1284981105
+      }
+    },
+    {
+      "predicate_id": 10,
+      "target": "vertex",
+      "id": 5,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410364800
+      }
+    }
+  ]
+}

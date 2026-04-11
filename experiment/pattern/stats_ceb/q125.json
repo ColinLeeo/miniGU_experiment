@@ -1,0 +1,112 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "posthistory"
+    },
+    {
+      "id": 2,
+      "label": "votes"
+    },
+    {
+      "id": 3,
+      "label": "users"
+    },
+    {
+      "id": 4,
+      "label": "badges"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "badges_userid_users",
+      "src": 4,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "posthistory_userid_users",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "votes_userid_users",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "posthistorytypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410451200
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 3,
+      "property": "reputation",
+      "op": "le",
+      "value": {
+        "Int64": 126
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 3,
+      "property": "views",
+      "op": "le",
+      "value": {
+        "Int64": 11
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1280737078
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410452190
+      }
+    },
+    {
+      "predicate_id": 7,
+      "target": "vertex",
+      "id": 4,
+      "property": "date",
+      "op": "le",
+      "value": {
+        "Int64": 1409731992
+      }
+    }
+  ]
+}

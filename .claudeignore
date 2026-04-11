@@ -1,0 +1,9 @@
+# LDBC dataset files (CSV + binary DB)
+experiment/dataset/
+experiment/result/
+
+# Baseline binaries and build artifacts
+experiment/baseline/
+
+# Build artifacts
+target/

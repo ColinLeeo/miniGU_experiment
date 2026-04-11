@@ -1,0 +1,72 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "votes"
+    },
+    {
+      "id": 3,
+      "label": "users"
+    },
+    {
+      "id": 4,
+      "label": "posts"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comments_postid_posts",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 2,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "votes_postid_posts",
+      "src": 2,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "score",
+      "op": "eq",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 3,
+      "property": "views",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 3,
+      "property": "views",
+      "op": "le",
+      "value": {
+        "Int64": 74
+      }
+    }
+  ]
+}

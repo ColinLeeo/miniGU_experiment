@@ -1,0 +1,62 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "votes"
+    },
+    {
+      "id": 2,
+      "label": "posts"
+    },
+    {
+      "id": 3,
+      "label": "badges"
+    },
+    {
+      "id": 4,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "votes_postid_posts",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "posts_owneruserid_users",
+      "src": 2,
+      "dst": 4
+    },
+    {
+      "id": 3,
+      "label": "badges_userid_users",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "score",
+      "op": "le",
+      "value": {
+        "Int64": 22
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 4,
+      "property": "reputation",
+      "op": "ge",
+      "value": {
+        "Int64": 1
+      }
+    }
+  ]
+}

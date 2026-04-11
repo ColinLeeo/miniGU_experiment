@@ -1,0 +1,52 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "posts"
+    },
+    {
+      "id": 2,
+      "label": "postlinks"
+    },
+    {
+      "id": 3,
+      "label": "posthistory"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "postlinks_postid_posts",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "posthistory_postid_posts",
+      "src": 3,
+      "dst": 1
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1279541317
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1279557000
+      }
+    }
+  ]
+}

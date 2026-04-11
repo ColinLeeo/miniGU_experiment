@@ -1,0 +1,560 @@
+{
+    "entities": [
+        {
+            "columns": [],
+            "label": {
+                "id": 0,
+                "name": "City"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 1,
+                "name": "Comment"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 2,
+                "name": "Company"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 3,
+                "name": "Continent"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 4,
+                "name": "Country"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 5,
+                "name": "Forum"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 6,
+                "name": "Person"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 7,
+                "name": "Post"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 8,
+                "name": "Tag"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 9,
+                "name": "TagClass"
+            }
+        },
+        {
+            "columns": [],
+            "label": {
+                "id": 10,
+                "name": "University"
+            }
+        }
+    ],
+    "is_column_id": false,
+    "is_table_id": true,
+    "relations": [
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 4,
+                        "name": "Country"
+                    },
+                    "src": {
+                        "id": 0,
+                        "name": "City"
+                    }
+                }
+            ],
+            "label": {
+                "id": 0,
+                "name": "City_isPartOf_Country"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 6,
+                        "name": "Person"
+                    },
+                    "src": {
+                        "id": 1,
+                        "name": "Comment"
+                    }
+                }
+            ],
+            "label": {
+                "id": 1,
+                "name": "Comment_hasCreator_Person"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 8,
+                        "name": "Tag"
+                    },
+                    "src": {
+                        "id": 1,
+                        "name": "Comment"
+                    }
+                }
+            ],
+            "label": {
+                "id": 2,
+                "name": "Comment_hasTag_Tag"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 4,
+                        "name": "Country"
+                    },
+                    "src": {
+                        "id": 1,
+                        "name": "Comment"
+                    }
+                }
+            ],
+            "label": {
+                "id": 3,
+                "name": "Comment_isLocatedIn_Country"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 1,
+                        "name": "Comment"
+                    },
+                    "src": {
+                        "id": 1,
+                        "name": "Comment"
+                    }
+                }
+            ],
+            "label": {
+                "id": 4,
+                "name": "Comment_replyOf_Comment"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 7,
+                        "name": "Post"
+                    },
+                    "src": {
+                        "id": 1,
+                        "name": "Comment"
+                    }
+                }
+            ],
+            "label": {
+                "id": 5,
+                "name": "Comment_replyOf_Post"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 4,
+                        "name": "Country"
+                    },
+                    "src": {
+                        "id": 2,
+                        "name": "Company"
+                    }
+                }
+            ],
+            "label": {
+                "id": 6,
+                "name": "Company_isLocatedIn_Country"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 3,
+                        "name": "Continent"
+                    },
+                    "src": {
+                        "id": 4,
+                        "name": "Country"
+                    }
+                }
+            ],
+            "label": {
+                "id": 7,
+                "name": "Country_isPartOf_Continent"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 7,
+                        "name": "Post"
+                    },
+                    "src": {
+                        "id": 5,
+                        "name": "Forum"
+                    }
+                }
+            ],
+            "label": {
+                "id": 8,
+                "name": "Forum_containerOf_Post"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 6,
+                        "name": "Person"
+                    },
+                    "src": {
+                        "id": 5,
+                        "name": "Forum"
+                    }
+                }
+            ],
+            "label": {
+                "id": 9,
+                "name": "Forum_hasMember_Person"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 6,
+                        "name": "Person"
+                    },
+                    "src": {
+                        "id": 5,
+                        "name": "Forum"
+                    }
+                }
+            ],
+            "label": {
+                "id": 10,
+                "name": "Forum_hasModerator_Person"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 8,
+                        "name": "Tag"
+                    },
+                    "src": {
+                        "id": 5,
+                        "name": "Forum"
+                    }
+                }
+            ],
+            "label": {
+                "id": 11,
+                "name": "Forum_hasTag_Tag"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 8,
+                        "name": "Tag"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 12,
+                "name": "Person_hasInterest_Tag"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 0,
+                        "name": "City"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 13,
+                "name": "Person_isLocatedIn_City"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 6,
+                        "name": "Person"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 14,
+                "name": "Person_knows_Person"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 1,
+                        "name": "Comment"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 15,
+                "name": "Person_likes_Comment"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 7,
+                        "name": "Post"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 16,
+                "name": "Person_likes_Post"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 10,
+                        "name": "University"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 17,
+                "name": "Person_studyAt_University"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 2,
+                        "name": "Company"
+                    },
+                    "src": {
+                        "id": 6,
+                        "name": "Person"
+                    }
+                }
+            ],
+            "label": {
+                "id": 18,
+                "name": "Person_workAt_Company"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 6,
+                        "name": "Person"
+                    },
+                    "src": {
+                        "id": 7,
+                        "name": "Post"
+                    }
+                }
+            ],
+            "label": {
+                "id": 19,
+                "name": "Post_hasCreator_Person"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 8,
+                        "name": "Tag"
+                    },
+                    "src": {
+                        "id": 7,
+                        "name": "Post"
+                    }
+                }
+            ],
+            "label": {
+                "id": 20,
+                "name": "Post_hasTag_Tag"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 4,
+                        "name": "Country"
+                    },
+                    "src": {
+                        "id": 7,
+                        "name": "Post"
+                    }
+                }
+            ],
+            "label": {
+                "id": 21,
+                "name": "Post_isLocatedIn_Country"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 9,
+                        "name": "TagClass"
+                    },
+                    "src": {
+                        "id": 8,
+                        "name": "Tag"
+                    }
+                }
+            ],
+            "label": {
+                "id": 22,
+                "name": "Tag_hasType_TagClass"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 9,
+                        "name": "TagClass"
+                    },
+                    "src": {
+                        "id": 9,
+                        "name": "TagClass"
+                    }
+                }
+            ],
+            "label": {
+                "id": 23,
+                "name": "TagClass_isSubclassOf_TagClass"
+            }
+        },
+        {
+            "columns": [],
+            "entity_pairs": [
+                {
+                    "dst": {
+                        "id": 0,
+                        "name": "City"
+                    },
+                    "src": {
+                        "id": 10,
+                        "name": "University"
+                    }
+                }
+            ],
+            "label": {
+                "id": 24,
+                "name": "University_isLocatedIn_City"
+            }
+        }
+    ]
+}

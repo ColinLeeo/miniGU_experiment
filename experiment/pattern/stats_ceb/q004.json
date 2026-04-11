@@ -1,0 +1,52 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posthistory"
+    },
+    {
+      "id": 3,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "posthistory_userid_users",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "posthistorytypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1284436747
+      }
+    }
+  ]
+}

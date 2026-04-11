@@ -1,0 +1,92 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posthistory"
+    },
+    {
+      "id": 3,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comments_userid_users",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "posthistory_userid_users",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1281309890
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 1,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1410291962
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 3,
+      "property": "reputation",
+      "op": "ge",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 3,
+      "property": "views",
+      "op": "le",
+      "value": {
+        "Int64": 80
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 3,
+      "property": "upvotes",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 6,
+      "target": "vertex",
+      "id": 3,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1280752272
+      }
+    }
+  ]
+}

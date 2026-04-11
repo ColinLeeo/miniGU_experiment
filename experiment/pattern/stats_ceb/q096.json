@@ -1,0 +1,82 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "comments"
+    },
+    {
+      "id": 2,
+      "label": "posthistory"
+    },
+    {
+      "id": 3,
+      "label": "votes"
+    },
+    {
+      "id": 4,
+      "label": "posts"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "posthistory_postid_posts",
+      "src": 2,
+      "dst": 4
+    },
+    {
+      "id": 2,
+      "label": "comments_postid_posts",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 3,
+      "label": "votes_postid_posts",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "score",
+      "op": "eq",
+      "value": {
+        "Int64": 0
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1282776911
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "creationdate",
+      "op": "le",
+      "value": {
+        "Int64": 1409870365
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 3,
+      "property": "votetypeid",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    }
+  ]
+}

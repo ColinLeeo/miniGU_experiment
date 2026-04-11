@@ -1,0 +1,32 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "badges"
+    },
+    {
+      "id": 2,
+      "label": "users"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "badges_userid_users",
+      "src": 1,
+      "dst": 2
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "upvotes",
+      "op": "ge",
+      "value": {
+        "Int64": 0
+      }
+    }
+  ]
+}

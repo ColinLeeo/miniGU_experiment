@@ -1,0 +1,240 @@
+{
+    "vertex_labels": {
+        "City": 0,
+        "Comment": 1,
+        "Company": 2,
+        "Continent": 3,
+        "Country": 4,
+        "Forum": 5,
+        "Person": 6,
+        "Post": 7,
+        "Tag": 8,
+        "TagClass": 9,
+        "University": 10
+    },
+    "edge_labels": {
+        "City_isPartOf_Country": 0,
+        "Comment_hasCreator_Person": 1,
+        "Comment_hasTag_Tag": 2,
+        "Comment_isLocatedIn_Country": 3,
+        "Comment_replyOf_Comment": 4,
+        "Comment_replyOf_Post": 5,
+        "Company_isLocatedIn_Country": 6,
+        "Country_isPartOf_Continent": 7,
+        "Forum_containerOf_Post": 8,
+        "Forum_hasMember_Person": 9,
+        "Forum_hasModerator_Person": 10,
+        "Forum_hasTag_Tag": 11,
+        "Person_hasInterest_Tag": 12,
+        "Person_isLocatedIn_City": 13,
+        "Person_knows_Person": 14,
+        "Person_likes_Comment": 15,
+        "Person_likes_Post": 16,
+        "Person_studyAt_University": 17,
+        "Person_workAt_Company": 18,
+        "Post_hasCreator_Person": 19,
+        "Post_hasTag_Tag": 20,
+        "Post_isLocatedIn_Country": 21,
+        "TagClass_isSubclassOf_TagClass": 23,
+        "Tag_hasType_TagClass": 22,
+        "University_isLocatedIn_City": 24
+    },
+    "edges": [
+        {
+            "card": "ManyToOne",
+            "from": 0,
+            "label": 0,
+            "to": 4
+        },
+        {
+            "card": "ManyToOne",
+            "from": 1,
+            "label": 1,
+            "to": 6
+        },
+        {
+            "card": "ManyToMany",
+            "from": 1,
+            "label": 2,
+            "to": 8
+        },
+        {
+            "card": "ManyToOne",
+            "from": 1,
+            "label": 3,
+            "to": 4
+        },
+        {
+            "card": "ManyToOne",
+            "from": 1,
+            "label": 4,
+            "to": 1
+        },
+        {
+            "card": "ManyToOne",
+            "from": 1,
+            "label": 5,
+            "to": 7
+        },
+        {
+            "card": "ManyToOne",
+            "from": 2,
+            "label": 6,
+            "to": 4
+        },
+        {
+            "card": "ManyToOne",
+            "from": 4,
+            "label": 7,
+            "to": 3
+        },
+        {
+            "card": "OneToMany",
+            "from": 5,
+            "label": 8,
+            "to": 7
+        },
+        {
+            "card": "ManyToMany",
+            "from": 5,
+            "label": 9,
+            "to": 6
+        },
+        {
+            "card": "ManyToOne",
+            "from": 5,
+            "label": 10,
+            "to": 6
+        },
+        {
+            "card": "ManyToMany",
+            "from": 5,
+            "label": 11,
+            "to": 8
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 12,
+            "to": 8
+        },
+        {
+            "card": "ManyToOne",
+            "from": 6,
+            "label": 13,
+            "to": 0
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 14,
+            "to": 6
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 15,
+            "to": 1
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 16,
+            "to": 7
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 17,
+            "to": 10
+        },
+        {
+            "card": "ManyToMany",
+            "from": 6,
+            "label": 18,
+            "to": 2
+        },
+        {
+            "card": "ManyToOne",
+            "from": 7,
+            "label": 19,
+            "to": 6
+        },
+        {
+            "card": "ManyToMany",
+            "from": 7,
+            "label": 20,
+            "to": 8
+        },
+        {
+            "card": "ManyToOne",
+            "from": 7,
+            "label": 21,
+            "to": 4
+        },
+        {
+            "card": "ManyToOne",
+            "from": 8,
+            "label": 22,
+            "to": 9
+        },
+        {
+            "card": "ManyToOne",
+            "from": 9,
+            "label": 23,
+            "to": 9
+        },
+        {
+            "card": "ManyToOne",
+            "from": 10,
+            "label": 24,
+            "to": 0
+        }
+    ],
+    "vertices": [
+        {
+            "discrete": false,
+            "label": 0
+        },
+        {
+            "discrete": false,
+            "label": 1
+        },
+        {
+            "discrete": false,
+            "label": 2
+        },
+        {
+            "discrete": true,
+            "label": 3
+        },
+        {
+            "discrete": true,
+            "label": 4
+        },
+        {
+            "discrete": false,
+            "label": 5
+        },
+        {
+            "discrete": false,
+            "label": 6
+        },
+        {
+            "discrete": false,
+            "label": 7
+        },
+        {
+            "discrete": false,
+            "label": 8
+        },
+        {
+            "discrete": true,
+            "label": 9
+        },
+        {
+            "discrete": false,
+            "label": 10
+        }
+    ]
+}
