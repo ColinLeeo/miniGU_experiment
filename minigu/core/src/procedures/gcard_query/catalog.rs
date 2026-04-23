@@ -92,6 +92,96 @@ pub enum CompressedDegreeSeq {
     },
 }
 
+impl CompressedDegreeSeq {
+    /// Convert to a [`PiecewiseConstantFunction`] directly.
+    ///
+    /// For `SafeBound` this is a clone.  For `FastCompressor` the histogram
+    /// bins are mapped straight to PCF segments (CDF model) without expanding
+    /// into a full degree sequence — O(num_bins) instead of O(num_vertices).
+    pub fn to_pcf(&self) -> PiecewiseConstantFunction {
+        match self {
+            CompressedDegreeSeq::SafeBound { function } => function.clone(),
+            CompressedDegreeSeq::FastCompressor {
+                len: _,
+                base,
+                counts,
+            } => Self::fast_compressor_to_pcf(*base, counts),
+        }
+    }
+
+    /// Build a PCF directly from the exponential-bin histogram.
+    ///
+    /// Each non-zero `counts[i]` becomes one PCF segment with:
+    ///   - `constant  = base^i`  (the degree value represented by this bin)
+    ///   - `width     = rows_in_bin / base^i`  (number of "x-axis slots" in CDF model)
+    ///   - `cum_rows` accumulated left-to-right (high degree → low degree)
+    ///
+    /// The bins are emitted in **descending degree order** (highest `i` first)
+    /// to match the convention used by `from_degree_sequence` with `model_cdf = true`.
+    fn fast_compressor_to_pcf(base: u64, counts: &[u64]) -> PiecewiseConstantFunction {
+        let total_rows: f64 = {
+            let mut s = 0u128;
+            for (i, &c) in counts.iter().enumerate() {
+                if c == 0 {
+                    continue;
+                }
+                s += base.pow(i as u32) as u128 * c as u128;
+            }
+            s as f64
+        };
+
+        if total_rows == 0.0 {
+            return PiecewiseConstantFunction::empty();
+        }
+
+        let mut constants = Vec::new();
+        let mut right_interval_edges = Vec::new();
+        let mut cumulative_rows = Vec::new();
+
+        let mut cum_row: f64 = 0.0;
+        let mut cum_x: f64 = 0.0;
+
+        // Descending order: highest bin first (largest degree values first).
+        for (i, &c) in counts.iter().enumerate().rev() {
+            if c == 0 {
+                continue;
+            }
+            let degree_val = base.pow(i as u32) as f64;
+            let rows_in_bin = degree_val * c as f64;
+
+            // CDF model: width = rows / degree_val = c
+            // But cap so cumulative doesn't exceed total_rows.
+            if cum_row + rows_in_bin >= total_rows {
+                let remaining = total_rows - cum_row;
+                let width = remaining / degree_val;
+                cum_x += width.ceil().max(1.0);
+                cum_row = total_rows;
+                constants.push(degree_val);
+                right_interval_edges.push(cum_x);
+                cumulative_rows.push(cum_row);
+                break;
+            }
+
+            let width = c as f64; // rows_in_bin / degree_val = c
+            cum_x += width;
+            cum_row += rows_in_bin;
+            constants.push(degree_val);
+            right_interval_edges.push(cum_x);
+            cumulative_rows.push(cum_row);
+        }
+
+        if constants.is_empty() {
+            return PiecewiseConstantFunction::empty();
+        }
+
+        PiecewiseConstantFunction {
+            constants,
+            right_interval_edges,
+            cumulative_rows,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DegreeSeqGraphCompressed {
     pub edge_set_to_endpoints: HashMap<AltKey, HashMap<String, CompressedDegreeSeq>>,
@@ -110,38 +200,41 @@ impl DegreeSeqGraphCompressed {
         target_node: &str,
     ) -> PiecewiseConstantFunction {
         if let Some(endpoints) = self.edge_set_to_endpoints.get(path) {
-            let func = endpoints
+            endpoints
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(target_node))
-                .map(|(_, v)| v.clone())
-                .expect("not found");
-            match func {
-                CompressedDegreeSeq::SafeBound { function } => function,
-                CompressedDegreeSeq::FastCompressor {
-                    len: _,
-                    base,
-                    counts,
-                } => {
-                    let total: usize = counts.iter().map(|&c| c as usize).sum();
-                    let mut seq = Vec::with_capacity(total);
-                    for (i, &c) in counts.iter().enumerate().rev() {
-                        if c == 0 {
-                            continue;
-                        }
-                        let upper_f = base.pow(i as u32);
-                        let upper_u64 = if upper_f >= u64::MAX {
-                            u64::MAX
-                        } else {
-                            upper_f as u64
-                        };
-                        seq.extend(std::iter::repeat(upper_u64).take(c as usize));
-                    }
-                    PiecewiseConstantFunction::from_degree_sequence(seq.as_slice(), 0.01, true)
-                        .unwrap()
-                }
-            }
+                .map(|(_, v)| v.to_pcf())
+                .expect("not found")
         } else {
             PiecewiseConstantFunction::empty()
+        }
+    }
+
+    /// Incrementally rebuild only the dirty `(AltKey, label)` entries
+    /// from the given `Statistic`, instead of full reconstruction.
+    pub fn update_dirty(
+        &mut self,
+        statistic: &super::Statistic,
+        dirty_keys: &std::collections::HashSet<(AltKey, String)>,
+    ) {
+        for (altkey, label) in dirty_keys {
+            if let Some(block) = statistic
+                .label_path_statistic
+                .get(label)
+                .and_then(|ls| ls.path_statistic.get(altkey))
+            {
+                if let Ok(Some(seq)) = block.get_compressed_degree_seq() {
+                    self.edge_set_to_endpoints
+                        .entry(altkey.clone())
+                        .or_default()
+                        .insert(label.clone(), seq);
+                } else {
+                    // Empty — remove entry.
+                    if let Some(map) = self.edge_set_to_endpoints.get_mut(altkey) {
+                        map.remove(label);
+                    }
+                }
+            }
         }
     }
 

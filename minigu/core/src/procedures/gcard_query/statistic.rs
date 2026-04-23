@@ -202,6 +202,19 @@ impl Statistic {
         }
     }
 
+    /// Return all `(AltKey, label)` pairs that contain `vertex_id`.
+    pub fn keys_for_vertex(&self, vertex_id: VertexId) -> Vec<(AltKey, String)> {
+        let mut keys = Vec::new();
+        for (label, ls) in &self.label_path_statistic {
+            if ls.vertex_ids.binary_search(&vertex_id).is_ok() {
+                for alt_key in ls.path_statistic.keys() {
+                    keys.push((alt_key.clone(), label.clone()));
+                }
+            }
+        }
+        keys
+    }
+
     pub fn serialized_size(&self) -> usize {
         let mut total = LEN_U64; // label count
         for (_label_id, ls) in &self.label_path_statistic {

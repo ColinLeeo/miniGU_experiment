@@ -1,20 +1,12 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use dashmap::DashMap;
-use minigu_catalog::provider::{GraphTypeProvider, PropertiesProvider};
-use minigu_common::types::{EdgeId, LabelId, VertexId};
+use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
-use minigu_context::graph::GraphContainer;
-use minigu_storage::common::model::edge::Edge;
-use minigu_storage::common::model::vertex::Vertex;
-use minigu_storage::tp::MemoryGraph;
-use minigu_storage::tp::transaction::{IsolationLevel, MemTransaction};
-use minigu_transaction::Transaction;
-use minigu_transaction::manager::GraphTxnManager;
 use rayon::prelude::*;
 
-use crate::procedures::gcard_query::PredicateApplyType;
 use crate::procedures::gcard_query::PredicateApplyType::INNER;
 use crate::procedures::gcard_query::abs_graph::AbstractGraph;
 use crate::procedures::gcard_query::catalog::{DegreeSeqGraphCompressed, make_alt_key};
@@ -26,6 +18,10 @@ use crate::procedures::gcard_query::types::{
     AbstractEdge, CandidateTree, ComparisonOp, PredicateDef, PredicateId, PredicateLocation,
 };
 use crate::procedures::gcard_query::union_find::UnionFind;
+use crate::procedures::gcard_query::{
+    BUILD_ABSTRACT_EDGE_NANOS, BUILD_CYCLE_CHECK_NANOS, BUILD_PCF_LOOKUP_NANOS,
+    BUILD_PIVOT_PATH_NANOS, BUILD_SCORE_TREE_NANOS, PredicateApplyType,
+};
 
 #[derive(Debug, Clone)]
 pub struct QueryEdge {
@@ -467,95 +463,6 @@ impl QueryGraph {
         result
     }
 
-    pub fn build_abstract_graph(
-        &self,
-        k: usize,
-        tree_num: usize,
-        degree_seq_graph: &DegreeSeqGraphCompressed,
-        graph_container: Option<&GraphContainer>,
-        sample_size: usize,
-        predicate_apply_type: &PredicateApplyType,
-    ) -> GCardResult<Vec<(AbstractGraph, u32)>> {
-        // Cache selectivity by (path_pattern, predicates) to avoid redundant sampling
-        let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
-        // Cache sampled vertex IDs by label to avoid repeated full-table scans
-        let vertex_sample_cache: Arc<DashMap<LabelId, Vec<VertexId>>> = Arc::new(DashMap::new());
-        // Cache predicate results: (predicate_id, vertex/edge id) → bool
-        let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());
-
-        // Pre-extract mem + txn once for all wander join walks (Snapshot: no read-set overhead)
-        let shared_txn = graph_container
-            .map(
-                |gc| -> GCardResult<(Arc<MemoryGraph>, Arc<MemTransaction>)> {
-                    let mem = match gc.graph_storage() {
-                        minigu_context::graph::GraphStorage::Memory(m) => Arc::clone(m),
-                    };
-                    let txn = GraphTxnManager::begin_transaction(
-                        mem.txn_manager(),
-                        IsolationLevel::Snapshot,
-                    )
-                    .map_err(|e| {
-                        GCardError::InvalidState(format!("Failed to begin transaction: {:?}", e))
-                    })?;
-                    Ok((mem, txn))
-                },
-            )
-            .transpose()?;
-
-        if !self.has_cycle() {
-            let abstract_graph = self.build_abstract_graph_from_query_graph(
-                self,
-                k,
-                degree_seq_graph,
-                graph_container,
-                sample_size,
-                predicate_apply_type,
-                &selectivity_cache,
-                &vertex_sample_cache,
-                &pred_cache,
-                &shared_txn,
-            )?;
-            return Ok(vec![(abstract_graph, 0)]);
-        }
-
-        let scores = self.score_edges(k);
-
-        let num_trees = tree_num.max(1);
-        let trees_with_scores = self.build_k_best_trees(&scores, num_trees);
-
-        let results: Vec<GCardResult<(AbstractGraph, u32)>> = trees_with_scores
-            .par_iter()
-            .map(|(tree, tree_score)| {
-                self.build_abstract_graph_from_query_graph(
-                    tree,
-                    k,
-                    degree_seq_graph,
-                    graph_container,
-                    sample_size,
-                    predicate_apply_type,
-                    &selectivity_cache,
-                    &vertex_sample_cache,
-                    &pred_cache,
-                    &shared_txn,
-                )
-                .map(|ag| (ag, *tree_score))
-            })
-            .collect();
-
-        // Commit the shared transaction after all walks are done
-        if let Some((_, txn)) = shared_txn {
-            txn.commit().map_err(|e| {
-                GCardError::InvalidState(format!("Failed to commit transaction: {:?}", e))
-            })?;
-        }
-
-        let mut abstract_graphs = Vec::new();
-        for r in results {
-            abstract_graphs.push(r?);
-        }
-        Ok(abstract_graphs)
-    }
-
     fn has_cycle(&self) -> bool {
         let mut uf = UnionFind::new();
 
@@ -568,191 +475,6 @@ impl QueryGraph {
         }
 
         false
-    }
-
-    fn build_abstract_graph_from_query_graph(
-        &self,
-        query_graph: &QueryGraph,
-        k: usize,
-        degree_seq_graph: &DegreeSeqGraphCompressed,
-        graph_container: Option<&GraphContainer>,
-        sample_size: usize,
-        predicate_apply_type: &PredicateApplyType,
-        selectivity_cache: &Arc<DashMap<String, f64>>,
-        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
-        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        shared_txn: &Option<(Arc<MemoryGraph>, Arc<MemTransaction>)>,
-    ) -> GCardResult<AbstractGraph> {
-        let pivot_nodes = query_graph.find_pivot_nodes();
-
-        let paths = query_graph.find_paths_from_pivots(&pivot_nodes);
-
-        // Collect all abstract edges first
-        let mut all_abstract_edges: Vec<AbstractEdge> = Vec::new();
-        for path in paths {
-            let abstract_edges = query_graph.build_abstract_edges_for_path(&path, k)?;
-            all_abstract_edges.extend(abstract_edges);
-        }
-
-        // Fill PCFs in parallel across all abstract edges
-        let results: Vec<GCardResult<AbstractEdge>> = all_abstract_edges
-            .into_par_iter()
-            .map(|mut abstract_edge| {
-                self.fill_pcf_for_abstract_edge(
-                    &mut abstract_edge,
-                    degree_seq_graph,
-                    graph_container,
-                    sample_size,
-                    predicate_apply_type,
-                    selectivity_cache,
-                    vertex_sample_cache,
-                    pred_cache,
-                    shared_txn,
-                )?;
-                Ok(abstract_edge)
-            })
-            .collect();
-
-        // Build abstract graph sequentially
-        let mut abstract_graph = AbstractGraph::new();
-        let mut next_edge_id: EdgeId = 1;
-        for result in results {
-            let abstract_edge = result?;
-            let src_vertex = self.get_vertex(abstract_edge.src).unwrap();
-            let dst_vertex = self.get_vertex(abstract_edge.dst).unwrap();
-            if abstract_graph.get_vertex(abstract_edge.src).is_none() {
-                abstract_graph.add_vertex(src_vertex.clone());
-            }
-            if abstract_graph.get_vertex(abstract_edge.dst).is_none() {
-                abstract_graph.add_vertex(dst_vertex.clone());
-            }
-            abstract_graph.add_edge(next_edge_id, abstract_edge);
-            next_edge_id += 1;
-        }
-
-        Ok(abstract_graph)
-    }
-
-    fn fill_pcf_for_abstract_edge(
-        &self,
-        abstract_edge: &mut AbstractEdge,
-        degree_seq_graph: &DegreeSeqGraphCompressed,
-        graph_container: Option<&GraphContainer>,
-        sample_size: usize,
-        predicate_apply_type: &PredicateApplyType,
-        selectivity_cache: &Arc<DashMap<String, f64>>,
-        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
-        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        shared_txn: &Option<(Arc<MemoryGraph>, Arc<MemTransaction>)>,
-    ) -> GCardResult<()> {
-        let mut node_labels = Vec::new();
-        for &vertex_id in &abstract_edge.path_vertices {
-            if let Some(vertex) = self.inner.vertices.get(&vertex_id) {
-                node_labels.push(vertex.label.clone());
-            } else {
-                return Err(GCardError::VertexNotFound(format!(
-                    "Vertex {} not found",
-                    vertex_id
-                )));
-            }
-        }
-
-        let mut edge_labels = Vec::new();
-        for &edge_id in &abstract_edge.original_edge_ids {
-            if let Some(edge) = self.inner.edges.get(&edge_id) {
-                edge_labels.push(edge.label.clone());
-            } else {
-                return Err(GCardError::EdgeNotFound(format!(
-                    "Edge {} not found",
-                    edge_id
-                )));
-            }
-        }
-
-        let alt_key = make_alt_key(&node_labels, &edge_labels);
-
-        let src_label = self
-            .inner
-            .vertices
-            .get(&abstract_edge.src)
-            .ok_or_else(|| {
-                GCardError::VertexNotFound(format!("Source vertex {} not found", abstract_edge.src))
-            })?
-            .label
-            .clone();
-
-        let dst_label = self
-            .inner
-            .vertices
-            .get(&abstract_edge.dst)
-            .ok_or_else(|| {
-                GCardError::VertexNotFound(format!(
-                    "Destination vertex {} not found",
-                    abstract_edge.dst
-                ))
-            })?
-            .label
-            .clone();
-
-        let mut src_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &src_label);
-        let mut dst_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &dst_label);
-        let mut output = String::new();
-        for i in 0..node_labels.len() {
-            output.push_str(&format!("{} -> ", node_labels[i]));
-            if i < edge_labels.len() {
-                output.push_str(&format!("{} ->", edge_labels[i]));
-            }
-        }
-        abstract_edge.path_str = output;
-        if let Some((mem, txn)) = shared_txn {
-            let graph_type = graph_container.unwrap().graph_type();
-            let selectivity = if !abstract_edge.predicates.is_empty()
-                && matches!(predicate_apply_type, PredicateApplyType::INNER)
-            {
-                // Build cache key from path pattern + predicates
-                let cache_key =
-                    Self::build_selectivity_cache_key(&alt_key, &abstract_edge.predicates);
-                if let Some(cached) = selectivity_cache.get(&cache_key) {
-                    *cached
-                } else {
-                    crate::procedures::gcard_query::SAMPLING_CALLS
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let t0 = std::time::Instant::now();
-                    let sel = self.compute_selectivity_with_predicates(
-                        mem,
-                        txn,
-                        graph_type.as_ref(),
-                        abstract_edge,
-                        sample_size,
-                        vertex_sample_cache,
-                        pred_cache,
-                    )?;
-                    crate::procedures::gcard_query::SAMPLING_NANOS.fetch_add(
-                        t0.elapsed().as_nanos() as u64,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                    selectivity_cache.insert(cache_key, sel);
-                    sel
-                }
-            } else {
-                1.0f64
-            };
-
-            abstract_edge.selectivity = selectivity;
-
-            match predicate_apply_type {
-                INNER => {
-                    src_pcf_func = src_pcf_func.truncate_by_ratio(selectivity);
-                    dst_pcf_func = dst_pcf_func.truncate_by_ratio(selectivity);
-                }
-                _ => {}
-            }
-        }
-
-        abstract_edge.src_pcf = Arc::new(src_pcf_func);
-        abstract_edge.dst_pcf = Arc::new(dst_pcf_func);
-
-        Ok(())
     }
 
     fn build_selectivity_cache_key(
@@ -778,273 +500,6 @@ impl QueryGraph {
             );
         }
         key
-    }
-
-    fn compute_selectivity_with_predicates(
-        &self,
-        mem: &Arc<MemoryGraph>,
-        txn: &Arc<MemTransaction>,
-        graph_type: &dyn GraphTypeProvider,
-        abstract_edge: &AbstractEdge,
-        sample_size: usize,
-        vertex_sample_cache: &Arc<DashMap<LabelId, Vec<VertexId>>>,
-        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-    ) -> GCardResult<f64> {
-        let path_query = self.build_path_query(abstract_edge)?;
-
-        let src_label = self
-            .inner
-            .vertices
-            .get(&abstract_edge.src)
-            .ok_or_else(|| {
-                GCardError::VertexNotFound(format!("Source vertex {} not found", abstract_edge.src))
-            })?
-            .label
-            .clone();
-
-        let src_label_id = GraphTypeProvider::get_label_id(graph_type, &src_label)
-            .map_err(|e| {
-                GCardError::InvalidData(format!(
-                    "Failed to get label_id for {}: {:?}",
-                    src_label, e
-                ))
-            })?
-            .ok_or_else(|| {
-                GCardError::InvalidData(format!("Label {} not found in graph type", src_label))
-            })?;
-
-        // Pre-compile the path query: resolve all label IDs and property indices once
-        let compiled = CompiledPathQuery::compile(&path_query, graph_type)?;
-
-        // Use cached sampled vertices for this label, or build cache on first access.
-        // Uses raw_vertex_ids_by_label (per-label index, no MVCC) instead of full-table scan.
-        let sampled_starts = if let Some(cached) = vertex_sample_cache.get(&src_label_id) {
-            cached.clone()
-        } else {
-            use rand::seq::SliceRandom;
-            let mut all_vids = txn.raw_vertex_ids_by_label(src_label_id);
-            let mut rng = rand::thread_rng();
-            if all_vids.len() > sample_size {
-                all_vids.partial_shuffle(&mut rng, sample_size);
-                all_vids.truncate(sample_size);
-            }
-            vertex_sample_cache.insert(src_label_id, all_vids.clone());
-            all_vids
-        };
-
-        if sampled_starts.is_empty() {
-            return Ok(0.0);
-        }
-
-        const PILOT_WALKS: usize = 5;
-        const MAX_WALKS: usize = 50;
-        const CV_THRESHOLD: f64 = 0.3;
-        // When structural variance is extremely high (power-law degree distributions on
-        // multi-hop paths), extra walks cannot reduce per-vertex estimation error.
-        // Beyond this bound, rely on more distinct start vertices rather than more walks
-        // per vertex.
-        const CV_UPPER_BOUND: f64 = 3.0;
-        // Each batch is processed in parallel; convergence is checked between batches.
-        // Smaller batches allow earlier CI convergence exit. With sample_size=500,
-        // BATCH_SIZE=128 gives ~4 batches so the check triggers after ~300 successes.
-        const BATCH_SIZE: usize = 128;
-
-        // Convergence parameters.
-        let struct_count_min: usize = 300;
-        let struct_count_max: usize = 4_000;
-        let rel_eps: f64 = 0.10;
-        let z_95: f64 = 1.96;
-        let eps0: f64 = 1e-12;
-
-        let mut struct_success_sample_count: usize = 0;
-        let mut sum_struct_weight: f64 = 0.0;
-        let mut sum_pred_weight: f64 = 0.0;
-        let mut sum_struct_weight_sq: f64 = 0.0;
-        let mut sum_pred_weight_sq: f64 = 0.0;
-        let mut sum_cross_weight: f64 = 0.0;
-        let mut total_vertices_visited: usize = 0;
-        let mut converged = false;
-
-        // Process vertices in parallel batches. Each batch element gets its own per-thread
-        // state (rng, buffers, local pred cache). This allows Rayon work-stealing to schedule
-        // both inner (vertex-level) and outer (abstract-edge-level) tasks concurrently.
-        for batch in sampled_starts.chunks(BATCH_SIZE) {
-            let batch_results: Vec<(Option<(f64, f64)>, WalkProf)> = batch
-                .par_iter()
-                .map(|&start_vid| {
-                    use rand::Rng;
-                    let mut rng = rand::thread_rng();
-                    let mut nbr_cache: HashMap<(VertexId, LabelId, bool), Vec<VertexId>> =
-                        HashMap::new();
-                    let mut nbr_eid_cache: HashMap<
-                        (VertexId, LabelId, bool),
-                        Vec<(VertexId, EdgeId)>,
-                    > = HashMap::new();
-                    let mut prof = WalkProf::default();
-                    // Thread-local predicate cache; flushed to shared DashMap when done.
-                    let mut local_cache: HashMap<(u32, u64), bool> = HashMap::new();
-
-                    let mut walk_struct: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
-                    let mut walk_pred: Vec<f64> = Vec::with_capacity(PILOT_WALKS);
-
-                    // Pilot walks to estimate variance.
-                    for _ in 0..PILOT_WALKS {
-                        prof.walk_count += 1;
-                        let r = self.execute_compiled_walk(
-                            mem,
-                            txn,
-                            &compiled,
-                            start_vid,
-                            &mut rng,
-                            &mut nbr_cache,
-                            &mut nbr_eid_cache,
-                            &mut prof,
-                            &mut local_cache,
-                        );
-                        let (sw, pw) = match r {
-                            Ok(v) => v,
-                            Err(_) => {
-                                Self::flush_local_cache(&local_cache, pred_cache);
-                                return (None, prof);
-                            }
-                        };
-                        // Include dead-end walks (sw=0) in the average instead of
-                        // discarding the start vertex. Early exit biases the estimator
-                        // when some paths are structurally valid but others are not.
-                        walk_struct.push(sw);
-                        walk_pred.push(pw);
-                    }
-
-                    // Adaptive extra walks when coefficient of variation is in a useful range.
-                    // CV < CV_THRESHOLD: pilot walks are already sufficient.
-                    // CV > CV_UPPER_BOUND: structural variance dominates; extra walks per vertex
-                    //   cannot reduce the error — use more source vertices instead.
-                    let pilot_mean = walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
-                    // If ALL pilot walks were structural dead ends, skip this vertex.
-                    if pilot_mean == 0.0 {
-                        Self::flush_local_cache(&local_cache, pred_cache);
-                        return (None, prof);
-                    }
-                    if pilot_mean > 0.0 {
-                        let variance = walk_struct
-                            .iter()
-                            .map(|&w| (w - pilot_mean) * (w - pilot_mean))
-                            .sum::<f64>()
-                            / (walk_struct.len() as f64 - 1.0).max(1.0);
-                        let cv = variance.sqrt() / pilot_mean;
-                        if cv > CV_THRESHOLD && cv <= CV_UPPER_BOUND {
-                            for _ in 0..(MAX_WALKS - PILOT_WALKS) {
-                                prof.walk_count += 1;
-                                let r = self.execute_compiled_walk(
-                                    mem,
-                                    txn,
-                                    &compiled,
-                                    start_vid,
-                                    &mut rng,
-                                    &mut nbr_cache,
-                                    &mut nbr_eid_cache,
-                                    &mut prof,
-                                    &mut local_cache,
-                                );
-                                let (sw, pw) = match r {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        Self::flush_local_cache(&local_cache, pred_cache);
-                                        return (None, prof);
-                                    }
-                                };
-                                walk_struct.push(sw);
-                                walk_pred.push(pw);
-                            }
-                        }
-                    }
-
-                    Self::flush_local_cache(&local_cache, pred_cache);
-
-                    let total_walks = walk_struct.len() as f64;
-                    let struct_weight = walk_struct.iter().sum::<f64>() / total_walks;
-                    let pred_weight = walk_pred.iter().sum::<f64>() / total_walks;
-                    let result = if struct_weight > 0.0 {
-                        Some((struct_weight, pred_weight))
-                    } else {
-                        None
-                    };
-                    (result, prof)
-                })
-                .collect();
-
-            // Flush per-thread profiling to global counters.
-            total_vertices_visited += batch_results.len();
-            for (_, prof) in &batch_results {
-                crate::procedures::gcard_query::SAMPLING_TOTAL_WALKS
-                    .fetch_add(prof.walk_count, std::sync::atomic::Ordering::Relaxed);
-                crate::procedures::gcard_query::SAMPLING_NBR_NANOS
-                    .fetch_add(prof.nbr_nanos, std::sync::atomic::Ordering::Relaxed);
-                crate::procedures::gcard_query::SAMPLING_PROP_NANOS
-                    .fetch_add(prof.prop_nanos, std::sync::atomic::Ordering::Relaxed);
-            }
-
-            // Accumulate batch results and check hard cap.
-            for (result, _) in &batch_results {
-                let &Some((struct_weight, pred_weight)) = result else {
-                    continue;
-                };
-                struct_success_sample_count += 1;
-                sum_struct_weight += struct_weight;
-                sum_pred_weight += pred_weight;
-                sum_struct_weight_sq += struct_weight * struct_weight;
-                sum_pred_weight_sq += pred_weight * pred_weight;
-                sum_cross_weight += struct_weight * pred_weight;
-
-                if struct_success_sample_count >= struct_count_max {
-                    converged = true;
-                    break;
-                }
-            }
-
-            if converged {
-                break;
-            }
-
-            // Delta-method CI convergence check after each batch.
-            if struct_success_sample_count >= struct_count_min {
-                let k = struct_success_sample_count as f64;
-                let mean_struct = sum_struct_weight / k;
-                let mean_pred = sum_pred_weight / k;
-                let denom = k - 1.0;
-                if denom > 0.0 && mean_struct.abs() > eps0 {
-                    let selectivity_est = mean_pred / mean_struct;
-                    let var_pred = (sum_pred_weight_sq - k * mean_pred * mean_pred) / denom;
-                    let var_struct = (sum_struct_weight_sq - k * mean_struct * mean_struct) / denom;
-                    let cov = (sum_cross_weight - k * mean_pred * mean_struct) / denom;
-                    let mu_x = mean_pred;
-                    let mu_y = mean_struct;
-                    let se_sq = (var_pred / (mu_y * mu_y)
-                        + mu_x * mu_x * var_struct / mu_y.powi(4)
-                        - 2.0 * mu_x * cov / mu_y.powi(3))
-                        / k;
-                    if se_sq.is_finite() && se_sq >= 0.0 {
-                        let ci_half = z_95 * se_sq.sqrt();
-                        if ci_half / selectivity_est.abs().max(eps0) <= rel_eps {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED.fetch_add(
-            total_vertices_visited as u64,
-            std::sync::atomic::Ordering::Relaxed,
-        );
-
-        let selectivity = if sum_struct_weight > 0.0 {
-            sum_pred_weight / sum_struct_weight
-        } else {
-            0.0
-        };
-
-        Ok(selectivity)
     }
 
     fn build_path_query(&self, abstract_edge: &AbstractEdge) -> GCardResult<PathQuery> {
@@ -1119,227 +574,6 @@ impl QueryGraph {
         for (&k, &v) in local {
             shared.entry(k).or_insert(v);
         }
-    }
-
-    /// Optimized WanderJoin walk using pre-compiled path query.
-    ///
-    /// All label IDs and property indices are resolved once in `CompiledPathQuery`,
-    /// so each walk only does DashMap lookups and adjacency iteration.
-    ///
-    /// - Uses `get_vertex_label_id` (no property clone) for label checks
-    /// - Only calls `get_vertex` when predicates actually need evaluation
-    /// - Reuses the caller's `rng` instead of creating one per walk
-    /// - Reuses caller-provided buffers to avoid per-step Vec allocation
-    fn execute_compiled_walk(
-        &self,
-        mem: &Arc<MemoryGraph>,
-        txn: &Arc<MemTransaction>,
-        compiled: &CompiledPathQuery,
-        start_vertex: VertexId,
-        rng: &mut impl rand::Rng,
-        nbr_cache: &mut HashMap<(VertexId, LabelId, bool), Vec<VertexId>>,
-        nbr_eid_cache: &mut HashMap<(VertexId, LabelId, bool), Vec<(VertexId, EdgeId)>>,
-        prof: &mut WalkProf,
-        local_pred_cache: &mut HashMap<(u32, u64), bool>,
-    ) -> GCardResult<(f64, f64)> {
-        if compiled.steps.is_empty() {
-            return Ok((1.0, 1.0));
-        }
-
-        let mut current_vid = start_vertex;
-        let mut weight: f64 = 1.0;
-        let mut pred_ok = true;
-
-        for step in &compiled.steps {
-            match step {
-                CompiledStep::Vertex {
-                    label_id: _,
-                    predicates,
-                } => {
-                    if pred_ok && !predicates.is_empty() {
-                        // Check each predicate, using cache when predicate_id is available
-                        let mut all_pass = true;
-                        let mut need_lookup = false;
-                        // First pass: check local cache for all predicates
-                        for rp in predicates {
-                            if let Some(pid) = rp.predicate_id {
-                                if let Some(&cached) = local_pred_cache.get(&(pid, current_vid)) {
-                                    if !cached {
-                                        all_pass = false;
-                                        break;
-                                    }
-                                } else {
-                                    need_lookup = true;
-                                }
-                            } else {
-                                need_lookup = true;
-                            }
-                        }
-                        if all_pass && !need_lookup {
-                            // All predicates cached and passed
-                        } else if !all_pass {
-                            pred_ok = false;
-                        } else {
-                            let t0 = std::time::Instant::now();
-                            let check = mem.with_raw_vertex_props(current_vid, |props| {
-                                for rp in predicates {
-                                    // Skip if already cached as true
-                                    if let Some(pid) = rp.predicate_id {
-                                        if let Some(&cached) =
-                                            local_pred_cache.get(&(pid, current_vid))
-                                        {
-                                            if !cached {
-                                                return Ok(false);
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                    let pass = match props.get(rp.prop_index) {
-                                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
-                                        None => false,
-                                    };
-                                    if let Some(pid) = rp.predicate_id {
-                                        local_pred_cache.insert((pid, current_vid), pass);
-                                    }
-                                    if !pass {
-                                        return Ok(false);
-                                    }
-                                }
-                                Ok(true)
-                            });
-                            prof.prop_nanos += t0.elapsed().as_nanos() as u64;
-                            match check {
-                                None => return Ok((0.0, 0.0)),
-                                Some(Ok(false)) => {
-                                    pred_ok = false;
-                                }
-                                Some(Ok(true)) => {}
-                                Some(Err(e)) => return Err(e),
-                            }
-                        }
-                    }
-                }
-                CompiledStep::Edge {
-                    label_id,
-                    direction,
-                    predicates,
-                } => {
-                    let edge_label_id = *label_id;
-                    let outgoing = matches!(direction, EdgeDirection::Outgoing);
-
-                    let has_edge_predicates = pred_ok && !predicates.is_empty();
-
-                    if has_edge_predicates {
-                        let cache_key = (current_vid, edge_label_id, outgoing);
-                        if !nbr_eid_cache.contains_key(&cache_key) {
-                            let t0 = std::time::Instant::now();
-                            let mut buf = Vec::new();
-                            txn.raw_neighbors_with_eid_by_edge_into(
-                                current_vid,
-                                edge_label_id,
-                                outgoing,
-                                &mut buf,
-                            );
-                            prof.nbr_nanos += t0.elapsed().as_nanos() as u64;
-                            nbr_eid_cache.insert(cache_key, buf);
-                        }
-                        let nbr_eid_buf = &nbr_eid_cache[&cache_key];
-                        let degree = nbr_eid_buf.len();
-                        if degree == 0 {
-                            return Ok((0.0, 0.0));
-                        }
-                        let idx = rng.gen_range(0..degree);
-                        let (chosen_neighbor_id, chosen_eid) = nbr_eid_buf[idx];
-                        weight *= degree as f64;
-                        current_vid = chosen_neighbor_id;
-
-                        // Check edge predicates with local cache
-                        let mut edge_all_pass = true;
-                        let mut edge_need_lookup = false;
-                        for rp in predicates {
-                            if let Some(pid) = rp.predicate_id {
-                                if let Some(&cached) = local_pred_cache.get(&(pid, chosen_eid)) {
-                                    if !cached {
-                                        edge_all_pass = false;
-                                        break;
-                                    }
-                                } else {
-                                    edge_need_lookup = true;
-                                }
-                            } else {
-                                edge_need_lookup = true;
-                            }
-                        }
-                        if edge_all_pass && !edge_need_lookup {
-                            // All edge predicates cached and passed
-                        } else if !edge_all_pass {
-                            pred_ok = false;
-                        } else {
-                            let t0 = std::time::Instant::now();
-                            let check = mem.with_raw_edge_props(chosen_eid, |props| {
-                                for rp in predicates {
-                                    if let Some(pid) = rp.predicate_id {
-                                        if let Some(&cached) =
-                                            local_pred_cache.get(&(pid, chosen_eid))
-                                        {
-                                            if !cached {
-                                                return Ok(false);
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                    let pass = match props.get(rp.prop_index) {
-                                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
-                                        None => false,
-                                    };
-                                    if let Some(pid) = rp.predicate_id {
-                                        local_pred_cache.insert((pid, chosen_eid), pass);
-                                    }
-                                    if !pass {
-                                        return Ok(false);
-                                    }
-                                }
-                                Ok(true)
-                            });
-                            prof.prop_nanos += t0.elapsed().as_nanos() as u64;
-                            match check {
-                                None | Some(Ok(false)) => {
-                                    pred_ok = false;
-                                }
-                                Some(Ok(true)) => {}
-                                Some(Err(e)) => return Err(e),
-                            }
-                        }
-                    } else {
-                        let cache_key = (current_vid, edge_label_id, outgoing);
-                        if !nbr_cache.contains_key(&cache_key) {
-                            let t0 = std::time::Instant::now();
-                            let mut buf = Vec::new();
-                            txn.raw_neighbors_by_edge_into(
-                                current_vid,
-                                edge_label_id,
-                                outgoing,
-                                &mut buf,
-                            );
-                            prof.nbr_nanos += t0.elapsed().as_nanos() as u64;
-                            nbr_cache.insert(cache_key, buf);
-                        }
-                        let nbr_buf = &nbr_cache[&cache_key];
-                        let degree = nbr_buf.len();
-                        if degree == 0 {
-                            return Ok((0.0, 0.0));
-                        }
-                        let idx = rng.gen_range(0..degree);
-                        weight *= degree as f64;
-                        current_vid = nbr_buf[idx];
-                    }
-                }
-            }
-        }
-
-        let struct_weight = weight;
-        let pred_weight = if pred_ok { weight } else { 0.0 };
-        Ok((struct_weight, pred_weight))
     }
 
     fn compare_values(
@@ -1480,162 +714,6 @@ struct ResolvedPredicate {
     prop_index: usize,
     op: ComparisonOp,
     value: ScalarValue,
-}
-
-/// Pre-compiled path step with label IDs already resolved.
-#[derive(Clone)]
-enum CompiledStep {
-    Vertex {
-        label_id: LabelId,
-        predicates: Vec<ResolvedPredicate>,
-    },
-    Edge {
-        label_id: LabelId,
-        direction: EdgeDirection,
-        predicates: Vec<ResolvedPredicate>,
-    },
-}
-
-/// A fully compiled path query with all label IDs and property indices pre-resolved.
-struct CompiledPathQuery {
-    steps: Vec<CompiledStep>,
-}
-
-impl CompiledPathQuery {
-    fn compile(path_query: &PathQuery, graph_type: &dyn GraphTypeProvider) -> GCardResult<Self> {
-        let mut steps = Vec::with_capacity(path_query.path_elements.len());
-
-        for element in &path_query.path_elements {
-            match element {
-                PathElement::Vertex { label, position } => {
-                    let label_id = graph_type
-                        .get_label_id(label)
-                        .map_err(|e| {
-                            GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e))
-                        })?
-                        .ok_or_else(|| {
-                            GCardError::InvalidData(format!("Label {} not found", label))
-                        })?;
-
-                    let predicates = if let Some(preds) = path_query.vertex_predicates.get(position)
-                    {
-                        let label_set =
-                            minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
-                        let vertex_type = graph_type
-                            .get_vertex_type(&label_set)
-                            .map_err(|e| {
-                                GCardError::InvalidData(format!("get_vertex_type: {:?}", e))
-                            })?
-                            .ok_or_else(|| {
-                                GCardError::InvalidData(format!(
-                                    "Vertex type not found for {}",
-                                    label
-                                ))
-                            })?;
-
-                        preds
-                            .iter()
-                            .map(|p| {
-                                let (prop_id, _) = vertex_type
-                                    .get_property(&p.property)
-                                    .map_err(|e| {
-                                        GCardError::InvalidData(format!(
-                                            "get_property {}: {:?}",
-                                            p.property, e
-                                        ))
-                                    })?
-                                    .ok_or_else(|| {
-                                        GCardError::InvalidData(format!(
-                                            "Property {} not found",
-                                            p.property
-                                        ))
-                                    })?;
-                                Ok(ResolvedPredicate {
-                                    predicate_id: p.predicate_id,
-                                    prop_index: prop_id as usize,
-                                    op: p.op.clone(),
-                                    value: p.value.clone(),
-                                })
-                            })
-                            .collect::<GCardResult<Vec<_>>>()?
-                    } else {
-                        Vec::new()
-                    };
-
-                    steps.push(CompiledStep::Vertex {
-                        label_id,
-                        predicates,
-                    });
-                }
-                PathElement::Edge {
-                    label,
-                    position,
-                    direction,
-                } => {
-                    let label_id = graph_type
-                        .get_label_id(label)
-                        .map_err(|e| {
-                            GCardError::InvalidData(format!("get_label_id {}: {:?}", label, e))
-                        })?
-                        .ok_or_else(|| {
-                            GCardError::InvalidData(format!("Label {} not found", label))
-                        })?;
-
-                    let predicates = if let Some(preds) = path_query.edge_predicates.get(position) {
-                        let label_set =
-                            minigu_catalog::label_set::LabelSet::from_iter(vec![label_id]);
-                        let edge_type = graph_type
-                            .get_edge_type(&label_set)
-                            .map_err(|e| {
-                                GCardError::InvalidData(format!("get_edge_type: {:?}", e))
-                            })?
-                            .ok_or_else(|| {
-                                GCardError::InvalidData(format!(
-                                    "Edge type not found for {}",
-                                    label
-                                ))
-                            })?;
-
-                        preds
-                            .iter()
-                            .map(|p| {
-                                let (prop_id, _) = edge_type
-                                    .get_property(&p.property)
-                                    .map_err(|e| {
-                                        GCardError::InvalidData(format!(
-                                            "get_property {}: {:?}",
-                                            p.property, e
-                                        ))
-                                    })?
-                                    .ok_or_else(|| {
-                                        GCardError::InvalidData(format!(
-                                            "Property {} not found",
-                                            p.property
-                                        ))
-                                    })?;
-                                Ok(ResolvedPredicate {
-                                    predicate_id: p.predicate_id,
-                                    prop_index: prop_id as usize,
-                                    op: p.op.clone(),
-                                    value: p.value.clone(),
-                                })
-                            })
-                            .collect::<GCardResult<Vec<_>>>()?
-                    } else {
-                        Vec::new()
-                    };
-
-                    steps.push(CompiledStep::Edge {
-                        label_id,
-                        direction: direction.clone(),
-                        predicates,
-                    });
-                }
-            }
-        }
-
-        Ok(CompiledPathQuery { steps })
-    }
 }
 
 impl QueryGraph {
@@ -2195,7 +1273,11 @@ impl QueryGraph {
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
         let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());
 
-        if !self.has_cycle() {
+        let t_cycle = std::time::Instant::now();
+        let has_cycle = self.has_cycle();
+        BUILD_CYCLE_CHECK_NANOS.fetch_add(t_cycle.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        if !has_cycle {
             let abstract_graph = self.build_abstract_graph_from_query_graph_flat(
                 self,
                 k,
@@ -2211,8 +1293,10 @@ impl QueryGraph {
         }
 
         // ── Cycle case: enumerate spanning trees ──────────────────────────────
+        let t_tree = std::time::Instant::now();
         let scores = self.score_edges(k);
         let trees_with_scores = self.build_k_best_trees(&scores, tree_num.max(1));
+        BUILD_SCORE_TREE_NANOS.fetch_add(t_tree.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let results: Vec<GCardResult<(AbstractGraph, u32)>> = trees_with_scores
             .par_iter()
@@ -2253,14 +1337,18 @@ impl QueryGraph {
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
     ) -> GCardResult<AbstractGraph> {
+        let t_pivot = std::time::Instant::now();
         let pivot_nodes = query_graph.find_pivot_nodes();
         let paths = query_graph.find_paths_from_pivots(&pivot_nodes);
+        BUILD_PIVOT_PATH_NANOS.fetch_add(t_pivot.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
+        let t_ae = std::time::Instant::now();
         let mut all_abstract_edges: Vec<AbstractEdge> = Vec::new();
         for path in paths {
             let abstract_edges = query_graph.build_abstract_edges_for_path(&path, k)?;
             all_abstract_edges.extend(abstract_edges);
         }
+        BUILD_ABSTRACT_EDGE_NANOS.fetch_add(t_ae.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let results: Vec<GCardResult<AbstractEdge>> = all_abstract_edges
             .into_par_iter()
@@ -2359,8 +1447,10 @@ impl QueryGraph {
             .label
             .clone();
 
+        let t_pcf = std::time::Instant::now();
         let mut src_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &src_label);
         let mut dst_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &dst_label);
+        BUILD_PCF_LOOKUP_NANOS.fetch_add(t_pcf.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let mut output = String::new();
         for i in 0..node_labels.len() {

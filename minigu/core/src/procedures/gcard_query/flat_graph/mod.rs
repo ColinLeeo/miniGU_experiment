@@ -52,6 +52,7 @@ struct EdgeInfo {
 ///
 /// No `minigu_storage` dependency.  Thread-safe for concurrent reads once
 /// constructed (all fields are immutable except `pending`).
+#[derive(Clone)]
 pub struct FlatGraph {
     // ── Topology ──────────────────────────────────────────────────────────────
     /// label_name → sorted vertex IDs.
@@ -306,10 +307,8 @@ impl FlatGraph {
         let mut result = Vec::new();
 
         // Base CSR neighbors (filter out deleted edges and deleted vertices).
-        if let Some(csr) = self
-            .hop_csrs
-            .get(&(label.to_string(), edge_label.to_string(), outgoing))
-        {
+        let key = (label.to_string(), edge_label.to_string(), outgoing);
+        if let Some(csr) = self.hop_csrs.get(&key) {
             for &(nbr, eid) in csr.neighbors_slice(vid) {
                 if !self.pending.deleted_edge_ids.contains(&eid)
                     && !self.pending.deleted_vertices.contains(&nbr)
@@ -319,15 +318,20 @@ impl FlatGraph {
             }
         }
 
-        // Pending inserted edges.
-        for pe in &self.pending.inserted_edges {
-            if outgoing && pe.src == vid && pe.edge_label == edge_label {
-                if !self.pending.deleted_vertices.contains(&pe.dst) {
-                    result.push(pe.dst);
+        // Pending inserted edges — O(1) lookup via index instead of full scan.
+        let idx_key = (vid, edge_label.to_string());
+        if outgoing {
+            if let Some(nbrs) = self.pending.pending_out.get(&idx_key) {
+                for &dst in nbrs {
+                    if !self.pending.deleted_vertices.contains(&dst) {
+                        result.push(dst);
+                    }
                 }
-            } else if !outgoing && pe.dst == vid && pe.edge_label == edge_label {
-                if !self.pending.deleted_vertices.contains(&pe.src) {
-                    result.push(pe.src);
+            }
+        } else if let Some(nbrs) = self.pending.pending_in.get(&idx_key) {
+            for &src in nbrs {
+                if !self.pending.deleted_vertices.contains(&src) {
+                    result.push(src);
                 }
             }
         }
@@ -405,7 +409,7 @@ impl FlatGraph {
         edge_label: &str,
         props: Vec<ScalarValue>,
     ) {
-        self.pending.inserted_edges.push(PendingEdge {
+        self.pending.insert_edge(PendingEdge {
             edge_id,
             src,
             src_label: src_label.to_lowercase(),
@@ -434,6 +438,11 @@ impl FlatGraph {
 
     /// Flush all pending changes into the base CSR and property maps.
     ///
+    /// Read-only access to pending changes.
+    pub fn pending_ref(&self) -> &PendingChanges {
+        &self.pending
+    }
+
     /// Call **after** `GCardUpdateLog::compact_and_apply_flat` has finished so
     /// the statistical catalog is consistent with the new graph topology before
     /// the next query.
@@ -453,6 +462,13 @@ impl FlatGraph {
         }
 
         // ── 2. Apply vertex deletions ─────────────────────────────────────────
+        // Collect deleted vertex labels BEFORE removing from vertex_label_map.
+        let mut deleted_vertex_labels: HashSet<String> = HashSet::new();
+        for vid in &pending.deleted_vertices {
+            if let Some(label) = self.vertex_label_map.get(vid) {
+                deleted_vertex_labels.insert(label.clone());
+            }
+        }
         for vid in &pending.deleted_vertices {
             if let Some(label) = self.vertex_label_map.remove(vid) {
                 if let Some(vids) = self.vertices_by_label.get_mut(&label) {
@@ -479,17 +495,31 @@ impl FlatGraph {
                 affected.insert((info.dst_label.clone(), info.edge_label.clone(), false));
             }
         }
+        // Deleted vertices may appear as sources in CSR buckets that have no
+        // deleted edges.  Mark all buckets whose src_label matches any deleted
+        // vertex's label so they get rebuilt without stale vertex entries.
+        for (bucket_key, _) in &self.hop_csrs {
+            if deleted_vertex_labels.contains(&bucket_key.0) {
+                affected.insert(bucket_key.clone());
+            }
+        }
 
         // ── 4. Rebuild affected CSR buckets ───────────────────────────────────
         for bucket_key in &affected {
             let (src_label, edge_label, outgoing) = bucket_key;
 
             // Collect surviving edges from the existing CSR.
+            // Filter out deleted edges AND edges incident to deleted vertices.
             let mut triples: Vec<(VertexId, VertexId, EdgeId)> = Vec::new();
             if let Some(csr) = self.hop_csrs.get(bucket_key) {
                 for &src in &csr.verts {
+                    if pending.deleted_vertices.contains(&src) {
+                        continue;
+                    }
                     for &(dst, eid) in csr.neighbors_slice(src) {
-                        if !pending.deleted_edge_ids.contains(&eid) {
+                        if !pending.deleted_edge_ids.contains(&eid)
+                            && !pending.deleted_vertices.contains(&dst)
+                        {
                             triples.push((src, dst, eid));
                         }
                     }
@@ -546,5 +576,84 @@ impl FlatGraph {
     /// Total number of edges (counts each directed edge once).
     pub fn total_edge_count(&self) -> usize {
         self.edge_info.len()
+    }
+
+    // ── Accessors for export / random_update ─────────────────────────────────
+
+    /// All edge IDs currently in the graph.
+    pub fn all_edge_ids(&self) -> impl Iterator<Item = EdgeId> + '_ {
+        self.edge_info.keys().copied()
+    }
+
+    /// Endpoint and label info for an edge, or `None` if not present.
+    pub fn edge_endpoints(&self, eid: EdgeId) -> Option<(VertexId, &str, VertexId, &str, &str)> {
+        self.edge_info.get(&eid).map(|info| {
+            (
+                info.src,
+                info.src_label.as_str(),
+                info.dst,
+                info.dst_label.as_str(),
+                info.edge_label.as_str(),
+            )
+        })
+    }
+
+    /// CSR adjacency maps: `(vertex_label, edge_label, outgoing)` → CSR.
+    pub fn hop_csrs(&self) -> &HashMap<(String, String, bool), CsrAdjWithEid> {
+        &self.hop_csrs
+    }
+
+    /// Vertex label → sorted vertex IDs map.
+    pub fn vertices_by_label_map(&self) -> &HashMap<String, Vec<VertexId>> {
+        &self.vertices_by_label
+    }
+
+    /// Edge type schema: edge_label → (src_vertex_label, dst_vertex_label).
+    pub fn edge_type_schema(&self) -> &HashMap<String, (String, String)> {
+        &self.edge_type_schema
+    }
+
+    /// Vertex property schema: label → ordered property names.
+    pub fn vertex_prop_schema(&self) -> &HashMap<String, Vec<String>> {
+        &self.vertex_prop_schema
+    }
+
+    /// Edge property schema: edge_label → ordered property names.
+    pub fn edge_prop_schema(&self) -> &HashMap<String, Vec<String>> {
+        &self.edge_prop_schema
+    }
+
+    /// All edges incident to a vertex via CSR lookup (not full scan).
+    ///
+    /// Returns `(edge_id, neighbor_id, neighbor_label, edge_label)` for each edge.
+    pub fn incident_edges(&self, vid: VertexId) -> Vec<(EdgeId, VertexId, String, String)> {
+        let label = match self.vertex_label_map.get(&vid) {
+            Some(l) => l.as_str(),
+            None => return Vec::new(),
+        };
+        let mut result = Vec::new();
+        // Scan all CSR buckets that could contain this vertex as a source.
+        for ((src_label, edge_label, outgoing), csr) in &self.hop_csrs {
+            if src_label == label {
+                for &(nbr, eid) in csr.neighbors_slice(vid) {
+                    if *outgoing {
+                        let nbr_label = self
+                            .vertex_label_map
+                            .get(&nbr)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        result.push((eid, nbr, nbr_label.to_string(), edge_label.clone()));
+                    } else {
+                        let nbr_label = self
+                            .vertex_label_map
+                            .get(&nbr)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        result.push((eid, nbr, nbr_label.to_string(), edge_label.clone()));
+                    }
+                }
+            }
+        }
+        result
     }
 }

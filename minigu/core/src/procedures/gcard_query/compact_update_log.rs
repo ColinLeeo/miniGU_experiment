@@ -4,22 +4,18 @@
 //!
 //! Returns `(pending_entries: Int64)` — the number of log entries that were compacted.
 
-use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
 use arrow::array::Int64Array;
-use minigu_catalog::provider::GraphTypeProvider;
 use minigu_common::data_chunk::DataChunk;
 use minigu_common::data_type::{DataField, DataSchema, LogicalType};
-use minigu_common::types::LabelId;
-use minigu_context::graph::{GraphContainer, GraphStorage};
+use minigu_context::graph::GraphContainer;
 use minigu_context::procedure::Procedure;
 use minigu_execution::error::ExecutionError;
-use minigu_transaction::IsolationLevel::Serializable;
-use minigu_transaction::{GraphTxnManager, Transaction};
 
 use crate::procedures::gcard_query::Statistic;
+use crate::procedures::gcard_query::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::update_log::GCardUpdateLog;
 
 // ── GCard compact + apply ─────────────────────────────────────────────────────
@@ -37,37 +33,11 @@ use crate::procedures::gcard_query::update_log::GCardUpdateLog;
 /// Returns an error if the container has no update log / statistic (run `GCard_build`
 /// first) or if a storage operation fails.
 pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()> {
-    use crate::procedures::gcard_query::update_log::GCardUpdateLog;
-
-    // ── Resolve graph storage ──────────────────────────────────────────────
-    let graph = match container.graph_storage() {
-        GraphStorage::Memory(g) => Arc::clone(g),
-    };
-
-    // ── Build label name ↔ id maps from the graph type catalog ────────────
-    let graph_type = container.graph_type();
-    let mut label_name_to_id: HashMap<String, LabelId> = HashMap::new();
-    for name in graph_type.label_names() {
-        if let Ok(Some(id)) = graph_type.get_label_id(&name) {
-            label_name_to_id.insert(name, id);
-        }
-    }
-    let label_id_to_name: HashMap<LabelId, String> = label_name_to_id
-        .iter()
-        .map(|(k, &v)| (v, k.clone()))
-        .collect();
-
-    // ── Build edge schema: edge_name → (src_label_id, dst_label_id, edge_label_id) ──
-    let edges = crate::procedures::gcard_query::utils::get_edges_from_catalog(graph_type.as_ref())?;
-    let edge_schema: HashMap<String, (LabelId, LabelId, LabelId)> = edges
-        .iter()
-        .filter_map(|(edge_name, info)| {
-            let edge_id = *label_name_to_id.get(edge_name)?;
-            let src_id = *label_name_to_id.get(&info.src_label)?;
-            let dst_id = *label_name_to_id.get(&info.dst_label)?;
-            Some((edge_name.clone(), (src_id, dst_id, edge_id)))
-        })
-        .collect();
+    // ── Resolve FlatGraph ─────────────────────────────────────────────────
+    let flat_graph_arc = container
+        .gcard_flat_graph()
+        .and_then(|arc| std::sync::Arc::downcast::<FlatGraph>(arc).ok())
+        .ok_or_else(|| anyhow::anyhow!("FlatGraph not loaded (run load_ldbc first)"))?;
 
     // ── Get update log ────────────────────────────────────────────────────
     let log_arc = container
@@ -86,32 +56,23 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         .ok_or_else(|| anyhow::anyhow!("statistic type mismatch"))?
         .clone();
 
-    // ── Open a read transaction and run compact_and_apply ─────────────────
-    let txn = graph
-        .txn_manager()
-        .begin_transaction(Serializable)
-        .map_err(|e| anyhow::anyhow!("begin_transaction: {e}"))?;
-
-    {
+    // ── Run compact_and_apply_flat ────────────────────────────────────────
+    let dirty_keys = {
         let mut guard = log_arc
             .lock()
             .map_err(|_| anyhow::anyhow!("gcard_update_log mutex poisoned"))?;
-        guard.compact_and_apply(
-            &graph,
-            &txn,
-            &edge_schema,
-            &label_id_to_name,
-            &mut statistic,
-        )?;
-    }
+        guard.compact_and_apply_flat(&flat_graph_arc, &mut statistic)?
+    };
 
-    txn.commit()
-        .map_err(|e| anyhow::anyhow!("commit transaction: {e}"))?;
-
-    // ── Write updated statistic + rebuild DegreeSeqGraphCompressed ────────
-    let new_dsgc = statistic
-        .to_degree_seq_graph_compressed()
-        .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {e}"))?;
+    // ── Incrementally rebuild DegreeSeqGraphCompressed ────────────────────
+    let dsgc_arc = container
+        .degree_seq_graph_compressed()
+        .ok_or_else(|| anyhow::anyhow!("degree_seq_graph_compressed not set"))?;
+    let mut new_dsgc = dsgc_arc
+        .downcast_ref::<super::catalog::DegreeSeqGraphCompressed>()
+        .ok_or_else(|| anyhow::anyhow!("dsgc type mismatch"))?
+        .clone();
+    new_dsgc.update_dirty(&statistic, &dirty_keys);
     container.set_statistic(Arc::new(statistic));
     container.set_degree_seq_graph_compressed(Arc::new(new_dsgc));
 

@@ -63,5 +63,13 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
             "GCard_stat_quality".to_string(),
             gcard_query::stat_quality::build_procedure(),
         ),
+        (
+            "random_update".to_string(),
+            gcard_query::random_update::build_procedure(),
+        ),
+        (
+            "random_insert".to_string(),
+            gcard_query::random_insert::build_procedure(),
+        ),
     ]
 }

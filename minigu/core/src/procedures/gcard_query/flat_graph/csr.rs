@@ -68,4 +68,21 @@ impl CsrAdjWithEid {
     pub fn edge_count(&self) -> usize {
         self.neighbors.len()
     }
+
+    /// Sorted source vertex IDs.
+    #[inline]
+    pub fn verts(&self) -> &[VertexId] {
+        &self.verts
+    }
+
+    /// CSR offsets.
+    #[inline]
+    pub fn offsets(&self) -> &[usize] {
+        &self.offsets
+    }
+
+    /// Extract only the neighbor vertex IDs (dropping edge IDs).
+    pub fn neighbors_vids(&self) -> Vec<VertexId> {
+        self.neighbors.iter().map(|&(vid, _)| vid).collect()
+    }
 }

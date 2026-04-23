@@ -20,6 +20,8 @@ mod graph;
 pub mod load_catalog;
 pub mod load_ldbc;
 mod query_graph;
+pub mod random_insert;
+pub mod random_update;
 pub mod types;
 mod union_find;
 pub mod utils;
@@ -54,6 +56,17 @@ pub(crate) static SAMPLING_VERTICES_PROCESSED: std::sync::atomic::AtomicU64 =
 pub(crate) static SAMPLING_NBR_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static SAMPLING_PROP_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+// Build phase breakdown timers
+pub(crate) static BUILD_CYCLE_CHECK_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static BUILD_SCORE_TREE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static BUILD_PIVOT_PATH_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static BUILD_ABSTRACT_EDGE_NANOS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static BUILD_PCF_LOOKUP_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 use std::convert::TryFrom;
 
@@ -157,12 +170,6 @@ pub fn build_procedure() -> Procedure {
             .map_err(|e| anyhow::anyhow!("Failed to convert max_path_length to i32: {:?}", e))?
             as usize;
 
-        if max_path_length == 0 {
-            return Err(
-                anyhow::anyhow!("max_path_length must be > 0, got {}", max_path_length).into(),
-            );
-        }
-
         let predicate_apply_type: PredicateApplyType = args[3]
             .to_u8()
             .map_err(|e| anyhow::anyhow!("Failed to convert predicate apply type to u8: {:?}", e))?
@@ -177,7 +184,7 @@ pub fn build_procedure() -> Procedure {
         let max_subgraphs = args
             .get(5)
             .and_then(|a| a.to_i32().ok())
-            .map(|n| if n <= 0 { 50 } else { n as usize })
+            .map(|n| if n <= 0 { 10 } else { n as usize })
             .unwrap_or(10);
 
         #[cfg(feature = "profiling")]
@@ -193,6 +200,11 @@ pub fn build_procedure() -> Procedure {
         SAMPLING_VERTICES_PROCESSED.store(0, Ordering::Relaxed);
         SAMPLING_NBR_NANOS.store(0, Ordering::Relaxed);
         SAMPLING_PROP_NANOS.store(0, Ordering::Relaxed);
+        BUILD_CYCLE_CHECK_NANOS.store(0, Ordering::Relaxed);
+        BUILD_SCORE_TREE_NANOS.store(0, Ordering::Relaxed);
+        BUILD_PIVOT_PATH_NANOS.store(0, Ordering::Relaxed);
+        BUILD_ABSTRACT_EDGE_NANOS.store(0, Ordering::Relaxed);
+        BUILD_PCF_LOOKUP_NANOS.store(0, Ordering::Relaxed);
 
         // Prefer FlatGraph path when available (avoids MemoryGraph / MVCC overhead).
         type FlatGraphType = crate::procedures::gcard_query::flat_graph::FlatGraph;
@@ -201,25 +213,20 @@ pub fn build_procedure() -> Procedure {
             .and_then(|arc| std::sync::Arc::downcast::<FlatGraphType>(arc).ok());
 
         let build_start = Instant::now();
-        let cardinality = match if let Some(ref fg) = flat_graph_arc {
-            query_graph.build_abstract_graph_flat(
-                max_path_length,
-                max_subgraphs,
-                &metadata,
-                Some(fg),
-                simple_size,
-                &predicate_apply_type,
-            )
-        } else {
-            query_graph.build_abstract_graph(
-                max_path_length,
-                max_subgraphs,
-                &metadata,
-                Some(container),
-                simple_size,
-                &predicate_apply_type,
-            )
-        } {
+        let flat_graph_ref = flat_graph_arc.as_deref().ok_or_else(|| {
+            ExecutionError::Custom(Box::new(io::Error::new(
+                io::ErrorKind::NotFound,
+                "FlatGraph not loaded (run load_ldbc first)",
+            )))
+        })?;
+        let cardinality = match query_graph.build_abstract_graph_flat(
+            max_path_length,
+            max_subgraphs,
+            &metadata,
+            Some(flat_graph_ref),
+            simple_size,
+            &predicate_apply_type,
+        ) {
             Ok(abstract_graphs_with_scores) => {
                 let build_elapsed = build_start.elapsed();
                 let sampling_secs = SAMPLING_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
@@ -278,6 +285,11 @@ pub fn build_procedure() -> Procedure {
                 let prof_verts = SAMPLING_VERTICES_PROCESSED.load(Ordering::Relaxed);
                 let prof_nbr_s = SAMPLING_NBR_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
                 let prof_prop_s = SAMPLING_PROP_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let prof_cycle_s = BUILD_CYCLE_CHECK_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let prof_tree_s = BUILD_SCORE_TREE_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let prof_pivot_s = BUILD_PIVOT_PATH_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let prof_ae_s = BUILD_ABSTRACT_EDGE_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
+                let prof_pcf_s = BUILD_PCF_LOOKUP_NANOS.load(Ordering::Relaxed) as f64 / 1e9;
                 print!(
                     "total: {}, min_es index: {:?}, is highest: {}, sample_time: {:.6}, estimate_time: {:.6}, build_time: {:.6}, ",
                     total_count,
@@ -286,6 +298,10 @@ pub fn build_procedure() -> Procedure {
                     sampling_secs,
                     estimate_elapsed.as_secs_f64(),
                     build_elapsed.as_secs_f64(),
+                );
+                eprintln!(
+                    "[build-prof] cycle_check: {:.6}s, score+tree_enum: {:.6}s, pivot+path: {:.6}s, abstract_edge: {:.6}s, pcf_lookup: {:.6}s",
+                    prof_cycle_s, prof_tree_s, prof_pivot_s, prof_ae_s, prof_pcf_s,
                 );
                 if prof_calls > 0 {
                     eprintln!(

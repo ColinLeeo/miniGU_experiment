@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gql_parser::ast::{
-    GraphExpr, Procedure, ProgramActivity, SessionActivity, SessionResetArgs, SessionSet,
+    GraphExpr, GraphRef, Procedure, ProgramActivity, SessionActivity, SessionResetArgs, SessionSet,
     TransactionActivity,
 };
 use gql_parser::parse_gql;
@@ -79,6 +79,27 @@ impl Session {
                 SessionSet::Graph(sp_ref) => match sp_ref.value() {
                     GraphExpr::Name(graph_name) => {
                         self.context.set_current_graph(graph_name.to_string())?;
+                    }
+                    GraphExpr::Ref(graph_ref) => {
+                        // Handle `session set graph /name` — extract the last
+                        // path component as the graph name.
+                        let name = match graph_ref {
+                            GraphRef::Name(ident) => ident.to_string(),
+                            GraphRef::Ref(catalog_ref) => catalog_ref
+                                .objects
+                                .last()
+                                .map(|id| id.0.to_string())
+                                .ok_or_else(|| {
+                                    Error::Io(std::io::Error::new(
+                                        std::io::ErrorKind::InvalidInput,
+                                        "empty graph reference path",
+                                    ))
+                                })?,
+                            _ => {
+                                return not_implemented("not allowed there", None);
+                            }
+                        };
+                        self.context.set_current_graph(name)?;
                     }
                     _ => {
                         return not_implemented("not allowed there", None);

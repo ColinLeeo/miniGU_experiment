@@ -258,6 +258,25 @@ impl GraphContainer {
         self.gcard_flat_graph.read().expect("RwLock read").clone()
     }
 
+    /// GCard: take the FlatGraph out (sets to None), so `Arc::try_unwrap` succeeds
+    /// without cloning.
+    pub fn take_gcard_flat_graph(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.gcard_flat_graph.write().expect("RwLock write").take()
+    }
+
+    /// GCard: take the Statistic out (sets to None).
+    pub fn take_statistic(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.statistic.write().expect("RwLock write").take()
+    }
+
+    /// GCard: take the DegreeSeqGraphCompressed out (sets to None).
+    pub fn take_degree_seq_graph_compressed(&self) -> Option<Arc<dyn Any + Send + Sync>> {
+        self.degree_seq_graph_compressed
+            .write()
+            .expect("RwLock write")
+            .take()
+    }
+
     /// GCard: clear all cached GCard data (statistic, compressed degree sequence, update log).
     ///
     /// Called at the start of `GCard_build` to ensure a clean slate before rebuilding,

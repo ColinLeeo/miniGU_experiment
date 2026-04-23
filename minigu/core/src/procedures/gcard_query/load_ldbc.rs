@@ -293,6 +293,86 @@ pub(super) fn scan_from_light_graph(
     )
 }
 
+/// Build a lightweight `LightGraph` from a `FlatGraph` (topology only, ~730 MB
+/// for sf1 vs 30 GB FlatGraph).  Only vertex IDs and neighbor IDs are kept;
+/// edge IDs and properties are dropped.
+fn light_graph_from_flat_graph(fg: &super::flat_graph::FlatGraph) -> LightGraph {
+    let vertices_by_label: HashMap<String, Vec<VertexId>> = fg
+        .vertices_by_label_map()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let mut hop_csrs: HashMap<(String, String, bool), CsrAdj> = HashMap::new();
+    for ((vlabel, elabel, outgoing), csr) in fg.hop_csrs() {
+        hop_csrs.insert(
+            (vlabel.clone(), elabel.clone(), *outgoing),
+            CsrAdj {
+                verts: csr.verts().to_vec(),
+                neighbors: csr.neighbors_vids(), // only VertexId, drops EdgeId
+                offsets: csr.offsets().to_vec(),
+            },
+        );
+    }
+
+    LightGraph {
+        vertices_by_label,
+        hop_csrs,
+    }
+}
+
+/// Rebuild `Statistic` from a `FlatGraph` by converting to a lightweight
+/// `LightGraph` (~730 MB) and re-scanning its CSR adjacency.
+///
+/// Peak memory: FlatGraph (30 GB) + LightGraph (730 MB) + ScannedHops (1.1 GB).
+/// The LightGraph is dropped before building the Statistic.
+pub(crate) fn rebuild_statistic_from_flat_graph(
+    fg: &super::flat_graph::FlatGraph,
+    graph_type: &dyn minigu_catalog::provider::GraphTypeProvider,
+    max_k: usize,
+) -> anyhow::Result<super::Statistic> {
+    let edges = get_edges_from_catalog(graph_type)?;
+    let schema_paths = enumerate_all_paths_walks_in_schema(&edges, max_k);
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build()
+        .map_err(|e| anyhow::anyhow!("thread pool: {}", e))?;
+
+    // Build lightweight CSR (only VertexId neighbors, no EdgeId/properties).
+    eprintln!("[rebuild_statistic] building LightGraph from FlatGraph...");
+    let t0 = std::time::Instant::now();
+    let light_graph = light_graph_from_flat_graph(fg);
+    eprintln!(
+        "[rebuild_statistic] LightGraph built in {:.2}s",
+        t0.elapsed().as_secs_f64()
+    );
+
+    let t1 = std::time::Instant::now();
+    let scanned = scan_from_light_graph(&light_graph, &edges, &schema_paths, max_k, &pool)?;
+    eprintln!(
+        "[rebuild_statistic] hop scan done in {:.2}s",
+        t1.elapsed().as_secs_f64()
+    );
+
+    // Drop LightGraph before computing to reduce peak memory.
+    drop(light_graph);
+
+    let scanned = Arc::new(scanned);
+    let t2 = std::time::Instant::now();
+    let cache = degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
+    eprintln!(
+        "[rebuild_statistic] degree compute done in {:.2}s",
+        t2.elapsed().as_secs_f64()
+    );
+
+    let statistic = build_statistic_from_pattern_cache(&cache)?;
+    Ok(statistic)
+}
+
 // ---------------------------------------------------------------------------
 // FlatGraph construction from LDBC CSVs (with properties)
 // ---------------------------------------------------------------------------
@@ -439,9 +519,19 @@ pub fn build_procedure() -> Procedure {
             .expect("max_k must be int8")
             .ok_or_else(|| anyhow::anyhow!("max_k cannot be null"))? as usize;
 
-        let db_path = context.database().config().db_path.clone();
         let dataset_path = Path::new(&dataset_dir);
         let manifest_path = dataset_path.join("manifest.json");
+
+        // SF tag derived from the last path component (e.g. "sf1" from ".../ldbc/sf1").
+        let sf_tag = dataset_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_owned();
+        // Parent of the SF directory (e.g. ".../dataset/ldbc/").  All cache files
+        // and the statistic are placed here with an SF-tagged filename so that
+        // different scale factors share the same directory and never collide.
+        let cache_dir = dataset_path.parent().unwrap_or(dataset_path).to_path_buf();
 
         // ── Parse manifest & build graph type catalog ──
         let manifest_data = std::fs::read_to_string(&manifest_path)
@@ -461,7 +551,7 @@ pub fn build_procedure() -> Procedure {
         );
 
         // ── Save LightGraph bincode for create_catalog reuse ──
-        let lg_path = dataset_path.join(format!("{}.lightgraph.bin", graph_name));
+        let lg_path = cache_dir.join(format!("{}_{}.lightgraph.bin", graph_name, sf_tag));
         if !lg_path.exists() {
             if let Err(e) = save_light_graph(&lg_path, &light_graph) {
                 eprintln!("load_ldbc: warning: could not save lightgraph cache: {}", e);
@@ -494,7 +584,7 @@ pub fn build_procedure() -> Procedure {
         eprintln!("load_ldbc: light graph released");
 
         // ── Save ScannedHops bincode (for create_catalog to skip scan entirely) ──
-        let scanned_path = dataset_path.join(format!("{}.scanned_hops.bin", graph_name));
+        let scanned_path = cache_dir.join(format!("{}_{}.scanned_hops.bin", graph_name, sf_tag));
         if !scanned_path.exists() {
             if let Err(e) = scanned.save_bincode(&scanned_path) {
                 eprintln!(
@@ -527,13 +617,14 @@ pub fn build_procedure() -> Procedure {
             .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
 
         // ── Persist statistic as bincode ──
-        if let Some(ref db_path) = db_path {
-            if let Err(e) = save_statistic(db_path, &graph_name, &statistic) {
-                eprintln!(
-                    "load_ldbc: warning: could not save statistic (disk full?): {}",
-                    e
-                );
-            }
+        // Written to the shared cache directory (parent of the SF dir) with an
+        // SF-tagged name so each scale factor gets its own file there.
+        let tagged_graph_name = format!("{}_{}", graph_name, sf_tag);
+        if let Err(e) = save_statistic(&cache_dir, &tagged_graph_name, &statistic) {
+            eprintln!(
+                "load_ldbc: warning: could not save statistic (disk full?): {}",
+                e
+            );
         }
 
         // ── Build FlatGraph with full property data ────────────────────────────

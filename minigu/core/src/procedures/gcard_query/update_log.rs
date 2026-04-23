@@ -2,8 +2,9 @@
 //!
 //! When edges/vertices are inserted or deleted, callers append [`UpdateEntry`] records here
 //! instead of immediately recomputing multi-hop degree statistics.
-//! [`GCardUpdateLog::compact_and_apply`] later expands all pending entries via graph traversal,
-//! applies the net deltas to [`Statistic`], removes any deleted vertices, and clears the log.
+//! [`GCardUpdateLog::compact_and_apply_flat`] later expands all pending entries via FlatGraph
+//! traversal, applies the net deltas to [`Statistic`], removes any deleted vertices, and
+//! clears the log.
 //!
 //! Stored type-erased inside [`GraphContainer`] (same pattern as `Statistic` /
 //! `DegreeSeqGraphCompressed`).  Consumers in `minigu-core` downcast via
@@ -13,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use minigu_common::types::{LabelId, VertexId};
-use minigu_storage::tp::{MemTransaction, MemoryGraph};
+use rayon::prelude::*;
 
 use crate::procedures::gcard_query::catalog::AltKey;
 use crate::procedures::gcard_query::statistic::Statistic;
@@ -65,152 +66,6 @@ impl GCardUpdateLog {
             max_k,
             deleted_vertices: HashSet::new(),
         }
-    }
-
-    // ── Compact + Apply ────────────────────────────────────────────────────
-
-    /// Expand all pending entries to `res_len = 0` via graph traversal, accumulate the net
-    /// per-vertex degree deltas, apply them to `statistic`, delete removed vertices, and
-    /// clear the log.
-    ///
-    /// `edge_schema`: edge name → `(src_vertex_label_id, dst_vertex_label_id, edge_label_id)`.
-    /// `label_id_to_name`: reverse mapping for building expanded template strings.
-    ///
-    /// **Expansion direction** (from the current node's perspective):
-    /// * `w.dst_label == current_label` → incoming iteration  (X → current)
-    /// * `w.src_label == current_label` → outgoing iteration  (current → X)
-    ///
-    /// Nodes in `deleted_vertices` are skipped during traversal; their statistics are
-    /// removed from `statistic` at the end.
-    pub fn compact_and_apply(
-        &mut self,
-        graph: &MemoryGraph,
-        txn: &Arc<MemTransaction>,
-        edge_schema: &HashMap<String, (LabelId, LabelId, LabelId)>,
-        label_id_to_name: &HashMap<LabelId, String>,
-        statistic: &mut Statistic,
-    ) -> anyhow::Result<()> {
-        use minigu_storage::iterators::AdjacencyIteratorTrait;
-
-        // ── Build per-label extension table ───────────────────────────────
-        // label → [(edge_name, neighbor_label, edge_label_id, outgoing_from_current)]
-        let mut label_to_exts: HashMap<String, Vec<(String, String, LabelId, bool)>> =
-            HashMap::new();
-        for (edge_name, &(src_id, dst_id, edge_id)) in edge_schema {
-            let Some(src_name) = label_id_to_name.get(&src_id) else {
-                continue;
-            };
-            let Some(dst_name) = label_id_to_name.get(&dst_id) else {
-                continue;
-            };
-            // From dst's perspective: src is an INCOMING neighbor.
-            label_to_exts.entry(dst_name.clone()).or_default().push((
-                edge_name.clone(),
-                src_name.clone(),
-                edge_id,
-                false,
-            ));
-            // From src's perspective: dst is an OUTGOING neighbor.
-            label_to_exts.entry(src_name.clone()).or_default().push((
-                edge_name.clone(),
-                dst_name.clone(),
-                edge_id,
-                true,
-            ));
-        }
-
-        // ── Phase 1: expand → accumulate ─────────────────────────────────
-        // acc: (altkey, label) → vertex_id → net delta
-        let mut acc: HashMap<(AltKey, String), HashMap<VertexId, i64>> = HashMap::new();
-        let mut to_expand: Vec<UpdateEntry> = self.entries.drain(..).collect();
-
-        while let Some(entry) = to_expand.pop() {
-            if entry.res_len == 0 {
-                // Terminal: accumulate directly, skipping deleted vertices.
-                let slot = acc.entry((entry.template, entry.label)).or_default();
-                for (vid, delta) in entry.nodes {
-                    if !self.deleted_vertices.contains(&vid) {
-                        *slot.entry(vid).or_insert(0) += delta;
-                    }
-                }
-                continue;
-            }
-
-            let Some(exts) = label_to_exts.get(&entry.label) else {
-                // No schema edges for this label; treat as terminal.
-                let slot = acc.entry((entry.template, entry.label)).or_default();
-                for (vid, delta) in entry.nodes {
-                    if !self.deleted_vertices.contains(&vid) {
-                        *slot.entry(vid).or_insert(0) += delta;
-                    }
-                }
-                continue;
-            };
-
-            // Expand: find neighbours of each (non-deleted) node.
-            let mut new_groups: HashMap<(String, String), HashMap<VertexId, i64>> = HashMap::new();
-            for (&vid, &delta) in &entry.nodes {
-                if self.deleted_vertices.contains(&vid) {
-                    continue;
-                }
-                for (edge_name, nbr_label, edge_label_id, outgoing) in exts {
-                    let eid = *edge_label_id;
-                    let adj_iter = if *outgoing {
-                        txn.iter_adjacency_outgoing(vid)
-                    } else {
-                        txn.iter_adjacency_incoming(vid)
-                    };
-                    let adj_iter =
-                        AdjacencyIteratorTrait::filter(adj_iter, move |n| n.label_id() == eid);
-                    for nbr_result in adj_iter {
-                        let nbr = nbr_result?;
-                        let nbr_id = nbr.neighbor_id();
-                        if !self.deleted_vertices.contains(&nbr_id) {
-                            *new_groups
-                                .entry((nbr_label.clone(), edge_name.clone()))
-                                .or_default()
-                                .entry(nbr_id)
-                                .or_insert(0) += delta;
-                        }
-                    }
-                }
-            }
-
-            // Emit one new entry per (neighbor_label, edge_name) group.
-            for ((nbr_label, edge_name), nodes) in new_groups {
-                let nodes: HashMap<VertexId, i64> =
-                    nodes.into_iter().filter(|(_, d)| *d != 0).collect();
-                if nodes.is_empty() {
-                    continue;
-                }
-                let mut new_parts = vec![nbr_label.clone(), edge_name];
-                new_parts.extend_from_slice(&entry.template.raw);
-                to_expand.push(UpdateEntry {
-                    template: AltKey::new(new_parts),
-                    label: nbr_label,
-                    nodes,
-                    res_len: entry.res_len - 1,
-                });
-            }
-        }
-
-        // ── Phase 2: apply net deltas to statistic ────────────────────────
-        for ((altkey, label), nodes) in acc {
-            for (vertex_id, delta) in nodes {
-                if delta != 0 {
-                    statistic.apply_delta(&label, &altkey, vertex_id, delta);
-                }
-            }
-        }
-
-        // ── Phase 3: remove deleted vertices from statistic ───────────────
-        for &vid in &self.deleted_vertices {
-            statistic.delete_vertex(vid);
-        }
-        self.deleted_vertices.clear();
-        // self.entries already empty (drained above)
-
-        Ok(())
     }
 
     // ── Public record helpers ──────────────────────────────────────────────
@@ -338,95 +193,221 @@ impl GCardUpdateLog {
         &mut self,
         flat_graph: &crate::procedures::gcard_query::flat_graph::FlatGraph,
         statistic: &mut Statistic,
-    ) -> anyhow::Result<()> {
-        // ── Build per-label extension table from FlatGraph ─────────────────
-        // label → [(edge_label, neighbor_label, outgoing)]
-        let mut label_to_exts: HashMap<String, Vec<(String, String, bool)>> = HashMap::new();
-        for label in flat_graph.all_labels() {
-            let exts = flat_graph.edge_extensions_for_label(label);
-            if !exts.is_empty() {
-                label_to_exts.insert(label.to_string(), exts);
-            }
+    ) -> anyhow::Result<HashSet<(AltKey, String)>> {
+        use crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid;
+
+        // ── Build per-label extension table with pre-resolved CSR refs ────
+        // label → [(edge_label, neighbor_label, outgoing, Option<&CsrAdjWithEid>)]
+        //
+        // Pre-resolving CSR references avoids per-call String allocation +
+        // HashMap lookup in the hot inner loop (was 98% of CPU time).
+        let hop_csrs = flat_graph.hop_csrs();
+        let pending = flat_graph.pending_ref();
+
+        struct ExtEntry<'a> {
+            edge_label: String,
+            nbr_label: String,
+            outgoing: bool,
+            csr: Option<&'a CsrAdjWithEid>,
         }
 
-        // ── Phase 1: expand → accumulate ──────────────────────────────────
-        let mut acc: HashMap<(AltKey, String), HashMap<VertexId, i64>> = HashMap::new();
-        let mut to_expand: Vec<UpdateEntry> = self.entries.drain(..).collect();
-
-        while let Some(entry) = to_expand.pop() {
-            if entry.res_len == 0 {
-                let slot = acc.entry((entry.template, entry.label)).or_default();
-                for (vid, delta) in entry.nodes {
-                    if !self.deleted_vertices.contains(&vid) {
-                        *slot.entry(vid).or_insert(0) += delta;
-                    }
+        let label_to_exts: HashMap<String, Vec<ExtEntry<'_>>> = flat_graph
+            .all_labels()
+            .filter_map(|label| {
+                let raw_exts = flat_graph.edge_extensions_for_label(label);
+                if raw_exts.is_empty() {
+                    return None;
                 }
-                continue;
+                let exts: Vec<ExtEntry<'_>> = raw_exts
+                    .into_iter()
+                    .map(|(edge_label, nbr_label, outgoing)| {
+                        let key = (label.to_string(), edge_label.clone(), outgoing);
+                        let csr = hop_csrs.get(&key);
+                        ExtEntry {
+                            edge_label,
+                            nbr_label,
+                            outgoing,
+                            csr,
+                        }
+                    })
+                    .collect();
+                Some((label.to_string(), exts))
+            })
+            .collect();
+
+        let deleted = &self.deleted_vertices;
+        let deleted_eids = &pending.deleted_edge_ids;
+        let deleted_verts = &pending.deleted_vertices;
+
+        // Inline neighbor lookup — no String allocation, no HashMap lookup.
+        // Uses pre-resolved CSR reference + pending index.
+        let get_neighbors = |vid: VertexId, ext: &ExtEntry<'_>| -> Vec<VertexId> {
+            if deleted_verts.contains(&vid) {
+                return Vec::new();
             }
-
-            let Some(exts) = label_to_exts.get(&entry.label) else {
-                let slot = acc.entry((entry.template, entry.label)).or_default();
-                for (vid, delta) in entry.nodes {
-                    if !self.deleted_vertices.contains(&vid) {
-                        *slot.entry(vid).or_insert(0) += delta;
+            let mut result = Vec::new();
+            // Base CSR
+            if let Some(csr) = ext.csr {
+                for &(nbr, eid) in csr.neighbors_slice(vid) {
+                    if !deleted_eids.contains(&eid) && !deleted_verts.contains(&nbr) {
+                        result.push(nbr);
                     }
                 }
-                continue;
-            };
-
-            let mut new_groups: HashMap<(String, String), HashMap<VertexId, i64>> = HashMap::new();
-            for (&vid, &delta) in &entry.nodes {
-                if self.deleted_vertices.contains(&vid) {
-                    continue;
-                }
-                for (edge_label, nbr_label, outgoing) in exts {
-                    let nbrs =
-                        flat_graph.neighbors_for_compact(vid, edge_label.as_str(), *outgoing);
-                    for nbr_id in nbrs {
-                        if !self.deleted_vertices.contains(&nbr_id) {
-                            *new_groups
-                                .entry((nbr_label.clone(), edge_label.clone()))
-                                .or_default()
-                                .entry(nbr_id)
-                                .or_insert(0) += delta;
+            }
+            // Pending inserted edges (O(1) index lookup)
+            let idx_key = (vid, ext.edge_label.clone());
+            if ext.outgoing {
+                if let Some(nbrs) = pending.pending_out.get(&idx_key) {
+                    for &dst in nbrs {
+                        if !deleted_verts.contains(&dst) {
+                            result.push(dst);
                         }
                     }
                 }
+            } else if let Some(nbrs) = pending.pending_in.get(&idx_key) {
+                for &src in nbrs {
+                    if !deleted_verts.contains(&src) {
+                        result.push(src);
+                    }
+                }
+            }
+            result
+        };
+
+        // ── Phase 1: level-by-level parallel expansion ────────────────────
+
+        let mut current_level: Vec<UpdateEntry> = self.entries.drain(..).collect();
+        let mut acc: HashMap<(AltKey, String), HashMap<VertexId, i64>> = HashMap::new();
+
+        let max_depth = current_level.iter().map(|e| e.res_len).max().unwrap_or(0);
+
+        for depth in (0..=max_depth).rev() {
+            let (this_level, rest): (Vec<_>, Vec<_>) =
+                current_level.into_iter().partition(|e| e.res_len == depth);
+
+            if depth == 0 {
+                for entry in this_level {
+                    let slot = acc.entry((entry.template, entry.label)).or_default();
+                    for (vid, delta) in entry.nodes {
+                        if !deleted.contains(&vid) {
+                            *slot.entry(vid).or_insert(0) += delta;
+                        }
+                    }
+                }
+                current_level = rest;
+                continue;
             }
 
-            for ((nbr_label, edge_name), nodes) in new_groups {
-                let nodes: HashMap<VertexId, i64> =
-                    nodes.into_iter().filter(|(_, d)| *d != 0).collect();
-                if nodes.is_empty() {
-                    continue;
+            let expanded: Vec<(
+                Vec<UpdateEntry>,
+                HashMap<(AltKey, String), HashMap<VertexId, i64>>,
+            )> = this_level
+                .into_par_iter()
+                .map(|entry| {
+                    let mut local_children: Vec<UpdateEntry> = Vec::new();
+                    let mut local_acc: HashMap<(AltKey, String), HashMap<VertexId, i64>> =
+                        HashMap::new();
+
+                    let Some(exts) = label_to_exts.get(&entry.label) else {
+                        let slot = local_acc.entry((entry.template, entry.label)).or_default();
+                        for (vid, delta) in entry.nodes {
+                            if !deleted.contains(&vid) {
+                                *slot.entry(vid).or_insert(0) += delta;
+                            }
+                        }
+                        return (local_children, local_acc);
+                    };
+
+                    let mut new_groups: HashMap<(String, String), HashMap<VertexId, i64>> =
+                        HashMap::new();
+                    for (&vid, &delta) in &entry.nodes {
+                        if deleted.contains(&vid) {
+                            continue;
+                        }
+                        for ext in exts {
+                            let nbrs = get_neighbors(vid, ext);
+                            for nbr_id in nbrs {
+                                if !deleted.contains(&nbr_id) {
+                                    *new_groups
+                                        .entry((ext.nbr_label.clone(), ext.edge_label.clone()))
+                                        .or_default()
+                                        .entry(nbr_id)
+                                        .or_insert(0) += delta;
+                                }
+                            }
+                        }
+                    }
+
+                    for ((nbr_label, edge_name), nodes) in new_groups {
+                        let nodes: HashMap<VertexId, i64> =
+                            nodes.into_iter().filter(|(_, d)| *d != 0).collect();
+                        if nodes.is_empty() {
+                            continue;
+                        }
+                        let mut new_parts = vec![nbr_label.clone(), edge_name];
+                        new_parts.extend_from_slice(&entry.template.raw);
+                        local_children.push(UpdateEntry {
+                            template: AltKey::new(new_parts),
+                            label: nbr_label,
+                            nodes,
+                            res_len: entry.res_len - 1,
+                        });
+                    }
+
+                    (local_children, local_acc)
+                })
+                .collect();
+
+            let mut next_level = rest;
+            for (children, local_acc) in expanded {
+                next_level.extend(children);
+                for ((key, label), nodes) in local_acc {
+                    let slot = acc.entry((key, label)).or_default();
+                    for (vid, delta) in nodes {
+                        *slot.entry(vid).or_insert(0) += delta;
+                    }
                 }
-                let mut new_parts = vec![nbr_label.clone(), edge_name];
-                new_parts.extend_from_slice(&entry.template.raw);
-                to_expand.push(UpdateEntry {
-                    template: AltKey::new(new_parts),
-                    label: nbr_label,
-                    nodes,
-                    res_len: entry.res_len - 1,
-                });
+            }
+            current_level = next_level;
+        }
+
+        for entry in current_level {
+            let slot = acc.entry((entry.template, entry.label)).or_default();
+            for (vid, delta) in entry.nodes {
+                if !deleted.contains(&vid) {
+                    *slot.entry(vid).or_insert(0) += delta;
+                }
             }
         }
 
+        eprintln!(
+            "[compact] expanded into {} (altkey,label) groups",
+            acc.len()
+        );
+
         // ── Phase 2: apply net deltas to statistic ─────────────────────────
+        let mut dirty_keys: HashSet<(AltKey, String)> = HashSet::new();
         for ((altkey, label), nodes) in acc {
-            for (vertex_id, delta) in nodes {
-                if delta != 0 {
-                    statistic.apply_delta(&label, &altkey, vertex_id, delta);
+            for (vertex_id, delta) in &nodes {
+                if *delta != 0 {
+                    statistic.apply_delta(&label, &altkey, *vertex_id, *delta);
                 }
             }
+            dirty_keys.insert((altkey, label));
         }
 
         // ── Phase 3: remove deleted vertices from statistic ────────────────
+        // Collect all (altkey, label) that contain deleted vertices.
         for &vid in &self.deleted_vertices {
+            let affected = statistic.keys_for_vertex(vid);
+            for key in affected {
+                dirty_keys.insert(key);
+            }
             statistic.delete_vertex(vid);
         }
         self.deleted_vertices.clear();
 
-        Ok(())
+        Ok(dirty_keys)
     }
 }
 

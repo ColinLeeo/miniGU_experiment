@@ -249,8 +249,11 @@ fn hop_key_for_pattern_start(
     }
 }
 
-/// Internal dense cache: PathPattern → endpoint_name → Vec<u64> (indexed by hop's src_verts).
-type InternalDegCache = HashMap<PathPattern, HashMap<String, Vec<u64>>>;
+/// Internal dense cache: PathPattern → HopKey → Vec<u64> (indexed by hop's src_verts).
+/// Keyed by HopKey (not vertex label name) to avoid collisions when both endpoints
+/// of a pattern share the same vertex label but use different hops
+/// (e.g., [Person, knows, Person, likes, Person]).
+type InternalDegCache = HashMap<PathPattern, HashMap<HopKey, Vec<u64>>>;
 
 /// Compute dense degree vector for one endpoint of a pattern.
 fn compute_endpoint_dense(
@@ -266,21 +269,19 @@ fn compute_endpoint_dense(
 
     let suffix = oriented.suffix();
     let suffix_canonical = suffix.canonical();
-    let suffix_key = &suffix.vs[0];
+    let current_hop = hop_key_for_pattern_start(oriented, edges);
+    let suffix_hop = hop_key_for_pattern_start(&suffix, edges);
 
     let suffix_degs = cache
         .get(&suffix_canonical)
-        .and_then(|m| m.get(suffix_key))
+        .and_then(|m| m.get(&suffix_hop))
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "suffix deg missing for {} in pattern {}",
-                suffix_key,
+                "suffix deg missing for hop {:?} in pattern {}",
+                suffix_hop,
                 suffix
             )
         })?;
-
-    let current_hop = hop_key_for_pattern_start(oriented, edges);
-    let suffix_hop = hop_key_for_pattern_start(&suffix, edges);
     let remap = remap_tables
         .get(&(current_hop, suffix_hop))
         .ok_or_else(|| anyhow::anyhow!("remap table missing for pattern {}", oriented))?;
@@ -493,8 +494,8 @@ pub fn compute_from_scanned_hops(
             let deps = level_deps[idx];
             let canonical = deps.pattern.canonical();
             let entry = cache.entry(canonical.clone()).or_default();
-            entry.insert(deps.pattern.vs[0].clone(), left_deg);
-            entry.insert(deps.pattern.vs.last().unwrap().clone(), right_deg);
+            entry.insert(deps.left_hop.clone(), left_deg);
+            entry.insert(deps.right_hop.clone(), right_deg);
             computed_patterns.insert(canonical);
         }
     }
@@ -504,15 +505,11 @@ pub fn compute_from_scanned_hops(
     let mut output: PatternDegCache = HashMap::with_capacity(cache.len());
     for (pattern, endpoints) in cache {
         let mut out_endpoints: HashMap<String, DegreeSeq> = HashMap::with_capacity(endpoints.len());
-        for (endpoint_name, degrees) in endpoints {
-            let hop = if endpoint_name == pattern.vs[0] {
-                hop_key_for_pattern_start(&pattern, edges)
-            } else {
-                hop_key_for_pattern_start(&pattern.reversed(), edges)
-            };
-            let vec_data = vec_caches.get(&hop).unwrap();
+        for (hop_key, degrees) in endpoints {
+            let vec_data = vec_caches.get(&hop_key).unwrap();
             let vids = Arc::clone(&vec_data.src_verts);
-            out_endpoints.insert(endpoint_name, (vids, degrees));
+            // Use the hop's vertex_label as the endpoint name for downstream consumers.
+            out_endpoints.insert(hop_key.vertex_label.clone(), (vids, degrees));
         }
         output.insert(pattern, out_endpoints);
     }
