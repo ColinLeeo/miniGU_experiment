@@ -1,3 +1,8 @@
+//! 分段常数函数（PCF）的底层实现。
+//!
+//! 在 GCard 里，很多“度分布 / 选择率传播”最终都会落到 PCF 上做运算，
+//! 所以这里基本是数值层核心。
+
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -6,8 +11,11 @@ use super::super::error::GCardResult;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PiecewiseConstantFunction {
+    /// 每一段上的常数值。
     pub constants: Vec<f64>,
+    /// 每一段右边界；第 i 段区间是 `(left_i, right_interval_edges[i]]` 的近似形式。
     pub right_interval_edges: Vec<f64>,
+    /// 到该段结束时累计覆盖了多少“行”。
     pub cumulative_rows: Vec<f64>,
 }
 
@@ -40,6 +48,8 @@ impl fmt::Display for PiecewiseConstantFunction {
 
 impl PiecewiseConstantFunction {
     pub fn empty() -> Self {
+        // 这里不用真正的全空数组，而是给一个近似“零函数”的安全占位。
+        // 这样可减少很多调用点对空数组的特殊判断。
         Self {
             right_interval_edges: vec![1.0],
             cumulative_rows: vec![1.0],
@@ -52,6 +62,8 @@ impl PiecewiseConstantFunction {
         relative_error_per_segment: f64,
         model_cdf: bool,
     ) -> GCardResult<Self> {
+        // 把完整度序列压成 PCF。
+        // `model_cdf=true` 时更偏累计分布解释；false 时更接近原始序列分段。
         if data.is_empty() {
             return Ok(Self::empty());
         }
@@ -62,6 +74,8 @@ impl PiecewiseConstantFunction {
         let mut processed_edges = Vec::new();
         let data_reversed: Vec<u64> = data.iter().rev().copied().collect();
         for &edge in &bin_right_edges {
+            // 这里会把“近似分箱边界”修正到数据中真实存在的值上，
+            // 避免切在没有意义的位置。
             if edge > 0 && edge <= data.len() {
                 let value = data[edge - 1];
                 let pos = bisect_left_long(&data_reversed, value as f64);
@@ -147,6 +161,7 @@ impl PiecewiseConstantFunction {
     }
 
     pub fn truncate_by_ratio(&self, ratio: f64) -> Self {
+        // 只保留前 `ratio` 比例的累计质量，常用于做截断近似。
         if ratio < 0.0 || ratio > 1.0 || self.constants.is_empty() {
             return Self::empty();
         }
@@ -206,12 +221,14 @@ impl PiecewiseConstantFunction {
     }
 
     pub fn calculate_value_at_point(&self, x: f64) -> f64 {
+        // 在横轴位置 x 上查该段常数值。
         let segment = bisect_left_double(&self.right_interval_edges, x)
             .min(self.constants.len().saturating_sub(1));
         self.constants[segment]
     }
 
     pub fn calculate_rows_at_point(&self, x: f64) -> f64 {
+        // 计算从左端累计到 x 为止的面积/行数。
         let x = x.min(*self.right_interval_edges.last().unwrap_or(&0.0));
         let segment = bisect_left_double(&self.right_interval_edges, x)
             .min(self.constants.len().saturating_sub(1));
@@ -229,6 +246,7 @@ impl PiecewiseConstantFunction {
     }
 
     pub fn calculate_inverse(&self, y: f64) -> f64 {
+        // 给定累计行数 y，反查它落在横轴哪个位置。
         if self.cumulative_rows.is_empty() {
             return 0.0;
         }

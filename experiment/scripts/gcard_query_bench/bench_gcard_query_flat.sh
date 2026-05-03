@@ -90,7 +90,7 @@ log "max_k=$MAX_K  max_graph=$MAX_GRAPH  sample_size=$SAMPLE_SIZE"
 log "Output: $OUTPUT_CSV"
 
 # CSV header
-echo "sf,pattern_group,pattern,cardinality,sample_time_s,estimate_time_s,build_time_s,total_time_s" > "$OUTPUT_CSV"
+echo "sf,pattern_group,pattern,cardinality,sample_time_s,estimate_time_s,build_time_s,total_time_s,cycle_check_s,score_tree_s,pivot_path_s,abstract_edge_s,pcf_lookup_s" > "$OUTPUT_CSV"
 
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -163,6 +163,31 @@ EOGQL
         total_times+=("$line")
     done < <(grep -o 'Time: [0-9.]*s' "$stdout_file" | grep -o '[0-9.]*')
 
+    cycle_check_times=()
+    while IFS= read -r line; do
+        cycle_check_times+=("$line")
+    done < <(grep '\[build-prof\]' "$stdout_file" | grep -o 'cycle_check: [0-9.]*' | awk '{print $2}')
+
+    score_tree_times=()
+    while IFS= read -r line; do
+        score_tree_times+=("$line")
+    done < <(grep '\[build-prof\]' "$stdout_file" | grep -o 'score+tree_enum: [0-9.]*' | awk '{print $2}')
+
+    pivot_path_times=()
+    while IFS= read -r line; do
+        pivot_path_times+=("$line")
+    done < <(grep '\[build-prof\]' "$stdout_file" | grep -o 'pivot+path: [0-9.]*' | awk '{print $2}')
+
+    abstract_edge_times=()
+    while IFS= read -r line; do
+        abstract_edge_times+=("$line")
+    done < <(grep '\[build-prof\]' "$stdout_file" | grep -o 'abstract_edge: [0-9.]*' | awk '{print $2}')
+
+    pcf_lookup_times=()
+    while IFS= read -r line; do
+        pcf_lookup_times+=("$line")
+    done < <(grep '\[build-prof\]' "$stdout_file" | grep -o 'pcf_lookup: [0-9.]*' | awk '{print $2}')
+
     # Map results back to pattern order
     idx=0
     for pattern_path in "${PATTERNS[@]}"; do
@@ -175,6 +200,11 @@ EOGQL
         estimate_t=0
         build_t=0
         total_t=0
+        cycle_t=0
+        score_tree_t=0
+        pivot_path_t=0
+        abstract_edge_t=0
+        pcf_lookup_t=0
 
         if [[ $idx -lt ${#cardinalities[@]} ]]; then
             cardinality="${cardinalities[$idx]}"
@@ -191,9 +221,24 @@ EOGQL
         if [[ $idx -lt ${#total_times[@]} ]]; then
             total_t="${total_times[$idx]}"
         fi
+        if [[ $idx -lt ${#cycle_check_times[@]} ]]; then
+            cycle_t="${cycle_check_times[$idx]}"
+        fi
+        if [[ $idx -lt ${#score_tree_times[@]} ]]; then
+            score_tree_t="${score_tree_times[$idx]}"
+        fi
+        if [[ $idx -lt ${#pivot_path_times[@]} ]]; then
+            pivot_path_t="${pivot_path_times[$idx]}"
+        fi
+        if [[ $idx -lt ${#abstract_edge_times[@]} ]]; then
+            abstract_edge_t="${abstract_edge_times[$idx]}"
+        fi
+        if [[ $idx -lt ${#pcf_lookup_times[@]} ]]; then
+            pcf_lookup_t="${pcf_lookup_times[$idx]}"
+        fi
 
-        echo "$SF,$group,$pattern,$cardinality,$sample_t,$estimate_t,$build_t,$total_t" >> "$OUTPUT_CSV"
-        log "  $group/$pattern -> cardinality=$cardinality sample=${sample_t}s estimate=${estimate_t}s build=${build_t}s total=${total_t}s"
+        echo "$SF,$group,$pattern,$cardinality,$sample_t,$estimate_t,$build_t,$total_t,$cycle_t,$score_tree_t,$pivot_path_t,$abstract_edge_t,$pcf_lookup_t" >> "$OUTPUT_CSV"
+        log "  $group/$pattern -> cardinality=$cardinality sample=${sample_t}s estimate=${estimate_t}s build=${build_t}s total=${total_t}s | cycle=${cycle_t}s score_tree=${score_tree_t}s pivot_path=${pivot_path_t}s abstract_edge=${abstract_edge_t}s pcf_lookup=${pcf_lookup_t}s"
 
         idx=$((idx + 1))
     done

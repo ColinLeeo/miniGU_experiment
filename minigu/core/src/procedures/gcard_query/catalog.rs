@@ -1,3 +1,9 @@
+//! GCard catalog 的压缩存储层。
+//!
+//! 这里解决两个问题：
+//! 1. 如何把“某条路径模式在某个端点标签上的度分布统计”组织成可查结构；
+//! 2. 如何把这些统计压缩后持久化，并在查询时快速恢复为 PCF。
+
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -6,6 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
@@ -13,7 +20,13 @@ use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AltKey {
+    /// 原始交错序列，例如：
+    /// `[person, knows, person, likes, post]`
+    /// 也就是 顶点标签 / 边标签 / 顶点标签 ... 交替出现。
     pub raw: Vec<String>,
+    /// 规范化后的形式。
+    /// 其目的是让一条路径和它的反向路径映射到同一个 key，
+    /// 避免统计层重复存两份。
     normalized: Vec<String>,
 }
 
@@ -25,8 +38,12 @@ impl fmt::Display for AltKey {
 
 impl AltKey {
     pub fn new(raw: Vec<String>) -> Self {
-        // Canonical form: de-interleave into (vs, es), compare forward vs reverse,
-        // pick the lexicographically smaller direction — same logic as PathPattern::new.
+        // 规范化逻辑：
+        // 1. 先把交错序列拆成顶点序列 vs 和边序列 es；
+        // 2. 再和反向的 (rvs, res) 做字典序比较；
+        // 3. 选择更小的一边作为 normalized。
+        //
+        // 这样 A-B-C 与 C-B-A 这种本质相同的路径模式就能共用一个统计项。
         let lowered: Vec<String> = raw.iter().map(|s| s.to_lowercase()).collect();
         let vs: Vec<&str> = lowered.iter().step_by(2).map(|s| s.as_str()).collect();
         let es: Vec<&str> = lowered
@@ -70,6 +87,7 @@ impl Hash for AltKey {
 impl Eq for AltKey {}
 
 pub fn make_alt_key(node_seq: &[String], edge_seq: &[String]) -> AltKey {
+    // 把分离保存的 node_seq / edge_seq 重新交错，生成统一 key。
     let mut out = Vec::with_capacity(node_seq.len() + edge_seq.len());
     for i in 0..node_seq.len() {
         out.push(node_seq[i].clone());
@@ -83,11 +101,15 @@ pub fn make_alt_key(node_seq: &[String], edge_seq: &[String]) -> AltKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CompressedDegreeSeq {
     SafeBound {
+        /// 更保守、信息更完整的表示：直接保存 PCF。
         function: PiecewiseConstantFunction,
     },
     FastCompressor {
+        /// 桶的数量。
         len: usize,
+        /// 指数桶底数，通常是 2。
         base: u64,
+        /// 每个桶中有多少条目。
         counts: Vec<u64>,
     },
 }
@@ -99,6 +121,8 @@ impl CompressedDegreeSeq {
     /// bins are mapped straight to PCF segments (CDF model) without expanding
     /// into a full degree sequence — O(num_bins) instead of O(num_vertices).
     pub fn to_pcf(&self) -> PiecewiseConstantFunction {
+        // 查询阶段最终都希望消费统一的 PCF 形式，
+        // 所以这里把不同压缩表示收敛到同一种接口。
         match self {
             CompressedDegreeSeq::SafeBound { function } => function.clone(),
             CompressedDegreeSeq::FastCompressor {
@@ -119,6 +143,8 @@ impl CompressedDegreeSeq {
     /// The bins are emitted in **descending degree order** (highest `i` first)
     /// to match the convention used by `from_degree_sequence` with `model_cdf = true`.
     fn fast_compressor_to_pcf(base: u64, counts: &[u64]) -> PiecewiseConstantFunction {
+        // 这里不把桶展开回完整 degree sequence，
+        // 而是直接从“桶计数”构造分段常数函数，避免 O(num_vertices) 的恢复成本。
         let total_rows: f64 = {
             let mut s = 0u128;
             for (i, &c) in counts.iter().enumerate() {
@@ -141,7 +167,7 @@ impl CompressedDegreeSeq {
         let mut cum_row: f64 = 0.0;
         let mut cum_x: f64 = 0.0;
 
-        // Descending order: highest bin first (largest degree values first).
+        // 按度值从大到小输出段，和 CDF 模型保持一致。
         for (i, &c) in counts.iter().enumerate().rev() {
             if c == 0 {
                 continue;
@@ -149,8 +175,9 @@ impl CompressedDegreeSeq {
             let degree_val = base.pow(i as u32) as f64;
             let rows_in_bin = degree_val * c as f64;
 
-            // CDF model: width = rows / degree_val = c
-            // But cap so cumulative doesn't exceed total_rows.
+            // CDF 模型里，一段的横向宽度等于 “该桶总行数 / 桶代表的度值”，
+            // 在这里恰好就是 c。
+            // 末段要做截断，避免累计行数超过 total_rows。
             if cum_row + rows_in_bin >= total_rows {
                 let remaining = total_rows - cum_row;
                 let width = remaining / degree_val;
@@ -184,6 +211,11 @@ impl CompressedDegreeSeq {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DegreeSeqGraphCompressed {
+    /// 路径模式 -> 端点标签 -> 压缩后的度序列统计。
+    ///
+    /// 例如：
+    /// `Person-knows-Person` 这条路径下，
+    /// 既可能存“以左端 Person 为观察端点”的统计，也可能存右端 Person 的统计。
     pub edge_set_to_endpoints: HashMap<AltKey, HashMap<String, CompressedDegreeSeq>>,
 }
 
@@ -199,6 +231,7 @@ impl DegreeSeqGraphCompressed {
         path: &AltKey,
         target_node: &str,
     ) -> PiecewiseConstantFunction {
+        // 这里会忽略 target_node 大小写，减少上层调用时的大小写耦合。
         if let Some(endpoints) = self.edge_set_to_endpoints.get(path) {
             endpoints
                 .iter()
@@ -217,25 +250,80 @@ impl DegreeSeqGraphCompressed {
         statistic: &super::Statistic,
         dirty_keys: &std::collections::HashSet<(AltKey, String)>,
     ) {
-        for (altkey, label) in dirty_keys {
-            if let Some(block) = statistic
-                .label_path_statistic
-                .get(label)
-                .and_then(|ls| ls.path_statistic.get(altkey))
-            {
-                if let Ok(Some(seq)) = block.get_compressed_degree_seq() {
+        // 增量更新时，只刷新受影响的 key，避免每次 compact 后全量重建 catalog。
+        #[derive(Debug)]
+        enum DirtyAction {
+            Upsert {
+                altkey: AltKey,
+                label: String,
+                seq: CompressedDegreeSeq,
+            },
+            Remove {
+                altkey: AltKey,
+                label: String,
+            },
+        }
+
+        let t_total = std::time::Instant::now();
+        let t_encode = std::time::Instant::now();
+        let actions: Vec<DirtyAction> = dirty_keys
+            .par_iter()
+            .map(|(altkey, label)| {
+                let new_seq = statistic
+                    .label_path_statistic
+                    .get(label)
+                    .and_then(|ls| ls.path_statistic.get(altkey))
+                    .and_then(|block| block.get_compressed_degree_seq().ok().flatten());
+
+                match new_seq {
+                    Some(seq) => DirtyAction::Upsert {
+                        altkey: altkey.clone(),
+                        label: label.clone(),
+                        seq,
+                    },
+                    None => DirtyAction::Remove {
+                        altkey: altkey.clone(),
+                        label: label.clone(),
+                    },
+                }
+            })
+            .collect();
+        eprintln!(
+            "[dsgc] encode_dirty: {:.2}s ({} dirty keys)",
+            t_encode.elapsed().as_secs_f64(),
+            dirty_keys.len()
+        );
+
+        let t_apply = std::time::Instant::now();
+        for action in actions {
+            match action {
+                DirtyAction::Upsert { altkey, label, seq } => {
                     self.edge_set_to_endpoints
-                        .entry(altkey.clone())
+                        .entry(altkey)
                         .or_default()
-                        .insert(label.clone(), seq);
-                } else {
-                    // Empty — remove entry.
-                    if let Some(map) = self.edge_set_to_endpoints.get_mut(altkey) {
-                        map.remove(label);
+                        .insert(label, seq);
+                }
+                DirtyAction::Remove { altkey, label } => {
+                    // 该路径/标签下已经没有有效统计时，删掉对应项。
+                    if let Some(map) = self.edge_set_to_endpoints.get_mut(&altkey) {
+                        map.remove(&label);
+                        if map.is_empty() {
+                            self.edge_set_to_endpoints.remove(&altkey);
+                        }
                     }
                 }
             }
         }
+        eprintln!(
+            "[dsgc] apply_dirty: {:.2}s ({} dirty keys)",
+            t_apply.elapsed().as_secs_f64(),
+            dirty_keys.len()
+        );
+        eprintln!(
+            "[dsgc] update_dirty total: {:.2}s ({} dirty keys)",
+            t_total.elapsed().as_secs_f64(),
+            dirty_keys.len()
+        );
     }
 
     pub fn num_edge_sets(&self) -> usize {
@@ -256,5 +344,42 @@ impl DegreeSeqGraphCompressed {
         let graph = bincode::deserialize_from(reader)
             .map_err(|e| GCardError::InvalidData(format!("Failed to deserialize: {}", e)))?;
         Ok(graph)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use super::{AltKey, CompressedDegreeSeq, DegreeSeqGraphCompressed};
+
+    #[test]
+    fn update_dirty_removes_stale_endpoint_and_empty_altkey() {
+        let altkey = AltKey::new(vec![
+            "person".to_string(),
+            "knows".to_string(),
+            "person".to_string(),
+        ]);
+        let label = "person".to_string();
+
+        let mut dsgc = DegreeSeqGraphCompressed::new();
+        dsgc.edge_set_to_endpoints.insert(
+            altkey.clone(),
+            HashMap::from([(
+                label.clone(),
+                CompressedDegreeSeq::FastCompressor {
+                    len: 1,
+                    base: 2,
+                    counts: vec![1],
+                },
+            )]),
+        );
+
+        let statistic = crate::procedures::gcard_query::Statistic::default();
+        let dirty_keys = HashSet::from([(altkey.clone(), label.clone())]);
+
+        dsgc.update_dirty(&statistic, &dirty_keys);
+
+        assert!(!dsgc.edge_set_to_endpoints.contains_key(&altkey));
     }
 }

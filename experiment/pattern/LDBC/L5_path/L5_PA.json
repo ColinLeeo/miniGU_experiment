@@ -26,6 +26,14 @@
       "property": "gender",
       "op": "eq",
       "value": { "String": "male" }
+    },
+    {
+      "predicate_id": 3,
+      "target": "edge",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": { "Int64": 1325376000000 }
     }
   ]
 }

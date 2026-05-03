@@ -292,7 +292,7 @@ pub fn report_component_sizes(stat: &super::Statistic) {
         for (alt_key, block) in &ls.path_statistic {
             // bucket_ids
             total_bucket_ids_raw += block.bucket_ids.len();
-            let rle = encode_rle(&block.bucket_ids);
+            let rle = encode_zstd(&block.bucket_ids);
             total_bucket_ids_compressed += rle.len();
 
             // prefix
@@ -354,7 +354,10 @@ pub fn report_component_sizes(stat: &super::Statistic) {
     print_row("alt_keys (dict)", alt_key_raw_size, alt_key_compressed);
     println!("  {:-<56}", "");
     print_row("TOTAL", total_raw, total_compressed);
-    println!("Compressed statistic size: {} bytes", total_compressed);
+    println!(
+        "Estimated custom-compressed statistic payload: {} bytes (not written by save_statistic)",
+        total_compressed
+    );
     println!("========================================");
 }
 

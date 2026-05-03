@@ -29,11 +29,11 @@
     },
     {
       "predicate_id": 2,
-      "target": "vertex",
-      "id": 5,
-      "property": "length",
+      "target": "edge",
+      "id": 3,
+      "property": "creationdate",
       "op": "ge",
-      "value": { "Int64": 200 }
+      "value": { "Int64": 1325376000000 }
     },
     {
       "predicate_id": 3,

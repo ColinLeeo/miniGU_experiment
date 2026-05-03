@@ -1,10 +1,11 @@
 use minigu_common::types::{EdgeId, VertexId};
+use serde::{Deserialize, Serialize};
 
 /// Compressed Sparse Row adjacency with packed `(neighbor_vid, edge_id)` pairs.
 ///
 /// Immutable after construction.  Binary-search on `verts` gives O(log n) vertex
 /// lookup; the returned neighbor slice is zero-copy.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CsrAdjWithEid {
     /// Sorted source vertex IDs.
     pub(super) verts: Vec<VertexId>,
@@ -15,7 +16,6 @@ pub struct CsrAdjWithEid {
 }
 
 impl CsrAdjWithEid {
-    /// Build from an unsorted list of `(src_vid, dst_vid, edge_id)` triples.
     pub fn build(mut triples: Vec<(VertexId, VertexId, EdgeId)>) -> Self {
         if triples.is_empty() {
             return Self::default();
@@ -42,7 +42,6 @@ impl CsrAdjWithEid {
         }
     }
 
-    /// Returns `(neighbor_vid, edge_id)` pairs for `vid`, or an empty slice if absent.
     #[inline]
     pub fn neighbors_slice(&self, vid: VertexId) -> &[(VertexId, EdgeId)] {
         match self.verts.binary_search(&vid) {

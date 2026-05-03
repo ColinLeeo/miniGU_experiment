@@ -106,6 +106,15 @@ pub(super) fn build_statistic_from_pattern_cache(
                 .map_err(|e| anyhow::anyhow!("Statistic::insert_or_update: {}", e))?;
         }
     }
+    println!("=== Per-label path count in Statistic ===");
+    for (label, ls) in &statistic.label_path_statistic {
+        println!(
+            "  {:20} paths: {:5}  vertices: {:10}",
+            label,
+            ls.path_statistic.len(),
+            ls.vertex_ids.len()
+        );
+    }
     Ok(statistic)
 }
 
@@ -119,7 +128,7 @@ fn build_and_persist_statistic(
     let statistic = build_statistic_from_pattern_cache(cache)?;
     let size = statistic.serialized_size();
     println!(
-        "Statistic serialized size: {} bytes - {:.2} MB",
+        "Statistic estimated bincode size: {} bytes - {:.2} MB",
         size,
         size as f64 / 1024.0 / 1024.0
     );
@@ -153,7 +162,7 @@ pub fn build_procedure() -> Procedure {
         LogicalType::String, // optional: lightgraph bincode path (from load_ldbc)
     ];
     Procedure::new(parameters, None, move |context, args| {
-        // ── Parse arguments ──
+        // 参数既控制路径最大长度，也控制扫描/计算的并行度。
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")
@@ -204,6 +213,18 @@ pub fn build_procedure() -> Procedure {
         // ── Build degree cache ──
         let edges = get_edges_from_catalog(graph_type_ref.as_ref())?;
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
+        {
+            let total: usize = schema_path.values().map(|s| s.len()).sum();
+            println!("=== Schema paths (total: {}) ===", total);
+            for len in 1..=max_k {
+                if let Some(paths) = schema_path.get(&len) {
+                    println!("--- length {} ({} paths) ---", len, paths.len());
+                    for p in paths {
+                        println!("  {}", p);
+                    }
+                }
+            }
+        }
 
         // ── Phase 1: Scan neighbor data ──
         let scan_start = std::time::Instant::now();
@@ -281,27 +302,10 @@ pub fn build_procedure() -> Procedure {
             scanned.mem_usage_bytes() as f64 / 1024.0 / 1024.0,
         );
 
-        // ── Phase 2: Pure in-memory degree computation ──
-        #[cfg(feature = "profiling")]
-        let _compute_pprof_guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(1000)
-            .build()
-            .expect("pprof guard build failed");
-
         let compute_start = std::time::Instant::now();
         let cache: PatternDegCache =
             super::degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
         let compute_elapsed = compute_start.elapsed();
-
-        #[cfg(feature = "profiling")]
-        if let Ok(report) = _compute_pprof_guard.report().build() {
-            let flamegraph_path = "/tmp/gcard_compute_flamegraph.svg";
-            let file =
-                std::fs::File::create(flamegraph_path).expect("create flamegraph file failed");
-            report.flamegraph(file).expect("write flamegraph failed");
-            println!("Compute flamegraph written to {}", flamegraph_path);
-        }
-
         println!("Compute time: {:.3}s", compute_elapsed.as_secs_f64());
         println!(
             "Catalog build time: {:.3}s (scan: {:.3}s + compute: {:.3}s)",

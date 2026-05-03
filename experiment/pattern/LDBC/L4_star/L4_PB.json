@@ -23,11 +23,11 @@
     },
     {
       "predicate_id": 2,
-      "target": "vertex",
-      "id": 3,
-      "property": "gender",
-      "op": "eq",
-      "value": { "String": "female" }
+      "target": "edge",
+      "id": 4,
+      "property": "creationdate",
+      "op": "ge",
+      "value": { "Int64": 1338508800000 }
     },
     {
       "predicate_id": 3,

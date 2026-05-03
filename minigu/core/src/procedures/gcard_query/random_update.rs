@@ -2,10 +2,11 @@
 //! update GCard statistics, and export a CSV snapshot for ground-truth evaluation.
 //!
 //! Usage:
-//!   `call random_update(<ratio>, '<output_dir>', <seed>)`
+//!   `call random_update(<ratio>, '<flatgraph_bincode_path>', <seed>)`
 //!
 //! - `ratio` (Float64): fraction to delete, e.g. 0.05 means 5% of edges + 5% of vertices
-//! - `output_dir` (String): directory to write CSV snapshot (created if not exists)
+//! - `flatgraph_bincode_path` (String): optional path to export the updated FlatGraph bincode; pass
+//!   `""` to skip export
 //! - `seed` (Int64): random seed for reproducibility
 //!
 //! Returns `(deleted_edges: Int64, deleted_vertices: Int64)`.
@@ -204,7 +205,7 @@ fn write_edge_csv(
 fn do_random_update(
     container: &GraphContainer,
     ratio: f64,
-    output_dir: &str,
+    export_bincode_path: &str,
     seed: u64,
 ) -> anyhow::Result<(i64, i64)> {
     let mut rng = StdRng::seed_from_u64(seed);
@@ -230,39 +231,15 @@ fn do_random_update(
 
     let t_total = std::time::Instant::now();
 
-    // ── Phase 1: randomly delete edges ───────────────────────────────────
+    // ── Phase 1: sample deletion targets ─────────────────────────────────
     let t_phase = std::time::Instant::now();
     let all_eids: Vec<EdgeId> = fg.all_edge_ids().collect();
     let n_del_edges = ((all_eids.len() as f64 * ratio).round() as usize).min(all_eids.len());
 
     let mut eids_shuffled = all_eids;
     eids_shuffled.shuffle(&mut rng);
-    let edges_to_delete: Vec<EdgeId> = eids_shuffled.into_iter().take(n_del_edges).collect();
+    let edge_candidates: Vec<EdgeId> = eids_shuffled.into_iter().take(n_del_edges).collect();
 
-    // Collect deleted edge info BEFORE marking (need endpoints for delta computation).
-    let mut deleted_edge_infos: Vec<(VertexId, String, VertexId, String, String)> = Vec::new();
-    let mut deleted_edge_count: i64 = 0;
-    for &eid in &edges_to_delete {
-        if let Some((src, src_label, dst, dst_label, edge_label)) = fg.edge_endpoints(eid) {
-            deleted_edge_infos.push((
-                src,
-                src_label.to_string(),
-                dst,
-                dst_label.to_string(),
-                edge_label.to_string(),
-            ));
-            fg.record_delete_edge(eid);
-            deleted_edge_count += 1;
-        }
-    }
-
-    eprintln!(
-        "[random_update] phase1 delete_edges: {:.2}s",
-        t_phase.elapsed().as_secs_f64()
-    );
-
-    // ── Phase 2: randomly delete vertices (+ cascade edges) ──────────────
-    let t_phase = std::time::Instant::now();
     let all_labels: Vec<String> = fg.all_labels().map(String::from).collect();
     let mut all_vids: Vec<VertexId> = Vec::new();
     for label in &all_labels {
@@ -273,187 +250,95 @@ fn do_random_update(
     let verts_to_delete: Vec<VertexId> = all_vids.into_iter().take(n_del_verts).collect();
     let verts_to_delete_set: HashSet<VertexId> = verts_to_delete.iter().copied().collect();
 
+    eprintln!(
+        "[random_update] phase1 sample_targets: {:.2}s ({} edge candidates, {} vertex candidates)",
+        t_phase.elapsed().as_secs_f64(),
+        edge_candidates.len(),
+        verts_to_delete.len()
+    );
+
+    // ── Phase 2: append updates to log + mark FlatGraph pending ───────────
+    let t_phase = std::time::Instant::now();
+    let mut deleted_edge_count: i64 = 0;
     let mut deleted_vertex_count: i64 = 0;
-    for &vid in &verts_to_delete {
-        if fg.vertex_label(vid).is_none() {
+    let mut seen_deleted_edges: HashSet<EdgeId> = HashSet::new();
+    let mut log_guard = log_arc
+        .lock()
+        .map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
+
+    for eid in edge_candidates {
+        let Some((src, src_label, dst, dst_label, edge_label)) = fg.edge_endpoints(eid) else {
+            continue;
+        };
+        if verts_to_delete_set.contains(&src) || verts_to_delete_set.contains(&dst) {
             continue;
         }
-        let incidents = fg.incident_edges(vid);
-        for (eid, nbr, nbr_label, edge_label) in &incidents {
-            if let Some(v_label) = fg.vertex_label(vid) {
-                deleted_edge_infos.push((
-                    vid,
-                    v_label.to_string(),
-                    *nbr,
-                    nbr_label.clone(),
-                    edge_label.clone(),
-                ));
-            }
-            fg.record_delete_edge(*eid);
+        if seen_deleted_edges.insert(eid) {
+            log_guard.record_delete_edge(src, src_label, dst, dst_label, edge_label);
+            fg.record_delete_edge(eid);
             deleted_edge_count += 1;
+        }
+    }
+
+    for &vid in &verts_to_delete {
+        let Some(v_label) = fg.vertex_label(vid).map(str::to_string) else {
+            continue;
+        };
+        let incidents = fg.incident_edges(vid);
+        let neighbors: Vec<(VertexId, String, String)> = incidents
+            .iter()
+            .map(|(_, nbr, nbr_label, edge_label)| (*nbr, nbr_label.clone(), edge_label.clone()))
+            .collect();
+        log_guard.record_delete_vertex(vid, &v_label, &neighbors);
+
+        for (eid, _, _, _) in incidents {
+            if seen_deleted_edges.insert(eid) {
+                fg.record_delete_edge(eid);
+                deleted_edge_count += 1;
+            }
         }
         fg.record_delete_vertex(vid);
         deleted_vertex_count += 1;
     }
+    drop(log_guard);
 
     eprintln!(
-        "[random_update] phase2 delete_vertices: {:.2}s ({} edge infos collected)",
+        "[random_update] phase2 append_log: {:.2}s ({} deleted edges, {} deleted vertices)",
         t_phase.elapsed().as_secs_f64(),
-        deleted_edge_infos.len()
+        deleted_edge_count,
+        deleted_vertex_count
     );
 
-    // ── Phase 3: apply pending (rebuild CSR) ───────────────────────────
+    // ── Phase 3: compact update log into Statistic ───────────────────────
     let t_phase = std::time::Instant::now();
-    fg.apply_pending();
-    eprintln!(
-        "[random_update] phase3 apply_pending: {:.2}s",
-        t_phase.elapsed().as_secs_f64()
-    );
-
-    // ── Phase 4: direct delta computation ────────────────────────────────
-    // No HashMap, no UpdateLog. For each deleted edge, directly compute
-    // which path patterns are affected and apply deltas to Statistic.
-    let t_phase = std::time::Instant::now();
-
     let stat_arc = container
         .take_statistic()
         .ok_or_else(|| anyhow::anyhow!("statistic not set"))?;
     let stat_arc = Arc::downcast::<super::Statistic>(stat_arc)
         .map_err(|_| anyhow::anyhow!("statistic type mismatch"))?;
     let mut statistic = Arc::try_unwrap(stat_arc).unwrap_or_else(|arc| (*arc).clone());
-
-    let max_k = log_arc
-        .lock()
-        .map_err(|_| anyhow::anyhow!("mutex poisoned"))?
-        .max_k;
-
-    // Build extension table: label → [(edge_label, nbr_label, outgoing)]
-    let label_to_exts: std::collections::HashMap<String, Vec<(String, String, bool)>> = fg
-        .all_labels()
-        .filter_map(|label| {
-            let exts = fg.edge_extensions_for_label(label);
-            if exts.is_empty() {
-                None
-            } else {
-                Some((label.to_string(), exts))
-            }
-        })
-        .collect();
-
-    // Pre-build AltKey templates grouped by edge type.
-    // For each (src_label, edge_label, dst_label) edge type and each extension,
-    // build the AltKey once and reuse for all deleted edges of that type.
-    use super::catalog::AltKey;
-
-    struct DeltaTemplate {
-        altkey: AltKey,
-        target_label: String,
-        csr_key: (String, String, bool),
-        side: bool, // true = src side, false = dst side
-    }
-
-    let mut templates_by_edge_type: std::collections::HashMap<
-        (String, String, String), // (src_label, edge_label, dst_label)
-        Vec<DeltaTemplate>,
-    > = std::collections::HashMap::new();
-
-    // Collect unique edge types from deleted edges.
-    let mut edge_types: HashSet<(String, String, String)> = HashSet::new();
-    for (src, src_label, dst, dst_label, edge_label) in &deleted_edge_infos {
-        edge_types.insert((src_label.clone(), edge_label.clone(), dst_label.clone()));
-    }
-
-    for (src_label, edge_label, dst_label) in &edge_types {
-        let mut templates = Vec::new();
-
-        // Templates from src side: expand src's neighbors via extensions
-        if let Some(exts) = label_to_exts.get(src_label.as_str()) {
-            for (ext_edge, ext_nbr, outgoing) in exts {
-                templates.push(DeltaTemplate {
-                    altkey: AltKey::new(vec![
-                        ext_nbr.clone(),
-                        ext_edge.clone(),
-                        src_label.clone(),
-                        edge_label.clone(),
-                        dst_label.clone(),
-                    ]),
-                    target_label: ext_nbr.clone(),
-                    csr_key: (src_label.clone(), ext_edge.clone(), *outgoing),
-                    side: true,
-                });
-            }
-        }
-
-        // Templates from dst side: expand dst's neighbors via extensions
-        if let Some(exts) = label_to_exts.get(dst_label.as_str()) {
-            for (ext_edge, ext_nbr, outgoing) in exts {
-                templates.push(DeltaTemplate {
-                    altkey: AltKey::new(vec![
-                        ext_nbr.clone(),
-                        ext_edge.clone(),
-                        dst_label.clone(),
-                        edge_label.clone(),
-                        src_label.clone(),
-                    ]),
-                    target_label: ext_nbr.clone(),
-                    csr_key: (dst_label.clone(), ext_edge.clone(), *outgoing),
-                    side: false,
-                });
-            }
-        }
-
-        templates_by_edge_type.insert(
-            (src_label.clone(), edge_label.clone(), dst_label.clone()),
-            templates,
-        );
-    }
-
-    let hop_csrs = fg.hop_csrs();
-    let mut delta_count: u64 = 0;
-
-    for (src, src_label, dst, dst_label, edge_label) in &deleted_edge_infos {
-        let templates = match templates_by_edge_type.get(&(
-            src_label.clone(),
-            edge_label.clone(),
-            dst_label.clone(),
-        )) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        for tmpl in templates {
-            let vid = if tmpl.side { *src } else { *dst };
-            if let Some(csr) = hop_csrs.get(&tmpl.csr_key) {
-                for &(nbr, _) in csr.neighbors_slice(vid) {
-                    if !verts_to_delete_set.contains(&nbr) {
-                        statistic.apply_delta(&tmpl.target_label, &tmpl.altkey, nbr, -1);
-                        delta_count += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // Delete vertices from statistic.
-    for &vid in &verts_to_delete {
-        statistic.delete_vertex(vid);
-    }
+    let dirty_keys = {
+        let mut guard = log_arc
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
+        guard.compact_and_apply_flat(&fg, &mut statistic)?
+    };
 
     eprintln!(
-        "[random_update] phase4 direct_delta: {:.2}s ({} deltas applied)",
+        "[random_update] phase3 compact_log: {:.2}s ({} dirty keys)",
         t_phase.elapsed().as_secs_f64(),
-        delta_count
+        dirty_keys.len()
     );
 
-    // ── Phase 5: incremental rebuild DegreeSeqGraphCompressed ────────────
+    // ── Phase 4: apply pending + rebuild DegreeSeqGraphCompressed ─────────
     let t_phase = std::time::Instant::now();
-    // Collect dirty keys from the edge types and their templates.
-    let mut dirty_keys: HashSet<(AltKey, String)> = HashSet::new();
-    for templates in templates_by_edge_type.values() {
-        for tmpl in templates {
-            dirty_keys.insert((tmpl.altkey.clone(), tmpl.target_label.clone()));
-        }
-    }
+    fg.apply_pending();
+    eprintln!(
+        "[random_update] phase4a apply_pending: {:.2}s",
+        t_phase.elapsed().as_secs_f64()
+    );
+
+    let t_phase_b = std::time::Instant::now();
     let dsgc_arc = container
         .take_degree_seq_graph_compressed()
         .ok_or_else(|| anyhow::anyhow!("degree_seq_graph_compressed not set"))?;
@@ -461,17 +346,27 @@ fn do_random_update(
         .map_err(|_| anyhow::anyhow!("dsgc type mismatch"))?;
     let mut new_dsgc = Arc::try_unwrap(dsgc_arc).unwrap_or_else(|arc| (*arc).clone());
     new_dsgc.update_dirty(&statistic, &dirty_keys);
+
+    if !export_bincode_path.is_empty() && export_bincode_path != "unused" {
+        fg.export_bincode(export_bincode_path)?;
+        eprintln!(
+            "[random_update] exported FlatGraph bincode to {}",
+            export_bincode_path
+        );
+    }
+
     container.set_statistic(Arc::new(statistic));
     container.set_degree_seq_graph_compressed(Arc::new(new_dsgc));
     container.set_gcard_flat_graph(Arc::new(fg));
     eprintln!(
-        "[random_update] phase5 rebuild_dsgc: {:.2}s ({} dirty keys)",
-        t_phase.elapsed().as_secs_f64(),
+        "[random_update] phase4b rebuild_dsgc: {:.2}s ({} dirty keys)",
+        t_phase_b.elapsed().as_secs_f64(),
         dirty_keys.len()
     );
     eprintln!(
-        "[random_update] phase4 rebuild_statistic: {:.2}s",
-        t_phase.elapsed().as_secs_f64()
+        "[random_update] phase4 total: {:.2}s ({} dirty keys)",
+        t_phase.elapsed().as_secs_f64(),
+        dirty_keys.len()
     );
 
     eprintln!(
@@ -520,17 +415,18 @@ pub fn build_procedure() -> Procedure {
         let ratio = args[0]
             .to_f64()
             .map_err(|_| anyhow::anyhow!("ratio must be a float"))?;
-        let output_dir = args[1]
+        let export_bincode_path = args[1]
             .try_as_string()
             .expect("second arg must be a string")
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("output_dir cannot be null"))?
+            .ok_or_else(|| anyhow::anyhow!("flatgraph_bincode_path cannot be null"))?
             .to_string();
         let seed = args[2]
             .to_i64()
             .map_err(|_| anyhow::anyhow!("seed must be an integer"))? as u64;
 
-        let (del_edges, del_verts) = do_random_update(container, ratio, &output_dir, seed)?;
+        let (del_edges, del_verts) =
+            do_random_update(container, ratio, &export_bincode_path, seed)?;
 
         let chunk = DataChunk::new(vec![
             Arc::new(Int64Array::from_iter_values([del_edges])),

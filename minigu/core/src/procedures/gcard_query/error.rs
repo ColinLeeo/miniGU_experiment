@@ -1,3 +1,5 @@
+//! GCard 模块内部统一错误类型。
+
 use miette::Diagnostic;
 use minigu_storage::error::StorageError;
 use thiserror::Error;

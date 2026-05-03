@@ -1,9 +1,15 @@
+//! 简单并查集实现。
+//!
+//! 主要用于查询图里的生成树构造、环检测和连通性判断。
+
 use std::collections::HashMap;
 
 use minigu_common::types::VertexId;
 
 pub struct UnionFind {
+    /// 每个元素当前指向的父节点。
     parent: HashMap<VertexId, VertexId>,
+    /// 按秩合并时使用的秩。
     rank: HashMap<VertexId, usize>,
 }
 
@@ -23,6 +29,7 @@ impl UnionFind {
     }
 
     pub fn find(&mut self, x: VertexId) -> VertexId {
+        // 路径压缩：查找根的同时把路径上的点都直接挂到根上。
         if let Some(&parent) = self.parent.get(&x) {
             if parent != x {
                 let root = self.find(parent);
@@ -36,6 +43,8 @@ impl UnionFind {
     }
 
     pub fn union(&mut self, x: VertexId, y: VertexId) -> bool {
+        // 返回值语义很适合做环检测：
+        // `false` 表示两个点原本就连通，再合并就会成环。
         let root_x = self.find(x);
         let root_y = self.find(y);
 

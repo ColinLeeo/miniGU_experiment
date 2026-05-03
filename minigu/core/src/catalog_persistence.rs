@@ -236,3 +236,8 @@ pub fn graph_data_path(db_path: &Path, graph_name: &str) -> std::path::PathBuf {
 pub fn statistic_path(db_path: &Path, graph_name: &str) -> std::path::PathBuf {
     db_path.join(format!("{}.statistic.bin", graph_name))
 }
+
+/// Get the FlatGraph bincode path for a graph: `<db_path>/<graph_name>.flatgraph.bin`
+pub fn flatgraph_path(db_path: &Path, graph_name: &str) -> std::path::PathBuf {
+    db_path.join(format!("{}.flatgraph.bin", graph_name))
+}

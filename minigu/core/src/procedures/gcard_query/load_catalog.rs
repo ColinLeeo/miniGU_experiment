@@ -1,3 +1,8 @@
+//! 从磁盘恢复已保存的 GCard catalog/statistic。
+//!
+//! 适合在 catalog 已经构建过的情况下快速恢复运行环境，
+//! 避免重新执行一次完整的 `GCard_build`。
+
 use std::sync::Arc;
 
 use minigu_catalog::provider::SchemaProvider;
@@ -14,6 +19,8 @@ use crate::procedures::gcard_query::statistic::load_statistic;
 pub fn build_load_procedure() -> Procedure {
     let parameters = vec![LogicalType::String];
     Procedure::new(parameters, None, move |context, args| {
+        // 这里只从持久化的 Statistic 恢复，
+        // 查询用的 `DegreeSeqGraphCompressed` 会现场重新派生出来。
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")

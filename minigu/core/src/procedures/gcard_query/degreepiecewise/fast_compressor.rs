@@ -1,3 +1,8 @@
+//! 一个非常轻量的指数桶压缩器。
+//!
+//! 它不保存每个值的细节，只统计“每个指数桶里有多少个值”，
+//! 适合在 block / catalog 里做进一步压缩。
+
 pub struct FastCompressor {
     base: u64,
     counts: Vec<u64>,
@@ -7,6 +12,7 @@ pub struct FastCompressor {
 /// Build bucket bounds for base and max value; used when encoding a block to get bucket index per
 /// frac.
 pub fn build_bounds(base: u64, max_value: u64) -> Vec<u64> {
+    // 生成形如 `1, base, base^2, ...` 的桶上界。
     let mut bounds = Vec::new();
     let mut x = 1;
     while x < max_value {
@@ -38,6 +44,7 @@ impl FastCompressor {
     }
 
     pub fn compress(&mut self, data: &Vec<u64>) {
+        // 并行按桶计数。
         if data.is_empty() {
             return;
         }

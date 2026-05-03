@@ -8,6 +8,7 @@ mod degree_compute;
 mod degree_compute_dense;
 mod degreepiecewise;
 pub mod error;
+pub mod export_flatgraph_snapshot;
 pub mod flat_graph;
 pub mod stat_quality;
 mod statistic;
@@ -15,7 +16,7 @@ pub mod update_log;
 
 pub use block_statistic::BlockStatistic;
 pub use catalog::make_alt_key;
-pub use statistic::Statistic;
+pub use statistic::{Statistic, load_statistic};
 mod graph;
 pub mod load_catalog;
 pub mod load_ldbc;
@@ -41,7 +42,7 @@ use minigu_execution::error::ExecutionError;
 use crate::procedures::gcard_query::abs_graph::AbstractGraph;
 use crate::procedures::gcard_query::catalog::DegreeSeqGraphCompressed;
 use crate::procedures::gcard_query::query_graph::QueryGraph;
-use crate::procedures::gcard_query::types::Query;
+use crate::procedures::gcard_query::types::{DecompositionDef, Query};
 
 static GCARD_VERBOSE: AtomicBool = AtomicBool::new(false);
 pub(crate) static SAMPLING_NANOS: std::sync::atomic::AtomicU64 =
@@ -106,6 +107,7 @@ pub fn build_procedure() -> Procedure {
         LogicalType::UInt8,   // predicate apply type
         LogicalType::Boolean, // verbose
         LogicalType::Int32,   // max_subgraphs (optional, default 50)
+        LogicalType::String,  // decomposition_json_path (optional, null = auto decompose)
     ];
 
     let schema = Arc::new(DataSchema::new(vec![DataField::new(
@@ -187,6 +189,21 @@ pub fn build_procedure() -> Procedure {
             .map(|n| if n <= 0 { 10 } else { n as usize })
             .unwrap_or(10);
 
+        let decomposition_path: Option<String> = args
+            .get(6)
+            .and_then(|a| a.try_as_string())
+            .and_then(|opt| opt.clone());
+        let decomposition: Option<DecompositionDef> = decomposition_path
+            .map(|path| {
+                let json = fs::read_to_string(&path).map_err(|e| {
+                    anyhow::anyhow!("Failed to read decomposition JSON {}: {}", path, e)
+                })?;
+                let def: DecompositionDef = serde_json::from_str(&json)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse decomposition JSON: {}", e))?;
+                Ok::<_, anyhow::Error>(def)
+            })
+            .transpose()?;
+
         #[cfg(feature = "profiling")]
         let guard = pprof::ProfilerGuardBuilder::default()
             .frequency(1000)
@@ -219,14 +236,25 @@ pub fn build_procedure() -> Procedure {
                 "FlatGraph not loaded (run load_ldbc first)",
             )))
         })?;
-        let cardinality = match query_graph.build_abstract_graph_flat(
-            max_path_length,
-            max_subgraphs,
-            &metadata,
-            Some(flat_graph_ref),
-            simple_size,
-            &predicate_apply_type,
-        ) {
+        let build_result = if let Some(ref decomp) = decomposition {
+            query_graph.build_abstract_graph_flat_from_decomposition(
+                decomp,
+                &metadata,
+                Some(flat_graph_ref),
+                simple_size,
+                &predicate_apply_type,
+            )
+        } else {
+            query_graph.build_abstract_graph_flat(
+                max_path_length,
+                max_subgraphs,
+                &metadata,
+                Some(flat_graph_ref),
+                simple_size,
+                &predicate_apply_type,
+            )
+        };
+        let cardinality = match build_result {
             Ok(abstract_graphs_with_scores) => {
                 let build_elapsed = build_start.elapsed();
                 let sampling_secs = SAMPLING_NANOS.load(Ordering::Relaxed) as f64 / 1e9;

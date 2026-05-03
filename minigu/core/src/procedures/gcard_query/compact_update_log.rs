@@ -33,6 +33,10 @@ use crate::procedures::gcard_query::update_log::GCardUpdateLog;
 /// Returns an error if the container has no update log / statistic (run `GCard_build`
 /// first) or if a storage operation fails.
 pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()> {
+    // 这个函数是“增量更新真正落盘/落内存”的收口点。
+    // random_update / insert 等过程只是往日志里记；
+    // 真正改 Statistic 和 catalog，是在这里做。
+
     // ── Resolve FlatGraph ─────────────────────────────────────────────────
     let flat_graph_arc = container
         .gcard_flat_graph()
@@ -47,7 +51,8 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         .downcast::<std::sync::Mutex<GCardUpdateLog>>()
         .map_err(|_| anyhow::anyhow!("gcard_update_log type mismatch"))?;
 
-    // ── Get statistic (clone for mutation) ────────────────────────────────
+    // Statistic 当前是通过 Arc 挂在容器里的，
+    // 所以这里先 clone 一份做就地修改，最后再整体替换回去。
     let stat_arc = container
         .statistic()
         .ok_or_else(|| anyhow::anyhow!("statistic not set (run GCard_build first)"))?;
@@ -64,7 +69,7 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         guard.compact_and_apply_flat(&flat_graph_arc, &mut statistic)?
     };
 
-    // ── Incrementally rebuild DegreeSeqGraphCompressed ────────────────────
+    // 只重建 dirty key，避免把整个 compressed catalog 全量刷新一遍。
     let dsgc_arc = container
         .degree_seq_graph_compressed()
         .ok_or_else(|| anyhow::anyhow!("degree_seq_graph_compressed not set"))?;

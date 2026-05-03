@@ -45,7 +45,7 @@ def query_to_sql(query, data_dir):
     for i, e in enumerate(edges):
         alias = f"e{e['id']}"
         csv_file = os.path.join(data_dir, f"{e['label']}.csv")
-        table_expr = f"read_csv('{csv_file}') {alias}"
+        table_expr = f"read_csv('{csv_file}', sample_size=-1) {alias}"
 
         if i == 0:
             from_parts.append(table_expr)
@@ -81,7 +81,7 @@ def query_to_sql(query, data_dir):
             if vid not in vertex_table_joined:
                 v_alias = f"v{vid}"
                 csv_file = os.path.join(data_dir, f"{vertices[vid]}.csv")
-                from_parts.append(f"JOIN read_csv('{csv_file}') {v_alias} ON {v_alias}.id = {vertex_expr[vid]}")
+                from_parts.append(f"JOIN read_csv('{csv_file}', sample_size=-1) {v_alias} ON {v_alias}.id = {vertex_expr[vid]}")
                 vertex_table_joined[vid] = v_alias
             where_parts.append(f"{vertex_table_joined[vid]}.{pred['property']} {op} {val_sql}")
         elif pred["target"] == "edge":

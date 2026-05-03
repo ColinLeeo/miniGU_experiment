@@ -5,12 +5,12 @@
 ```
 Vertex Labels: person, comment, post, forum, city, country, tag, tagclass
 Edge Labels:
-  person_knows_person, person_likes_comment, person_likes_post,
-  person_islocatedin_city, person_hasinterest_tag,
-  comment_hascreator_person, comment_replyof_post, comment_replyof_comment,
-  comment_hastag_tag, post_hascreator_person, post_hastag_tag,
-  forum_containerof_post, forum_hasmember_person,
-  city_ispartof_country, tag_hastype_tagclass
+  PERSON_KNOWS_PERSON, person_likes_comment, PERSON_LIKES_POST,
+  PERSON_ISLOCATEDIN_CITY, PERSON_HASINTEREST_TAG,
+  COMMENT_HASCREATOR_PERSON, COMMENT_REPLYOF_POST, COMMENT_REPLYOF_COMMENT,
+  COMMENT_HASTAG_TAG, POST_HASCREATOR_PERSON, POST_HASTAG_TAG,
+  FORUM_CONTAINEROF_POST, FORUM_HASMEMBER_PERSON,
+  CITY_ISPARTOF_COUNTRY, TAG_HASTYPE_TAGCLASS
 
 Vertex Properties:
   person:  birthday (Int64), gender (String: "male"/"female"), creationdate (Int64), language (String)
@@ -47,16 +47,16 @@ Total: 6 base queries + 6 with predicates = **12 query configurations**
 
 Original Cypher:
 ```cypher
-MATCH (:Country)<-[:IS_PART_OF]-(:City)<-[:IS_LOCATED_IN]-(:Person)
-      <-[:HAS_MEMBER]-(:Forum)-[:CONTAINER_OF]->(:Post)
-      <-[:REPLY_OF]-(:Comment)-[:HAS_TAG]->(:Tag)-[:HAS_TYPE]->(:TagClass)
+MATCH (:Country)<-[:CITY_ISPARTOF_COUNTRY]-(:City)<-[:PERSON_ISLOCATEDIN_CITY]-(:Person)
+      <-[:FORUM_HASMEMBER_PERSON]-(:Forum)-[:FORUM_CONTAINEROF_POST]->(:Post)
+      <-[:COMMENT_REPLYOF_POST]-(:Comment)-[:COMMENT_HASTAG_TAG]->(:Tag)-[:TAG_HASTYPE_TAGCLASS]->(:TagClass)
 RETURN count(*) AS count
 ```
 
 ```
-Country ←isPartOf── City ←isLocatedIn── Person ←hasMember── Forum
-                                                              ↓ containerOf
-TagClass ←hasType── Tag ←hasTag── Comment ──replyOf──→ Post
+Country ←CITY_ISPARTOF_COUNTRY── City ←PERSON_ISLOCATEDIN_CITY── Person ←FORUM_HASMEMBER_PERSON── Forum
+                                                                                                    ↓ FORUM_CONTAINEROF_POST
+TagClass ←TAG_HASTYPE_TAGCLASS── Tag ←COMMENT_HASTAG_TAG── Comment ──COMMENT_REPLYOF_POST──→ Post
 ```
 
 - 8 nodes, 7 edges, acyclic
@@ -64,10 +64,14 @@ TagClass ←hasType── Tag ←hasTag── Comment ──replyOf──→ Pos
 
 ### L1-PB (Predicate Scattered)
 Predicates on both ends and middle (node + edge mixed):
-```
-WHERE Person.language = 'zh;en'              (node, left side)
-  AND hasMember.creationdate > 2012-01-01    (edge, middle)
-  AND Comment.creationdate > 2012-01-01      (node, right side)
+```cypher
+MATCH (:Country)<-[:CITY_ISPARTOF_COUNTRY]-(:City)<-[:PERSON_ISLOCATEDIN_CITY]-(p:Person)
+      <-[hm:FORUM_HASMEMBER_PERSON]-(:Forum)-[:FORUM_CONTAINEROF_POST]->(:Post)
+      <-[:COMMENT_REPLYOF_POST]-(c:Comment)-[:COMMENT_HASTAG_TAG]->(:Tag)-[:TAG_HASTYPE_TAGCLASS]->(:TagClass)
+WHERE p.language = 'zh;en'
+  AND hm.creationDate > 1325376000000
+  AND c.creationDate > 1325376000000
+RETURN count(*) AS count
 ```
 
 ---
@@ -76,27 +80,31 @@ WHERE Person.language = 'zh;en'              (node, left side)
 
 Original Cypher:
 ```cypher
-MATCH (person1:Person)-[:KNOWS]-(person2:Person),
-      (person1)<-[:HAS_CREATOR]-(comment:Comment)
-        -[:REPLY_OF]->(post:Post)-[:HAS_CREATOR]->(person2)
+MATCH (person1:Person)-[:PERSON_KNOWS_PERSON]-(person2:Person),
+      (person1)<-[:COMMENT_HASCREATOR_PERSON]-(comment:Comment)
+        -[:COMMENT_REPLYOF_POST]->(post:Post)-[:POST_HASCREATOR_PERSON]->(person2)
 RETURN count(*) AS count
 ```
 
 ```
-Person₁ ──knows── Person₂
-    ↑ hasCreator         ↑ hasCreator
-    Comment ──replyOf──→ Post
+Person₁ ──PERSON_KNOWS_PERSON── Person₂
+    ↑ COMMENT_HASCREATOR_PERSON       ↑ POST_HASCREATOR_PERSON
+    Comment ──COMMENT_REPLYOF_POST──→ Post
 ```
 
 - 4 nodes, 4 edges, **cyclic**
-- Smallest cycle in LSQB: Person₁-knows-Person₂-hasCreator←Post-replyOf←Comment-hasCreator→Person₁
+- Smallest cycle in LSQB: Person₁-PERSON_KNOWS_PERSON-Person₂-POST_HASCREATOR_PERSON←Post-COMMENT_REPLYOF_POST←Comment-COMMENT_HASCREATOR_PERSON→Person₁
 
 ### L2-PA (Predicate Clustered)
 Predicates on adjacent Person₁, Person₂ and the edge between them (cycle top):
-```
-WHERE Person₁.gender = 'female'              (node)
-  AND Person₂.gender = 'male'                (node)
-  AND knows.creationdate > 2012-01-01        (edge, between P₁-P₂)
+```cypher
+MATCH (person1:Person)-[k:PERSON_KNOWS_PERSON]-(person2:Person),
+      (person1)<-[:COMMENT_HASCREATOR_PERSON]-(comment:Comment)
+        -[:COMMENT_REPLYOF_POST]->(post:Post)-[:POST_HASCREATOR_PERSON]->(person2)
+WHERE person1.gender = 'female'
+  AND person2.gender = 'male'
+  AND k.creationDate > 1325376000000
+RETURN count(*) AS count
 ```
 
 ---
@@ -106,21 +114,21 @@ WHERE Person₁.gender = 'female'              (node)
 Original Cypher:
 ```cypher
 MATCH (country:Country)
-MATCH (person1:Person)-[:IS_LOCATED_IN]->(city1:City)-[:IS_PART_OF]->(country)
-MATCH (person2:Person)-[:IS_LOCATED_IN]->(city2:City)-[:IS_PART_OF]->(country)
-MATCH (person3:Person)-[:IS_LOCATED_IN]->(city3:City)-[:IS_PART_OF]->(country)
-MATCH (person1)-[:KNOWS]-(person2)-[:KNOWS]-(person3)-[:KNOWS]-(person1)
+MATCH (person1:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city1:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person2:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city2:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person3:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city3:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person1)-[:PERSON_KNOWS_PERSON]-(person2)-[:PERSON_KNOWS_PERSON]-(person3)-[:PERSON_KNOWS_PERSON]-(person1)
 RETURN count(*) AS count
 ```
 
 ```
-Person₁ ──knows── Person₂ ──knows── Person₃
-    │                │                  │
-    └──knows─────────┼──────────────────┘
-    ↓ isLocatedIn    ↓ isLocatedIn     ↓ isLocatedIn
-   City₁            City₂             City₃
-    ↓ isPartOf       ↓ isPartOf        ↓ isPartOf
-                  Country
+Person₁ ──PERSON_KNOWS_PERSON── Person₂ ──PERSON_KNOWS_PERSON── Person₃
+    │                              │                              │
+    └──PERSON_KNOWS_PERSON─────────┼──────────────────────────────┘
+    ↓ PERSON_ISLOCATEDIN_CITY      ↓ PERSON_ISLOCATEDIN_CITY     ↓ PERSON_ISLOCATEDIN_CITY
+   City₁                          City₂                         City₃
+    ↓ CITY_ISPARTOF_COUNTRY        ↓ CITY_ISPARTOF_COUNTRY       ↓ CITY_ISPARTOF_COUNTRY
+                                Country
 ```
 
 - 7 nodes, 9 edges, **cyclic** (triangle of KNOWS)
@@ -128,10 +136,16 @@ Person₁ ──knows── Person₂ ──knows── Person₃
 
 ### L3-PB (Predicate Scattered)
 Predicates on different attributes across cycle and branches:
-```
-WHERE Person₁.gender = 'female'      (cycle node)
-  AND Person₃.birthday > 1990-01-01  (opposite cycle node)
-  AND Person₂.language = 'en'        (third cycle node, different attribute)
+```cypher
+MATCH (country:Country)
+MATCH (person1:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city1:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person2:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city2:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person3:Person)-[:PERSON_ISLOCATEDIN_CITY]->(city3:City)-[:CITY_ISPARTOF_COUNTRY]->(country)
+MATCH (person1)-[:PERSON_KNOWS_PERSON]-(person2)-[:PERSON_KNOWS_PERSON]-(person3)-[:PERSON_KNOWS_PERSON]-(person1)
+WHERE person1.gender = 'female'
+  AND person3.birthday > 631152000000
+  AND person2.language = 'en'
+RETURN count(*) AS count
 ```
 
 ---
@@ -140,9 +154,9 @@ WHERE Person₁.gender = 'female'      (cycle node)
 
 Original Cypher:
 ```cypher
-MATCH (:Tag)<-[:HAS_TAG]-(message:Message)-[:HAS_CREATOR]->(creator:Person),
-      (message)<-[:LIKES]-(liker:Person),
-      (message)<-[:REPLY_OF]-(comment:Comment)
+MATCH (:Tag)<-[:POST_HASTAG_TAG]-(post:Post)-[:POST_HASCREATOR_PERSON]->(creator:Person),
+      (post)<-[:PERSON_LIKES_POST]-(liker:Person),
+      (post)<-[:COMMENT_REPLYOF_POST]-(comment:Comment)
 RETURN count(*) AS count
 ```
 
@@ -150,11 +164,11 @@ Note: In the actual LDBC SNB data, Message is split into Post and Comment.
 The existing benchmark JSON uses Post as the center node.
 
 ```
-    Tag ←hasTag── Post ──hasCreator──→ Creator(Person)
-                    ↑ likes
-                 Liker(Person)
-                    ↑ replyOf
-                 Comment
+    Tag ←POST_HASTAG_TAG── Post ──POST_HASCREATOR_PERSON──→ Creator(Person)
+                            ↑ PERSON_LIKES_POST
+                         Liker(Person)
+                            ↑ COMMENT_REPLYOF_POST
+                         Comment
 ```
 
 - 5 nodes (Tag, Post, Person(creator), Person(liker), Comment), 4 edges, acyclic
@@ -162,10 +176,14 @@ The existing benchmark JSON uses Post as the center node.
 
 ### L4-PB (Predicate Scattered)
 Predicates on 3 different branches (node + edge mixed):
-```
-WHERE Creator.birthday > 1990-01-01          (node, creator branch)
-  AND likes.creationdate > 2012-06-01        (edge, liker branch)
-  AND Comment.creationdate > 2012-01-01      (node, comment branch)
+```cypher
+MATCH (:Tag)<-[:POST_HASTAG_TAG]-(post:Post)-[:POST_HASCREATOR_PERSON]->(creator:Person),
+      (post)<-[l:PERSON_LIKES_POST]-(liker:Person),
+      (post)<-[:COMMENT_REPLYOF_POST]-(comment:Comment)
+WHERE creator.birthday > 631152000000
+  AND l.creationDate > 1338508800000
+  AND comment.creationDate > 1325376000000
+RETURN count(*) AS count
 ```
 
 ---
@@ -174,14 +192,14 @@ WHERE Creator.birthday > 1990-01-01          (node, creator branch)
 
 Original Cypher:
 ```cypher
-MATCH (person1:Person)-[:KNOWS]-(person2:Person)
-      -[:KNOWS]-(person3:Person)-[:HAS_INTEREST]->(tag:Tag)
+MATCH (person1:Person)-[:PERSON_KNOWS_PERSON]-(person2:Person)
+      -[:PERSON_KNOWS_PERSON]-(person3:Person)-[:PERSON_HASINTEREST_TAG]->(tag:Tag)
 WHERE person1 <> person3
 RETURN count(*) AS count
 ```
 
 ```
-Person₁ ──knows── Person₂ ──knows── Person₃ ──hasInterest──→ Tag
+Person₁ ──PERSON_KNOWS_PERSON── Person₂ ──PERSON_KNOWS_PERSON── Person₃ ──PERSON_HASINTEREST_TAG──→ Tag
 ```
 
 - 4 nodes, 3 edges, acyclic
@@ -189,10 +207,14 @@ Person₁ ──knows── Person₂ ──knows── Person₃ ──hasInter
 
 ### L5-PA (Predicate Clustered)
 Predicates concentrated on adjacent Person₁, Person₂ and the edge between them:
-```
-WHERE Person₁.gender = 'female'              (node)
-  AND Person₂.gender = 'male'                (node)
-  AND knows₁.creationdate > 2012-01-01       (edge, P₁-P₂)
+```cypher
+MATCH (person1:Person)-[k:PERSON_KNOWS_PERSON]-(person2:Person)
+      -[:PERSON_KNOWS_PERSON]-(person3:Person)-[:PERSON_HASINTEREST_TAG]->(tag:Tag)
+WHERE person1 <> person3
+  AND person1.gender = 'female'
+  AND person2.gender = 'male'
+  AND k.creationDate > 1325376000000
+RETURN count(*) AS count
 ```
 
 ---
@@ -202,24 +224,39 @@ WHERE Person₁.gender = 'female'              (node)
 This pattern does NOT exist in LSQB Q1-Q9. It is based on the p8 pattern
 used in existing benchmarks, which combines a cycle with branch structure.
 
+```cypher
+MATCH (person1:Person)-[:PERSON_KNOWS_PERSON]-(person2:Person),
+      (comment1:Comment)-[:COMMENT_HASCREATOR_PERSON]->(person1),
+      (comment2:Comment)-[:COMMENT_HASCREATOR_PERSON]->(person2),
+      (comment1)-[:COMMENT_REPLYOF_COMMENT]->(comment2),
+      (comment1)-[:COMMENT_HASTAG_TAG]->(tag:Tag)<-[:COMMENT_HASTAG_TAG]-(comment2)
+RETURN count(*) AS count
 ```
-Person₁ ──knows── Person₂
-    ↑ hasCreator         ↑ hasCreator
- Comment₁ ──replyOf──→ Comment₂
-    ↓ hasTag             ↓ hasTag
-         Tag (same)
+
+```
+Person₁ ──PERSON_KNOWS_PERSON── Person₂
+    ↑ COMMENT_HASCREATOR_PERSON       ↑ COMMENT_HASCREATOR_PERSON
+ Comment₁ ──COMMENT_REPLYOF_COMMENT──→ Comment₂
+    ↓ COMMENT_HASTAG_TAG               ↓ COMMENT_HASTAG_TAG
+                    Tag (same)
 ```
 
 - 5 nodes (Person₁, Person₂, Comment₁, Comment₂, Tag), 6 edges, **cyclic**
-- Cycle: Person₁-knows-Person₂-hasCreator←Comment₂-replyOf←Comment₁-hasCreator→Person₁
+- Cycle: Person₁-PERSON_KNOWS_PERSON-Person₂-COMMENT_HASCREATOR_PERSON←Comment₂-COMMENT_REPLYOF_COMMENT←Comment₁-COMMENT_HASCREATOR_PERSON→Person₁
 - Branch: both Comments share the same Tag (creates additional structural constraint)
 
 ### L6-PA (Predicate Clustered)
 Predicates on adjacent Person₁, Person₂ and nearby edge:
-```
-WHERE Person₁.gender = 'male'                (node)
-  AND Person₂.gender = 'male'                (node)
-  AND replyOf.creationdate > 2012-01-01      (edge, Comment₁→Comment₂)
+```cypher
+MATCH (person1:Person)-[:PERSON_KNOWS_PERSON]-(person2:Person),
+      (comment1:Comment)-[:COMMENT_HASCREATOR_PERSON]->(person1),
+      (comment2:Comment)-[:COMMENT_HASCREATOR_PERSON]->(person2),
+      (comment1)-[r:COMMENT_REPLYOF_COMMENT]->(comment2),
+      (comment1)-[:COMMENT_HASTAG_TAG]->(tag:Tag)<-[:COMMENT_HASTAG_TAG]-(comment2)
+WHERE person1.gender = 'male'
+  AND person2.gender = 'male'
+  AND r.creationDate > 1325376000000
+RETURN count(*) AS count
 ```
 
 ---
@@ -228,12 +265,12 @@ WHERE Person₁.gender = 'male'                (node)
 
 | Query | Style | Node Predicates | Edge Predicates | Location |
 |-------|-------|----------------|-----------------|----------|
-| L1-PB | Scattered | Person.language + Comment.creationdate | hasMember.creationdate | Left(node)/middle(edge)/right(node) |
-| L2-PA | Clustered | Person₁.gender + Person₂.gender | knows.creationdate | Cycle top: 2 nodes + 1 edge |
+| L1-PB | Scattered | Person.language + Comment.creationdate | FORUM_HASMEMBER_PERSON.creationdate | Left(node)/middle(edge)/right(node) |
+| L2-PA | Clustered | Person₁.gender + Person₂.gender | PERSON_KNOWS_PERSON.creationdate | Cycle top: 2 nodes + 1 edge |
 | L3-PB | Scattered | Person₁.gender + Person₃.birthday + Person₂.language | — | 3 cycle nodes, different attrs |
-| L4-PB | Scattered | Creator.birthday + Comment.creationdate | likes.creationdate | 3 branches: node/edge/node |
-| L5-PA | Clustered | Person₁.gender + Person₂.gender | knows₁.creationdate | Path head: 2 nodes + 1 edge |
-| L6-PA | Clustered | Person₁.gender + Person₂.gender | replyOf.creationdate | Cycle top: 2 nodes + 1 edge |
+| L4-PB | Scattered | Creator.birthday + Comment.creationdate | PERSON_LIKES_POST.creationdate | 3 branches: node/edge/node |
+| L5-PA | Clustered | Person₁.gender + Person₂.gender | PERSON_KNOWS_PERSON.creationdate | Path head: 2 nodes + 1 edge |
+| L6-PA | Clustered | Person₁.gender + Person₂.gender | COMMENT_REPLYOF_COMMENT.creationdate | Cycle top: 2 nodes + 1 edge |
 
 ---
 

@@ -1,3 +1,8 @@
+//! PCF 运算包装层。
+//!
+//! 这里把论文/算法里的 `alpha`、`beta` 等组合操作收敛成更直接的 Rust 接口，
+//! 供抽象图规约逻辑使用。
+
 use serde::{Deserialize, Serialize};
 
 use super::super::error::GCardResult;
@@ -6,6 +11,7 @@ use super::function::{PiecewiseConstantFunction, pointwise_function_min, pointwi
 pub type Pcf = PiecewiseConstantFunction;
 
 pub fn alpha(pieces: &[Pcf]) -> Pcf {
+    // 多个独立贡献做逐点乘法。
     pointwise_function_mult(pieces)
 }
 
@@ -15,6 +21,7 @@ pub fn alpha_refs(pieces: &[&Pcf]) -> Pcf {
 }
 
 pub fn beta_left(rx: &Pcf, ry: &Pcf, sy: &Pcf) -> Pcf {
+    // 在一条连接边上，把右侧统计投影回左侧。
     calculate_non_joining_column_frequency(sy, ry, rx)
 }
 
@@ -31,6 +38,8 @@ fn project_child_via_parent(
     parent_from: &PiecewiseConstantFunction,
     parent_to: &PiecewiseConstantFunction,
 ) -> PiecewiseConstantFunction {
+    // 这个辅助函数的直觉可以理解成：
+    // “把 child 的分段，沿着 parent_from -> parent_to 的累计行数映射搬运过去”。
     if child.constants.is_empty()
         || parent_from.constants.is_empty()
         || parent_to.constants.is_empty()
@@ -121,6 +130,7 @@ fn project_child_via_parent(
 }
 
 fn maxreduce_edge(edge_a: &Pcf, edge_b: &Pcf) -> (Pcf, Pcf) {
+    // 对同一条边两端的 PCF 做对齐，避免某一侧的最大值/总量显著超过另一侧。
     let max_a = edge_a.max_value();
     let max_b = edge_b.max_value();
 
@@ -149,6 +159,8 @@ pub fn calculate_non_joining_column_frequency(
     sx: &PiecewiseConstantFunction,
     sy: &PiecewiseConstantFunction,
 ) -> PiecewiseConstantFunction {
+    // 这是 beta 系列的核心数值过程。
+    // 目标是把“join 列上的频率信息”转换成“非 join 列上的可传播频率”。
     let mut sy_to_x_right_x = Vec::new();
     let mut sy_to_x_right_y = Vec::new();
     let mut sx_to_y_slope = Vec::new();

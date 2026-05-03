@@ -1,7 +1,8 @@
-//! Standalone, read-optimised graph store for GCard sampling and update propagation.
+//! GCard 自用的轻量图存储。
 //!
-//! [`FlatGraph`] is a pure in-memory graph with no MVCC, no transactions, and no
-//! locking.  It replaces `MemoryGraph + MemTransaction` in two hot paths:
+//! 它的定位不是通用图存储，而是“面向 GCard 热路径的只读/少写结构”。
+//! 相比 `MemoryGraph + MemTransaction`，它去掉了 MVCC、事务、锁等通用能力，
+//! 换来更低的邻居访问成本。
 //!
 //! 1. **Wander Join / predicate sampling** — fast label-indexed vertex sampling, zero-copy CSR
 //!    neighbor slices, and direct property access.
@@ -27,18 +28,24 @@ pub mod csr;
 pub mod update;
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
 
 use csr::CsrAdjWithEid;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
 use rand::Rng;
 use rand::seq::SliceRandom;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use update::{PendingChanges, PendingEdge};
 
 // ── Reverse-lookup metadata stored per edge ───────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct EdgeInfo {
+    /// 边两端和标签的反查元数据。
+    /// 删除边或按 edge_id 回查类型时要用到。
     src: VertexId,
     src_label: String,
     dst: VertexId,
@@ -52,7 +59,7 @@ struct EdgeInfo {
 ///
 /// No `minigu_storage` dependency.  Thread-safe for concurrent reads once
 /// constructed (all fields are immutable except `pending`).
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FlatGraph {
     // ── Topology ──────────────────────────────────────────────────────────────
     /// label_name → sorted vertex IDs.
@@ -102,7 +109,7 @@ pub struct FlatGraphBuilder {
     edge_prop_schema: HashMap<String, Vec<String>>,
     edge_type_schema: HashMap<String, (String, String)>,
     edge_info: HashMap<EdgeId, EdgeInfo>,
-    /// (src_label, edge_label, outgoing) → [(src_vid, dst_vid, edge_id)]
+    /// 构建 CSR 之前的暂存三元组。
     edge_triples: HashMap<(String, String, bool), Vec<(VertexId, VertexId, EdgeId)>>,
 }
 
@@ -155,6 +162,8 @@ impl FlatGraphBuilder {
         edge_label: &str,
         props: Vec<ScalarValue>,
     ) {
+        // 这里同时写 outgoing / incoming 两套 bucket，
+        // 因为后续查询图遍历经常需要双向看邻居。
         let src_lc = src_label.to_lowercase();
         let dst_lc = dst_label.to_lowercase();
         let el_lc = edge_label.to_lowercase();
@@ -190,13 +199,13 @@ impl FlatGraphBuilder {
     ///
     /// Sorts vertex ID lists and constructs all CSR adjacency structures.
     pub fn build(mut self) -> FlatGraph {
-        // Sort vertex lists for binary-search and consistent sampling.
+        // 顶点列表有序化后，采样、二分查找都会更稳定。
         for vids in self.vertices_by_label.values_mut() {
             vids.sort_unstable();
             vids.dedup();
         }
 
-        // Build CSR for each bucket.
+        // 每种 `(label, edge_label, direction)` 独立建一个 CSR bucket。
         let hop_csrs: HashMap<(String, String, bool), CsrAdjWithEid> = self
             .edge_triples
             .into_iter()
@@ -221,6 +230,20 @@ impl FlatGraphBuilder {
 // ── FlatGraph public API ──────────────────────────────────────────────────────
 
 impl FlatGraph {
+    pub fn export_bincode<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
+        let bytes = bincode::serialize(self)
+            .map_err(|e| anyhow::anyhow!("failed to serialize FlatGraph: {}", e))?;
+        fs::write(path.as_ref(), bytes)?;
+        Ok(())
+    }
+
+    pub fn import_bincode<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let bytes = fs::read(path.as_ref())?;
+        let graph = bincode::deserialize(&bytes)
+            .map_err(|e| anyhow::anyhow!("failed to deserialize FlatGraph: {}", e))?;
+        Ok(graph)
+    }
+
     // ── Vertex queries ────────────────────────────────────────────────────────
 
     /// All vertex IDs with the given label (sorted), or an empty slice.
@@ -450,9 +473,18 @@ impl FlatGraph {
         if self.pending.is_empty() {
             return;
         }
+        let t_total = std::time::Instant::now();
         let pending = std::mem::take(&mut self.pending);
+        eprintln!(
+            "[flatgraph] apply_pending start: +{} vertices, -{} vertices, +{} edges, -{} edges",
+            pending.inserted_vertices.len(),
+            pending.deleted_vertices.len(),
+            pending.inserted_edges.len(),
+            pending.deleted_edge_ids.len()
+        );
 
         // ── 1. Apply vertex insertions ────────────────────────────────────────
+        let t_phase = std::time::Instant::now();
         for (vid, label, props) in pending.inserted_vertices {
             self.vertex_label_map.insert(vid, label.clone());
             self.vertices_by_label.entry(label).or_default().push(vid);
@@ -482,8 +514,13 @@ impl FlatGraph {
         for vids in self.vertices_by_label.values_mut() {
             vids.sort_unstable();
         }
+        eprintln!(
+            "[flatgraph] apply_pending phase1 vertices: {:.2}s",
+            t_phase.elapsed().as_secs_f64()
+        );
 
         // ── 3. Determine affected CSR buckets ─────────────────────────────────
+        let t_phase = std::time::Instant::now();
         let mut affected: HashSet<(String, String, bool)> = HashSet::new();
         for pe in &pending.inserted_edges {
             affected.insert((pe.src_label.clone(), pe.edge_label.clone(), true));
@@ -503,48 +540,79 @@ impl FlatGraph {
                 affected.insert(bucket_key.clone());
             }
         }
+        let affected_count = affected.len();
+        let affected_keys: Vec<(String, String, bool)> = affected.into_iter().collect();
+        eprintln!(
+            "[flatgraph] apply_pending phase2 affected_buckets: {:.2}s ({} buckets)",
+            t_phase.elapsed().as_secs_f64(),
+            affected_count
+        );
 
         // ── 4. Rebuild affected CSR buckets ───────────────────────────────────
-        for bucket_key in &affected {
-            let (src_label, edge_label, outgoing) = bucket_key;
+        let t_phase = std::time::Instant::now();
+        let affected_keys_for_apply = affected_keys.clone();
+        let rebuilt_buckets: Vec<((String, String, bool), CsrAdjWithEid)> = affected_keys
+            .into_par_iter()
+            .filter_map(|bucket_key| {
+                let (src_label, edge_label, outgoing) = &bucket_key;
 
-            // Collect surviving edges from the existing CSR.
-            // Filter out deleted edges AND edges incident to deleted vertices.
-            let mut triples: Vec<(VertexId, VertexId, EdgeId)> = Vec::new();
-            if let Some(csr) = self.hop_csrs.get(bucket_key) {
-                for &src in &csr.verts {
-                    if pending.deleted_vertices.contains(&src) {
-                        continue;
-                    }
-                    for &(dst, eid) in csr.neighbors_slice(src) {
-                        if !pending.deleted_edge_ids.contains(&eid)
-                            && !pending.deleted_vertices.contains(&dst)
-                        {
-                            triples.push((src, dst, eid));
+                // Collect surviving edges from the existing CSR.
+                // Filter out deleted edges AND edges incident to deleted vertices.
+                let mut triples: Vec<(VertexId, VertexId, EdgeId)> = Vec::new();
+                if let Some(csr) = self.hop_csrs.get(&bucket_key) {
+                    for &src in &csr.verts {
+                        if pending.deleted_vertices.contains(&src) {
+                            continue;
+                        }
+                        for &(dst, eid) in csr.neighbors_slice(src) {
+                            if !pending.deleted_edge_ids.contains(&eid)
+                                && !pending.deleted_vertices.contains(&dst)
+                            {
+                                triples.push((src, dst, eid));
+                            }
                         }
                     }
                 }
-            }
 
-            // Append newly inserted edges belonging to this bucket.
-            for pe in &pending.inserted_edges {
-                if *outgoing && &pe.src_label == src_label && &pe.edge_label == edge_label {
-                    triples.push((pe.src, pe.dst, pe.edge_id));
-                } else if !*outgoing && &pe.dst_label == src_label && &pe.edge_label == edge_label {
-                    triples.push((pe.dst, pe.src, pe.edge_id));
+                // Append newly inserted edges belonging to this bucket.
+                for pe in &pending.inserted_edges {
+                    if *outgoing && &pe.src_label == src_label && &pe.edge_label == edge_label {
+                        triples.push((pe.src, pe.dst, pe.edge_id));
+                    } else if !*outgoing
+                        && &pe.dst_label == src_label
+                        && &pe.edge_label == edge_label
+                    {
+                        triples.push((pe.dst, pe.src, pe.edge_id));
+                    }
                 }
-            }
 
-            // Rebuild (or remove if empty).
-            let new_csr = CsrAdjWithEid::build(triples);
-            if new_csr.vertex_count() == 0 {
-                self.hop_csrs.remove(bucket_key);
-            } else {
-                self.hop_csrs.insert(bucket_key.clone(), new_csr);
-            }
+                let new_csr = CsrAdjWithEid::build(triples);
+                if new_csr.vertex_count() == 0 {
+                    None
+                } else {
+                    Some((bucket_key, new_csr))
+                }
+            })
+            .collect();
+        let rebuilt_edge_entries: usize = rebuilt_buckets
+            .iter()
+            .map(|(_, csr)| csr.edge_count())
+            .sum();
+        for key in affected_keys_for_apply {
+            self.hop_csrs.remove(&key);
         }
+        for (bucket_key, new_csr) in rebuilt_buckets {
+            self.hop_csrs.insert(bucket_key, new_csr);
+        }
+        eprintln!(
+            "[flatgraph] apply_pending phase3 rebuild_buckets: {:.2}s ({} buckets, {} edge entries)",
+            t_phase.elapsed().as_secs_f64(),
+            affected_count,
+            rebuilt_edge_entries
+        );
 
         // ── 5. Update edge_info and edge_props ────────────────────────────────
+        let t_phase = std::time::Instant::now();
         for pe in &pending.inserted_edges {
             self.edge_info.insert(
                 pe.edge_id,
@@ -564,6 +632,14 @@ impl FlatGraph {
             self.edge_info.remove(&eid);
             self.edge_props.remove(&eid);
         }
+        eprintln!(
+            "[flatgraph] apply_pending phase4 edge_maps: {:.2}s",
+            t_phase.elapsed().as_secs_f64()
+        );
+        eprintln!(
+            "[flatgraph] apply_pending total: {:.2}s",
+            t_total.elapsed().as_secs_f64()
+        );
     }
 
     // ── Statistics ────────────────────────────────────────────────────────────
@@ -576,6 +652,20 @@ impl FlatGraph {
     /// Total number of edges (counts each directed edge once).
     pub fn total_edge_count(&self) -> usize {
         self.edge_info.len()
+    }
+
+    /// Number of edges for a specific edge label, derived from the outgoing CSR bucket.
+    /// O(1) — no full scan needed.
+    pub fn edge_count_by_label(&self, edge_label: &str) -> usize {
+        if let Some((src_label, _)) = self.edge_type_schema.get(edge_label) {
+            let key = (src_label.clone(), edge_label.to_string(), true);
+            self.hop_csrs
+                .get(&key)
+                .map(|csr| csr.edge_count())
+                .unwrap_or(0)
+        } else {
+            0
+        }
     }
 
     // ── Accessors for export / random_update ─────────────────────────────────
@@ -655,5 +745,34 @@ impl FlatGraph {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::FlatGraphBuilder;
+
+    #[test]
+    fn flat_graph_bincode_roundtrip() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_edge_type_schema("knows", "person", "person");
+        builder.add_vertex(1, "person", vec![]);
+        builder.add_vertex(2, "person", vec![]);
+        builder.add_edge(10, 1, "person", 2, "person", "knows", vec![]);
+        let graph = builder.build();
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        graph.export_bincode(&path).unwrap();
+
+        let restored = super::FlatGraph::import_bincode(&path).unwrap();
+        assert_eq!(restored.all_vertex_ids_by_label("person"), &[1, 2]);
+        assert_eq!(restored.all_edge_ids().collect::<Vec<_>>(), vec![10]);
+        assert_eq!(
+            restored.edge_endpoints(10),
+            Some((1, "person", 2, "person", "knows"))
+        );
     }
 }

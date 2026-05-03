@@ -43,19 +43,19 @@ use crate::procedures::import_graph::{get_graph_type_from_manifest, property_to_
 /// Per-edge-type CSR: sorted source vertices with flat neighbor offsets.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct CsrAdj {
-    /// Sorted source vertex IDs.
+    /// 本 CSR bucket 覆盖的“起点顶点”集合。
     pub verts: Vec<VertexId>,
-    /// Flat neighbor array.
+    /// 扁平邻居数组。
     pub neighbors: Vec<VertexId>,
-    /// CSR offsets: neighbors of verts[i] at neighbors[offsets[i]..offsets[i+1]].
+    /// CSR 偏移数组。
     pub offsets: Vec<usize>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct LightGraph {
-    /// label_name (lowercased) → sorted vertex IDs
+    /// 顶点标签 -> 该标签下所有顶点 id。
     pub vertices_by_label: HashMap<String, Vec<VertexId>>,
-    /// (vertex_label, edge_label, outgoing) → CsrAdj
+    /// `(起点标签, 边标签, 是否出边)` -> 对应 CSR bucket。
     pub hop_csrs: HashMap<(String, String, bool), CsrAdj>,
 }
 
@@ -64,6 +64,7 @@ pub(super) struct LightGraph {
 // ---------------------------------------------------------------------------
 
 fn read_vertex_ids(path: &Path) -> Vec<VertexId> {
+    // 这里仅读第一列 id，不加载属性，目的是尽量低内存地构造 topology。
     let mut rdr = match ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
@@ -94,6 +95,7 @@ fn read_vertex_ids(path: &Path) -> Vec<VertexId> {
 
 /// Read (src, dst) pairs from an edge CSV.  Only the first two columns are used.
 fn read_edge_pairs(path: &Path) -> Vec<(VertexId, VertexId)> {
+    // 同样只取结构信息，不取边属性。
     let mut rdr = match ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
@@ -131,7 +133,7 @@ fn read_edge_pairs(path: &Path) -> Vec<(VertexId, VertexId)> {
 /// Build a CSR where `all_verts` are the "source" side and pairs provide
 /// (source, neighbor) for the given direction.
 fn build_csr(all_verts: &[VertexId], mut pairs: Vec<(VertexId, VertexId)>) -> CsrAdj {
-    // Sort by source vertex
+    // 标准 CSR 构建：先按 src 排序，再把邻居串接进一条平面数组。
     pairs.sort_unstable_by_key(|&(src, _)| src);
 
     let n = all_verts.len();
@@ -142,7 +144,8 @@ fn build_csr(all_verts: &[VertexId], mut pairs: Vec<(VertexId, VertexId)>) -> Cs
     for &vid in all_verts {
         offsets.push(neighbors.len());
         while pair_idx < pairs.len() && pairs[pair_idx].0 < vid {
-            pair_idx += 1; // skip pairs whose src is not in all_verts
+            // 理论上不常见，但允许 pairs 中出现不在 all_verts 的 src。
+            pair_idx += 1;
         }
         while pair_idx < pairs.len() && pairs[pair_idx].0 == vid {
             neighbors.push(pairs[pair_idx].1);
@@ -163,7 +166,10 @@ fn build_csr(all_verts: &[VertexId], mut pairs: Vec<(VertexId, VertexId)>) -> Cs
 // ---------------------------------------------------------------------------
 
 fn build_light_graph(manifest: &Manifest, dataset_dir: &Path) -> LightGraph {
-    // 1. Read vertex IDs per label (parallel across vertex types)
+    // LightGraph 是一个“只含结构、没有属性/MVCC”的过渡表示。
+    // 用它来做 catalog 构建，比把整图先导入 MemoryGraph 更省内存。
+
+    // 1. 并行读取每种顶点类型的顶点 id。
     let vertex_results: Vec<(String, Vec<VertexId>)> = manifest
         .vertices
         .par_iter()
@@ -177,7 +183,7 @@ fn build_light_graph(manifest: &Manifest, dataset_dir: &Path) -> LightGraph {
         .collect();
     let vertices_by_label: HashMap<String, Vec<VertexId>> = vertex_results.into_iter().collect();
 
-    // 2. Read edge pairs and build CSR for outgoing + incoming (parallel across edge types)
+    // 2. 并行读取边，再分别构建 outgoing / incoming 两种方向的 CSR。
     let edge_results: Vec<(String, String, String, Vec<(VertexId, VertexId)>)> = manifest
         .edges
         .par_iter()
@@ -262,29 +268,46 @@ pub(super) fn scan_from_light_graph(
     max_k: usize,
     pool: &rayon::ThreadPool,
 ) -> Result<degree_compute_dense::ScannedHops, anyhow::Error> {
+    fn dense_raw_hop(all_verts: &[VertexId], csr: Option<&CsrAdj>) -> RawHopData {
+        match csr {
+            Some(csr) => {
+                let mut offsets = Vec::with_capacity(all_verts.len() + 1);
+                let mut csr_pos = 0usize;
+                for &vid in all_verts {
+                    while csr_pos < csr.verts.len() && csr.verts[csr_pos] < vid {
+                        csr_pos += 1;
+                    }
+                    if csr_pos < csr.verts.len() && csr.verts[csr_pos] == vid {
+                        offsets.push(csr.offsets[csr_pos]);
+                    } else {
+                        let cur = offsets.last().copied().unwrap_or(0);
+                        offsets.push(cur);
+                    }
+                }
+                offsets.push(csr.neighbors.len());
+                RawHopData {
+                    src_vids: all_verts.to_vec(),
+                    neighbors_flat: csr.neighbors.clone(),
+                    offsets,
+                }
+            }
+            None => RawHopData {
+                offsets: vec![0; all_verts.len() + 1],
+                src_vids: all_verts.to_vec(),
+                neighbors_flat: Vec::new(),
+            },
+        }
+    }
+
     degree_compute_dense::scan_all_hops_from_raw(
         &|vertex_label, edge_label, outgoing| {
             let key = (vertex_label.to_string(), edge_label.to_string(), outgoing);
-            match light_graph.hop_csrs.get(&key) {
-                Some(csr) => RawHopData {
-                    src_vids: csr.verts.clone(),
-                    neighbors_flat: csr.neighbors.clone(),
-                    offsets: csr.offsets.clone(),
-                },
-                None => {
-                    let verts = light_graph
-                        .vertices_by_label
-                        .get(vertex_label)
-                        .cloned()
-                        .unwrap_or_default();
-                    let n = verts.len();
-                    RawHopData {
-                        offsets: vec![0; n + 1],
-                        src_vids: verts,
-                        neighbors_flat: Vec::new(),
-                    }
-                }
-            }
+            let verts = light_graph
+                .vertices_by_label
+                .get(vertex_label)
+                .cloned()
+                .unwrap_or_default();
+            dense_raw_hop(&verts, light_graph.hop_csrs.get(&key))
         },
         edges,
         schema_paths,
@@ -637,6 +660,20 @@ pub fn build_procedure() -> Procedure {
             flat_graph.total_vertex_count(),
             flat_graph.total_edge_count(),
         );
+
+        // ── Persist FlatGraph and Statistic to db directory ───────────────────
+        let db_path = context.database().config().db_path.clone();
+        if let Some(ref db_path) = db_path {
+            let fg_path = crate::catalog_persistence::flatgraph_path(db_path, &graph_name);
+            if let Err(e) = flat_graph.export_bincode(&fg_path) {
+                eprintln!("load_ldbc: warning: could not save FlatGraph: {}", e);
+            } else {
+                eprintln!("load_ldbc: FlatGraph saved to {}", fg_path.display());
+            }
+            if let Err(e) = save_statistic(db_path, &graph_name, &statistic) {
+                eprintln!("load_ldbc: warning: could not save statistic to db: {}", e);
+            }
+        }
 
         // ── Register a lightweight GraphContainer (no graph data, schema + catalog only) ──
         let schema = context

@@ -34,6 +34,8 @@ impl GraphSkeleton<AbstractEdge> {
     }
 
     pub fn add_edge(&mut self, edge_id: EdgeId, edge: AbstractEdge) {
+        // 抽象图沿用通用图骨架，所以这里除了存边本体，
+        // 还要同步维护入/出边索引。
         let (src, dst) = (edge.src, edge.dst);
         self.edges.insert(edge_id, edge);
         self.outgoing_edges.entry(src).or_default().push(edge_id);
@@ -57,6 +59,8 @@ impl GraphSkeleton<AbstractEdge> {
     }
 
     pub fn get_topological_generations(&self, root: VertexId) -> HashMap<VertexId, usize> {
+        // 从 root 出发做 BFS，得到“离根的层数”。
+        // 后面的自底向上规约会按这个层次来传播 PCF。
         let mut generations = HashMap::new();
         let mut queue = VecDeque::from([(root, 0usize)]);
         let mut seen = HashSet::from([root]);
@@ -73,6 +77,8 @@ impl GraphSkeleton<AbstractEdge> {
     }
 
     pub fn pick_root(&self) -> Option<VertexId> {
+        // 选一个“最居中”的根：使最大层数最小。
+        // 这样做能减小规约深度，通常也让传播更平衡。
         let vertices: Vec<VertexId> = self.vertices.keys().copied().collect();
         if vertices.is_empty() {
             return None;
@@ -136,6 +142,8 @@ impl GraphSkeleton<AbstractEdge> {
     }
 
     fn get_edge_pcf_at_vertex(&self, edge_id: EdgeId, vertex_id: VertexId) -> Pcf {
+        // 同一条抽象边在两端可能对应不同的投影视角，
+        // 所以需要根据当前站在哪个顶点来取 src_pcf / dst_pcf。
         if let Some(edge) = self.edges.get(&edge_id) {
             if edge.src == vertex_id {
                 edge.src_pcf.as_ref().clone()
@@ -148,6 +156,8 @@ impl GraphSkeleton<AbstractEdge> {
     }
 
     pub fn get_es(&mut self) -> GCardResult<f64> {
+        // `es` 可以理解为当前抽象图估算出来的结果规模。
+        // 做法是把抽象图当成一棵（或近似树状）结构，自底向上组合每条边的 PCF。
         if self.vertices.len() <= 1 {
             return Err(GCardError::InvalidState(
                 "AbstractGraph must have at least 2 vertices".to_string(),
@@ -161,13 +171,14 @@ impl GraphSkeleton<AbstractEdge> {
         let generations = self.get_topological_generations(root);
         let max_gen = generations.values().copied().max().unwrap_or(0);
 
-        // Pre-build generation-indexed vertex lists to avoid repeated filtering.
+        // 先把“每一层有哪些点”预建出来，避免后面每层都扫整个 generations。
         let mut gen_to_vertices: Vec<Vec<VertexId>> = vec![Vec::new(); max_gen + 1];
         for (&v, &g) in &generations {
             gen_to_vertices[g].push(v);
         }
 
-        // Pre-build parent and children maps (one pass over all edges).
+        // 再预建父子映射。
+        // 后续规约阶段如果每次都现场找 parent/children，会有很多重复查找。
         let mut parent_map: HashMap<VertexId, (VertexId, EdgeId)> = HashMap::new();
         let mut children_map: HashMap<VertexId, Vec<(VertexId, EdgeId)>> = HashMap::new();
         for (&edge_id, edge) in &self.edges {
@@ -195,6 +206,7 @@ impl GraphSkeleton<AbstractEdge> {
         let mut child_vertex_pcf: HashMap<VertexId, Pcf> = HashMap::new();
 
         for cur_gen in (0..=max_gen).rev() {
+            // 逆层序遍历：先把叶子规约完，再把信息逐层往根上传。
             for &v in &gen_to_vertices[cur_gen] {
                 let parent_opt = parent_map.get(&v);
                 let children = children_map.get(&v);
@@ -219,10 +231,12 @@ impl GraphSkeleton<AbstractEdge> {
                     let multiplied_child_pcf = if child_pcfs.is_empty() {
                         Pcf::empty()
                     } else {
+                        // `alpha_refs` 可以理解成把多个子树的贡献做合并。
                         let refs: Vec<&Pcf> = child_pcfs.iter().collect();
                         alpha_refs(&refs)
                     };
                     let projected = if cur_gen > 0 {
+                        // 非根节点需要把“孩子方向的统计”投影回父边所处的坐标系。
                         beta_right(
                             &multiplied_child_pcf,
                             &vertex_to_parent_pcf,
@@ -232,18 +246,21 @@ impl GraphSkeleton<AbstractEdge> {
                         multiplied_child_pcf
                     };
                     if cur_gen > 0 {
+                        // 然后再把“来自孩子的贡献”和“本节点到父节点的边 PCF”乘起来。
                         let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
                         alpha_refs(&pcf_refs)
                     } else {
                         projected
                     }
                 } else {
+                    // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边。
                     parent_to_vertex_pcf
                 };
 
                 if cur_gen > 0 {
                     child_vertex_pcf.insert(v, result);
                 } else {
+                    // 到根时，不再向上返回 PCF，而是直接把最终估算规模取出来。
                     return Ok(result.get_num_rows());
                 }
             }

@@ -12,9 +12,13 @@ use minigu_context::graph::{GraphContainer, GraphStorage};
 use minigu_storage::tp::MemoryGraph;
 use rayon::ThreadPoolBuilder;
 
-use crate::catalog_persistence::{catalog_entry_to_graph_type, graph_data_path, load_catalog};
+use crate::catalog_persistence::{
+    catalog_entry_to_graph_type, flatgraph_path, graph_data_path, load_catalog, statistic_path,
+};
 use crate::error::Result;
-use crate::procedures::build_predefined_procedures;
+use crate::procedures::{
+    FlatGraph, build_predefined_procedures, load_statistic, new_gcard_update_log,
+};
 use crate::session::Session;
 
 pub struct Database {
@@ -45,6 +49,55 @@ impl Database {
                 let graph_type = catalog_entry_to_graph_type(entry);
                 let container =
                     Arc::new(GraphContainer::new(graph_type, GraphStorage::Memory(graph)));
+
+                // Try to load FlatGraph from <db_path>/<graph_name>.flatgraph.bin
+                let fg_path = flatgraph_path(&db_path, graph_name);
+                if fg_path.exists() {
+                    eprintln!(
+                        "[database] loading FlatGraph from {} ...",
+                        fg_path.display()
+                    );
+                    match FlatGraph::import_bincode(&fg_path) {
+                        Ok(fg) => {
+                            container.set_gcard_flat_graph(Arc::new(fg));
+                            eprintln!("[database] FlatGraph loaded");
+                        }
+                        Err(e) => {
+                            eprintln!("[database] warning: failed to load FlatGraph: {}", e);
+                        }
+                    }
+                }
+
+                // Try to load Statistic + rebuild DegreeSeqGraphCompressed
+                let stat_path = statistic_path(&db_path, graph_name);
+                if stat_path.exists() {
+                    eprintln!(
+                        "[database] loading Statistic from {} ...",
+                        stat_path.display()
+                    );
+                    match load_statistic(&stat_path) {
+                        Ok(Some(statistic)) => {
+                            match statistic.to_degree_seq_graph_compressed() {
+                                Ok(dsgc) => {
+                                    container.set_degree_seq_graph_compressed(Arc::new(dsgc));
+                                    eprintln!("[database] DegreeSeqGraphCompressed rebuilt");
+                                }
+                                Err(e) => {
+                                    eprintln!("[database] warning: failed to build DSGC: {}", e);
+                                }
+                            }
+                            container.set_statistic(Arc::new(statistic));
+                            // Initialize an empty update log (default max_k=3)
+                            container.set_gcard_update_log(new_gcard_update_log(2));
+                            eprintln!("[database] Statistic loaded, update log initialized");
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("[database] warning: failed to load Statistic: {}", e);
+                        }
+                    }
+                }
+
                 default_schema.add_graph(graph_name.clone(), container);
             }
         }

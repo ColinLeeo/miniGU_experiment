@@ -15,7 +15,8 @@ use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{
-    AbstractEdge, CandidateTree, ComparisonOp, PredicateDef, PredicateId, PredicateLocation,
+    AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef, PredicateDef,
+    PredicateId, PredicateLocation,
 };
 use crate::procedures::gcard_query::union_find::UnionFind;
 use crate::procedures::gcard_query::{
@@ -117,6 +118,10 @@ impl QueryGraph {
         predicate_vertices: &HashSet<VertexId>,
         k_path: &HashSet<EdgeId>,
     ) -> u32 {
+        // 这里是一个启发式打分，而不是严格统计意义上的代价模型。
+        // 目标是优先把“更有信息量”的边放进生成树，便于后续压缩和估算。
+        // 这里一个引申的思想：我希望获取更有价值的信息，
+        // 对我结果影响越大，我就越应该对其打分高。
         if !edge.predicates.is_empty() {
             return 5;
         }
@@ -135,6 +140,8 @@ impl QueryGraph {
     }
 
     pub fn score_edges(&self, k: usize) -> HashMap<EdgeId, u32> {
+        // 先识别谓词顶点，再找谓词之间长度 <= k 的重要路径边，
+        // 最后把这些信息折叠成每条边的局部启发式分数。
         let predicate_vertices: HashSet<VertexId> = self
             .inner
             .vertices
@@ -156,6 +163,9 @@ impl QueryGraph {
         predicate_vertices: &HashSet<VertexId>,
         k: usize,
     ) -> HashSet<EdgeId> {
+        // 语义上是在问：
+        // “哪些边位于两个带谓词顶点之间、长度不超过 k 的路径上？”
+        // 这些边通常值得优先保留，因为它们更可能影响选择率传播。
         let mut k_path_edges = HashSet::new();
         if k == 0 {
             return k_path_edges;
@@ -181,6 +191,9 @@ impl QueryGraph {
         end: VertexId,
         k: usize,
     ) -> Vec<HashSet<EdgeId>> {
+        // 用显式栈做 DFS，而不是递归：
+        // 1. 避免深路径时递归栈增长；
+        // 2. 更容易把“当前边集合”和回溯过程写清楚。
         if k == 0 {
             if start == end {
                 return vec![HashSet::new()];
@@ -190,7 +203,6 @@ impl QueryGraph {
         let mut result = Vec::new();
         let mut path_edges = HashSet::new();
         let mut visited = HashSet::from([start]);
-        // Stack of (vertex, neighbor_iterator_index); backtrack by popping.
         let mut stack: Vec<(VertexId, Vec<(VertexId, EdgeId)>, usize)> = Vec::new();
 
         let neighbors = self.get_neighbor_edge_pairs(start);
@@ -199,10 +211,10 @@ impl QueryGraph {
         while let Some(frame) = stack.last_mut() {
             let (_current, ref nbrs, ref mut idx) = *frame;
             if *idx >= nbrs.len() {
-                // Backtrack
+                // 当前点的邻居已经尝试完，开始回溯，并撤销把它放进路径时的状态。
                 let (v, _, _) = stack.pop().unwrap();
                 if let Some(parent) = stack.last() {
-                    // Remove the edge that led to v
+                    // 移除“父节点 -> 当前节点”这条路径边，恢复到进入该节点之前。
                     let (_, ref parent_nbrs, parent_idx) = *parent;
                     if parent_idx > 0 {
                         let (_, edge_id) = parent_nbrs[parent_idx - 1];
@@ -236,7 +248,9 @@ impl QueryGraph {
         result
     }
 
-    /// Get all (neighbor_vertex, edge_id) pairs for a vertex.
+    /// 返回一个点的所有 `(邻居顶点, 连接边 id)`。
+    ///
+    /// 注意这里会同时看入边和出边，等价于临时把查询图按无向图来遍历。
     fn get_neighbor_edge_pairs(&self, v: VertexId) -> Vec<(VertexId, EdgeId)> {
         let mut pairs = Vec::new();
         if let Some(outgoing_ids) = self.inner.outgoing_edges.get(&v) {
@@ -293,6 +307,8 @@ impl QueryGraph {
     }
 
     fn build_subgraph_from_edges(&self, selected_edge_ids: &HashSet<EdgeId>) -> QueryGraph {
+        // 把一组边重新包装成一个独立的 QueryGraph，
+        // 便于后续把“候选树”继续送入抽象边构造逻辑。
         let mut subgraph_vertices = HashMap::new();
         let mut subgraph_edges = HashMap::new();
         let mut subgraph_outgoing = HashMap::new();
@@ -337,7 +353,6 @@ impl QueryGraph {
         }
     }
 
-    /// 返回 (QueryGraph, total_score) 的列表，按分数从高到低。
     pub fn build_k_best_trees(
         &self,
         scores: &HashMap<EdgeId, u32>,
@@ -393,6 +408,8 @@ impl QueryGraph {
                     if let Some(path_edges) =
                         self.find_path_edges_in_tree(&current.edge_ids, src, dst)
                     {
+                        // 往树里加一条非树边会形成环。
+                        // 为了保持树结构，必须从这条环上再删掉一条边。
                         let mut path_edges_with_scores: Vec<(EdgeId, u32)> = path_edges
                             .iter()
                             .map(|&eid| {
@@ -464,6 +481,7 @@ impl QueryGraph {
     }
 
     fn has_cycle(&self) -> bool {
+        // 依然用并查集做无向环检测。
         let mut uf = UnionFind::new();
 
         for edge in self.inner.edges.values() {
@@ -483,7 +501,7 @@ impl QueryGraph {
     ) -> String {
         use std::fmt::Write;
         let mut key = format!("path:{}", alt_key);
-        // Sort predicates by (target, id, property, op) for a deterministic key
+        // 这里必须排序，保证逻辑上等价但输入顺序不同的谓词集合能命中同一缓存 key。
         let mut sorted_preds: Vec<_> = predicates.iter().collect();
         sorted_preds.sort_by(|a, b| {
             a.target
@@ -503,6 +521,8 @@ impl QueryGraph {
     }
 
     fn build_path_query(&self, abstract_edge: &AbstractEdge) -> GCardResult<PathQuery> {
+        // 把抽象边重新展开成“路径查询”对象。
+        // catalog / 采样模块更容易消费这种“顶点-边-顶点-边...”的线性表示。
         let mut path_elements = Vec::new();
         let mut vertex_predicates: HashMap<usize, Vec<PredicateDef>> = HashMap::new();
         let mut edge_predicates: HashMap<usize, Vec<PredicateDef>> = HashMap::new();
@@ -532,6 +552,8 @@ impl QueryGraph {
                 })?;
                 let edge_parts: Vec<&str> = edge.label.split('_').collect();
                 let direction = if !edge_parts.is_empty() {
+                    // 这里通过 edge label 里的命名约定推断方向。
+                    // 如果 label 格式不完全符合预期，会回退到 Outgoing。
                     let src_label = edge_parts[0];
                     let dst_label = edge_parts.last().copied().unwrap_or("");
                     if src_label == vertex.label {
@@ -571,6 +593,7 @@ impl QueryGraph {
     }
 
     fn flush_local_cache(local: &HashMap<(u32, u64), bool>, shared: &DashMap<(u32, u64), bool>) {
+        // 线程本地缓存先积累，再批量合并进共享缓存，减少 DashMap 热点竞争。
         for (&k, &v) in local {
             shared.entry(k).or_insert(v);
         }
@@ -582,6 +605,7 @@ impl QueryGraph {
         op: &ComparisonOp,
         expected: &ScalarValue,
     ) -> GCardResult<bool> {
+        // 统一封装谓词比较逻辑，避免顶点谓词/边谓词各写一遍分支。
         use ComparisonOp::*;
 
         match op {
@@ -1321,6 +1345,129 @@ impl QueryGraph {
             abstract_graphs.push(r?);
         }
         Ok(abstract_graphs)
+    }
+
+    /// 从用户指定的分解方案构建抽象图，跳过自动 pivot/path 分解。
+    ///
+    /// JSON 格式：
+    /// ```json
+    /// {
+    ///   "abstract_edges": [
+    ///     { "path_vertices": [1, 2, 3], "original_edge_ids": [1, 2] },
+    ///     { "path_vertices": [3, 4], "original_edge_ids": [3] }
+    ///   ]
+    /// }
+    /// ```
+    pub fn build_abstract_graph_flat_from_decomposition(
+        &self,
+        decomposition: &DecompositionDef,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+        sample_size: usize,
+        predicate_apply_type: &PredicateApplyType,
+    ) -> GCardResult<Vec<(AbstractGraph, u32)>> {
+        let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
+        let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
+        let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());
+
+        let mut all_abstract_edges: Vec<AbstractEdge> = Vec::new();
+        for ae_def in &decomposition.abstract_edges {
+            let abstract_edge = self.build_abstract_edge_from_def(ae_def)?;
+            all_abstract_edges.push(abstract_edge);
+        }
+
+        let results: Vec<GCardResult<AbstractEdge>> = all_abstract_edges
+            .into_par_iter()
+            .map(|mut abstract_edge| {
+                self.fill_pcf_for_abstract_edge_flat(
+                    &mut abstract_edge,
+                    degree_seq_graph,
+                    flat_graph,
+                    sample_size,
+                    predicate_apply_type,
+                    &selectivity_cache,
+                    &flat_vertex_cache,
+                    &pred_cache,
+                )?;
+                Ok(abstract_edge)
+            })
+            .collect();
+
+        let mut abstract_graph = AbstractGraph::new();
+        let mut next_edge_id: EdgeId = 1;
+        for result in results {
+            let abstract_edge = result?;
+            let src_vertex = self.get_vertex(abstract_edge.src).ok_or_else(|| {
+                GCardError::VertexNotFound(format!("Vertex {} not found", abstract_edge.src))
+            })?;
+            let dst_vertex = self.get_vertex(abstract_edge.dst).ok_or_else(|| {
+                GCardError::VertexNotFound(format!("Vertex {} not found", abstract_edge.dst))
+            })?;
+            if abstract_graph.get_vertex(abstract_edge.src).is_none() {
+                abstract_graph.add_vertex(src_vertex.clone());
+            }
+            if abstract_graph.get_vertex(abstract_edge.dst).is_none() {
+                abstract_graph.add_vertex(dst_vertex.clone());
+            }
+            abstract_graph.add_edge(next_edge_id, abstract_edge);
+            next_edge_id += 1;
+        }
+
+        Ok(vec![(abstract_graph, 0)])
+    }
+
+    /// 从单个 `AbstractEdgeDef` 构造 `AbstractEdge`，
+    /// 自动收集路径上顶点和边的谓词。
+    fn build_abstract_edge_from_def(&self, def: &AbstractEdgeDef) -> GCardResult<AbstractEdge> {
+        if def.path_vertices.len() < 2 {
+            return Err(GCardError::InvalidData(
+                "abstract edge must have at least 2 path_vertices".to_string(),
+            ));
+        }
+        if def.original_edge_ids.len() != def.path_vertices.len() - 1 {
+            return Err(GCardError::InvalidData(format!(
+                "original_edge_ids length ({}) must be path_vertices length ({}) - 1",
+                def.original_edge_ids.len(),
+                def.path_vertices.len(),
+            )));
+        }
+
+        let src = def.path_vertices[0];
+        let dst = *def.path_vertices.last().unwrap();
+
+        let mut predicates = Vec::new();
+        for &vertex_id in &def.path_vertices {
+            if let Some(vertex) = self.inner.vertices.get(&vertex_id) {
+                predicates.extend(vertex.predicates.clone());
+            } else {
+                return Err(GCardError::VertexNotFound(format!(
+                    "Vertex {} not found in query graph",
+                    vertex_id
+                )));
+            }
+        }
+        for &edge_id in &def.original_edge_ids {
+            if let Some(edge) = self.inner.edges.get(&edge_id) {
+                predicates.extend(edge.predicates.clone());
+            } else {
+                return Err(GCardError::EdgeNotFound(format!(
+                    "Edge {} not found in query graph",
+                    edge_id
+                )));
+            }
+        }
+
+        Ok(AbstractEdge {
+            src,
+            dst,
+            src_pcf: Arc::new(Pcf::empty()),
+            dst_pcf: Arc::new(Pcf::empty()),
+            predicates,
+            original_edge_ids: def.original_edge_ids.clone(),
+            path_vertices: def.path_vertices.clone(),
+            selectivity: 1.0,
+            path_str: String::new(),
+        })
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────────

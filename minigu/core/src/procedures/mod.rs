@@ -11,6 +11,9 @@ mod mutate_graph;
 mod show_graph;
 mod show_procedures;
 
+pub(crate) use gcard_query::flat_graph::FlatGraph;
+pub(crate) use gcard_query::load_statistic;
+pub(crate) use gcard_query::update_log::new_log_arc as new_gcard_update_log;
 pub(crate) use import_graph::import;
 use minigu_context::procedure::Procedure;
 
@@ -66,6 +69,10 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
         (
             "random_update".to_string(),
             gcard_query::random_update::build_procedure(),
+        ),
+        (
+            "export_flatgraph_snapshot".to_string(),
+            gcard_query::export_flatgraph_snapshot::build_procedure(),
         ),
         (
             "random_insert".to_string(),

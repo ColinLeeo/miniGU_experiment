@@ -17,6 +17,7 @@ pub enum Cli {
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        eprintln!("[minigu] build: {}", env!("MINIGU_BUILD_TIME"));
         match self {
             Cli::Shell(shell) => shell.run(),
             Cli::Execute { file, path } => {

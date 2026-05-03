@@ -67,9 +67,23 @@ pub struct EdgeDef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Query {
+    /// 原始查询 JSON 的三个核心部分：点、边、谓词。
     pub vertices: Vec<VertexDef>,
     pub edges: Vec<EdgeDef>,
     pub predicates: Vec<PredicateDef>,
+}
+
+/// 用户自定义的查询图分解方案。
+/// 每个 `AbstractEdgeDef` 指定一条抽象边覆盖的路径顶点和原始边。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecompositionDef {
+    pub abstract_edges: Vec<AbstractEdgeDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbstractEdgeDef {
+    pub path_vertices: Vec<VertexId>,
+    pub original_edge_ids: Vec<EdgeId>,
 }
 
 #[derive(Debug, Clone)]
@@ -107,10 +121,13 @@ impl Ord for CandidateTree {
 
 impl Query {
     pub fn build_graph(self) -> Result<QueryGraph, anyhow::Error> {
+        // 这一步是“把 JSON 变成算法内部图结构”的统一入口。
+        // 后续算法基本都不直接面向 JSON，而是依赖这里构造出的索引。
         let mut graph = QueryGraph::new();
 
         let mut vertex_ids = std::collections::HashSet::new();
         for vertex_def in &self.vertices {
+            // 显式校验重复 id，避免后面 HashMap 插入时静默覆盖。
             if !vertex_ids.insert(vertex_def.id) {
                 return Err(anyhow::anyhow!("Duplicate vertex id: {}", vertex_def.id));
             }
@@ -128,6 +145,7 @@ impl Query {
                 vertex_def.id,
                 QueryVertex {
                     id: vertex_def.id,
+                    // 统一转小写，减少后续按 label 匹配时的大小写分支。
                     label: vertex_def.label.to_lowercase(),
                     predicates: Vec::new(),
                 },
@@ -186,6 +204,7 @@ impl Query {
                 }
                 id
             } else {
+                // 自动分配谓词 id，保证后面可以稳定地通过 id 找到其挂载位置。
                 while predicate_ids_used.contains(&next_predicate_id) {
                     next_predicate_id += 1;
                 }
@@ -200,6 +219,8 @@ impl Query {
                 "vertex" => {
                     let vertex_id = predicate_def.id as VertexId;
                     if let Some(vertex) = graph.inner.vertices.get_mut(&vertex_id) {
+                        // `predicate_index` 里不仅记位置，还记该位置上的第几个谓词。
+                        // 因为一个点/边上可能挂多个谓词。
                         let idx = vertex.predicates.len();
                         vertex.predicates.push(predicate_def.clone());
                         (PredicateLocation::Vertex(vertex_id), idx)
@@ -230,6 +251,8 @@ impl Query {
                     ));
                 }
             };
+            // 这张反向索引非常关键：
+            // 之后很多地方只拿 predicate_id，就能反查它到底挂在哪、在列表里第几个。
             graph.predicate_index.insert(predicate_id, (location, idx));
         }
 

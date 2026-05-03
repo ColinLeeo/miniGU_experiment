@@ -1,5 +1,12 @@
-//! BlockStatistic: bucket_ids.len() == prefix.len(); res_vec.len() = max(bucket_ids) + 1.
-//! Each bucket_id indexes into res_vec for that bucket's max remainder (余向量最大值).
+//! `BlockStatistic` 是对一列 u64 频数的轻量压缩表示。
+//!
+//! 核心思想是把每个值拆成三部分：
+//! 1. `bucket_id`：值落在哪个指数桶里；
+//! 2. `prefix`：高位的前缀；
+//! 3. `res_vec[bucket]`：该桶里所有值共享的“最大余量上界”。
+//!
+//! 因此它保存的不是逐点精确值，而是“可恢复上界”。
+//! 这也是为什么它很适合增量更新阶段：便宜、稳定，但会逐渐变松。
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -25,11 +32,12 @@ fn prefix_and_remainder(value: u64, bucket_id: u8) -> (u8, u64) {
 
 #[derive(Debug, Clone, Default)]
 pub struct BlockStatistic {
-    /// 每个条目的桶号，与 prefix 等长
+    /// 每个 rank 落入哪个桶。
     pub bucket_ids: Vec<u8>,
-    /// 每个条目的前 8 bit 有效值
+    /// 每个 rank 的高位前缀。
     pub prefix: Vec<u8>,
-    /// 按 bucket_id 索引的余向量最大值，长度 = max(bucket_ids) + 1
+    /// 每个桶共享的余量上界。
+    /// 同桶的任意条目恢复时都用这里的最大值，所以恢复出来通常是上界。
     pub res_vec: Vec<u64>,
 }
 
@@ -39,6 +47,7 @@ impl BlockStatistic {
     }
 
     pub fn from_u64_sequence(values: &[u64]) -> GCardResult<Self> {
+        // 从完整频数列压缩成 block 表示。
         if values.is_empty() {
             return Ok(BlockStatistic::default());
         }
@@ -46,7 +55,8 @@ impl BlockStatistic {
         let bounds = build_bounds(BUCKET_BASE, max_val);
         let mut bucket_ids: Vec<u8> = Vec::with_capacity(values.len());
         let mut prefix: Vec<u8> = Vec::with_capacity(values.len());
-        let mut res_max: Vec<u64> = Vec::new(); // res_max[b] = max remainder for bucket b
+        // res_max[b] = bucket b 中见过的最大 remainder
+        let mut res_max: Vec<u64> = Vec::new();
         for &v in values {
             let b = get_bucket_index(&bounds, v);
             let b_u8 = b.min(u8::MAX as usize) as u8;
@@ -80,17 +90,26 @@ impl BlockStatistic {
     }
 
     pub fn recover_upper_bound_at_rank(&self, rank: usize) -> Option<u64> {
+        // 用 bucket + prefix + 该桶共享的最大余量，恢复该位置的“上界值”。
         let (b, p, r) = self.get_by_rank(rank)?;
         let shift = (b as usize).min(56);
         Some(((p as u64) << shift) | r)
     }
 
     pub fn update_at_rank(&mut self, rank: usize, new_value: u64) {
+        // 增量更新时，不会回头重算整个桶，只就地更新这个 rank 的 bucket/prefix，
+        // 并扩大对应桶的 remainder 上界。
         if rank >= self.bucket_ids.len() {
             return;
         }
-        let bounds = build_bounds(BUCKET_BASE, new_value.max(1));
-        let new_b = get_bucket_index(&bounds, new_value).min(u8::MAX as usize);
+        // Fast bucket index for BUCKET_BASE=2: use bit operations instead of
+        // build_bounds (Vec alloc) + get_bucket_index (binary search).
+        let new_b = if new_value <= 1 {
+            0usize
+        } else {
+            (u64::BITS - (new_value - 1).leading_zeros()) as usize
+        }
+        .min(u8::MAX as usize);
         let new_b_u8 = new_b as u8;
         let (new_p, new_r) = prefix_and_remainder(new_value, new_b_u8);
 
@@ -104,6 +123,7 @@ impl BlockStatistic {
     }
 
     pub fn remove_at_rank(&mut self, rank: usize) {
+        // 删除顶点时，对应 rank 要从压缩列中删掉。
         if rank < self.bucket_ids.len() {
             self.bucket_ids.remove(rank);
             self.prefix.remove(rank);
@@ -127,6 +147,8 @@ impl BlockStatistic {
     }
 
     pub fn get_compressed_degree_seq(&self) -> GCardResult<Option<CompressedDegreeSeq>> {
+        // 再往上游一层时，不需要逐 rank 信息，只需要知道每个桶里有多少条目，
+        // 因此这里可以进一步退化成 `FastCompressor` 的 histogram 形式。
         if self.bucket_ids.is_empty() {
             return Ok(None);
         }

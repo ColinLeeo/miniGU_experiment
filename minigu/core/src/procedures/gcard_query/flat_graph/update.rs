@@ -1,10 +1,18 @@
+//! `FlatGraph` 的 pending 变更缓冲区。
+//!
+//! 设计重点是：
+//! 1. 先记录变更，不立即重建 CSR；
+//! 2. 但在 compact/update 期间，这些变更又必须“立刻可见”。
+//! 所以这里额外维护了一套快速邻居索引。
+// 这里变更操作成本会非常的高， 因为内存是连续的，任何一个变更其实会导致数据重写。
 use std::collections::{HashMap, HashSet};
 
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
+use serde::{Deserialize, Serialize};
 
 /// Full metadata for a pending edge insertion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingEdge {
     pub edge_id: EdgeId,
     pub src: VertexId,
@@ -21,15 +29,11 @@ pub struct PendingEdge {
 /// [`super::FlatGraph::neighbors_for_compact`] (deleted items are hidden, inserted items
 /// are visible) so that the GCard update algorithm can propagate deltas over the
 /// up-to-date graph topology during compaction.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct PendingChanges {
-    /// Vertices to be added to the graph.
     pub inserted_vertices: Vec<(VertexId, String, Vec<ScalarValue>)>,
-    /// Vertices whose statistics and adjacency entries should be removed.
     pub deleted_vertices: HashSet<VertexId>,
-    /// Edges to be added to the graph.
     pub inserted_edges: Vec<PendingEdge>,
-    /// Edge IDs to be removed from the graph.
     pub deleted_edge_ids: HashSet<EdgeId>,
 
     // ── Indexes for fast neighbor lookup on pending edges ─────────────────
