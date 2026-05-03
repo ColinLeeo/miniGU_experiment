@@ -44,28 +44,38 @@ impl Database {
         // Load catalog from disk and restore graphs
         if let Some(db_catalog) = load_catalog(&db_path)? {
             for (graph_name, entry) in &db_catalog.graphs {
-                let data_path = graph_data_path(&db_path, graph_name);
-                let graph = MemoryGraph::with_db_file(&data_path)?;
                 let graph_type = catalog_entry_to_graph_type(entry);
-                let container =
-                    Arc::new(GraphContainer::new(graph_type, GraphStorage::Memory(graph)));
 
-                // Try to load FlatGraph from <db_path>/<graph_name>.flatgraph.bin
+                // Try to load FlatGraph — if available, skip the heavy .minigu checkpoint
                 let fg_path = flatgraph_path(&db_path, graph_name);
-                if fg_path.exists() {
+                let flat_graph = if fg_path.exists() {
                     eprintln!(
                         "[database] loading FlatGraph from {} ...",
                         fg_path.display()
                     );
                     match FlatGraph::import_bincode(&fg_path) {
                         Ok(fg) => {
-                            container.set_gcard_flat_graph(Arc::new(fg));
                             eprintln!("[database] FlatGraph loaded");
+                            Some(fg)
                         }
                         Err(e) => {
                             eprintln!("[database] warning: failed to load FlatGraph: {}", e);
+                            None
                         }
                     }
+                } else {
+                    None
+                };
+
+                // Always use an empty MemoryGraph — skip the heavy .minigu checkpoint.
+                // FlatGraph + Statistic (loaded below) are sufficient for GCard queries.
+                let graph = MemoryGraph::in_memory();
+
+                let container =
+                    Arc::new(GraphContainer::new(graph_type, GraphStorage::Memory(graph)));
+
+                if let Some(fg) = flat_graph {
+                    container.set_gcard_flat_graph(Arc::new(fg));
                 }
 
                 // Try to load Statistic + rebuild DegreeSeqGraphCompressed

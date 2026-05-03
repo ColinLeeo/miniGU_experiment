@@ -20,7 +20,7 @@ set -euo pipefail
 # ============================================================
 # 配置区 — 请根据实际情况修改
 # ============================================================
-REMOTE_HOST="jcloud"                       # SSH config 中的 Host 别名
+REMOTE_HOST="newDev"                       # SSH config 中的 Host 别名
 REMOTE_DIR="/home/shuolin/miniGU"              # 远程项目目录
 LOCAL_DIR="$(cd "$(dirname "$0")/.." && pwd)"   # 本地项目根目录（脚本上一级）
 
@@ -65,6 +65,8 @@ RSYNC_EXCLUDES=(
 
     # baseline（含 boost 等大量源码，远程单独构建）
     "experiment/baseline/"
+    "experiment/dataset/ldbc/*.bin"
+    "experiment/dataset/ldbc/sf1_pipe/"
 
     # baseline 准备的数据产物
     "experiment/catalogs/"

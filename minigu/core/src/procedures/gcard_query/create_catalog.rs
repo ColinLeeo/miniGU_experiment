@@ -1,21 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use minigu_catalog::provider::GraphTypeProvider;
 use minigu_common::data_type::LogicalType;
-use minigu_common::types::{LabelId, VertexId};
-use minigu_context::graph::GraphStorage;
 use minigu_context::procedure::Procedure;
-use minigu_transaction::IsolationLevel::Serializable;
-use minigu_transaction::{GraphTxnManager, Transaction};
 use rayon::ThreadPoolBuilder;
 
 use super::Statistic;
-use super::degree_compute_dense::{PathsByLen, PatternDegCache, ScannedHops};
+use super::degree_compute_dense::{PathsByLen, PatternDegCache};
+use super::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::statistic::save_statistic;
-use crate::procedures::gcard_query::utils::{
-    EdgeEndpoints, PathPattern, build_undirected_adj, get_edges_from_catalog,
-};
+use crate::procedures::gcard_query::utils::{EdgeEndpoints, PathPattern, get_edges_from_catalog};
 
 // ----- Schema path enumeration -----
 
@@ -28,7 +22,7 @@ pub(super) fn enumerate_all_paths_walks_in_schema(
         .flat_map(|e| [e.src_label.as_str(), e.dst_label.as_str()])
         .map(String::from)
         .collect();
-    let adj = build_undirected_adj(edges);
+    let adj = super::utils::build_undirected_adj(edges);
     let mut out: PathsByLen = HashMap::new();
 
     fn dfs(
@@ -69,29 +63,11 @@ pub(super) fn enumerate_all_paths_walks_in_schema(
 
 // ----- Helper functions -----
 
-fn build_label_name_to_id(graph_type: &dyn GraphTypeProvider) -> HashMap<String, LabelId> {
-    let mut map = HashMap::new();
-    for name in graph_type.label_names() {
-        if let Ok(Some(id)) = graph_type.get_label_id(&name) {
-            map.insert(name.clone(), id);
-        }
-    }
-    map
-}
-
-fn create_thread_pools(
-    num_threads: usize,
-    scan_threads: usize,
-) -> Result<(rayon::ThreadPool, rayon::ThreadPool), anyhow::Error> {
-    let pool = ThreadPoolBuilder::new()
+fn create_thread_pool(num_threads: usize) -> Result<rayon::ThreadPool, anyhow::Error> {
+    ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))?;
-    let scan_pool = ThreadPoolBuilder::new()
-        .num_threads(scan_threads)
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to create scan thread pool: {}", e))?;
-    Ok((pool, scan_pool))
+        .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))
 }
 
 pub(super) fn build_statistic_from_pattern_cache(
@@ -158,11 +134,8 @@ pub fn build_procedure() -> Procedure {
         LogicalType::String, // graph_name
         LogicalType::Int8,   // max_k
         LogicalType::UInt8,  // compute_threads
-        LogicalType::UInt8,  // scan_threads
-        LogicalType::String, // optional: lightgraph bincode path (from load_ldbc)
     ];
     Procedure::new(parameters, None, move |context, args| {
-        // 参数既控制路径最大长度，也控制扫描/计算的并行度。
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")
@@ -179,38 +152,32 @@ pub fn build_procedure() -> Procedure {
         let default_threads = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(8);
-        let parse_threads = |idx: usize| {
-            args.get(idx)
-                .and_then(|a| a.to_u8().ok())
-                .map(|n| if n == 0 { default_threads } else { n as usize })
-                .unwrap_or(default_threads)
-        };
-        let num_threads = parse_threads(2);
-        let scan_threads = parse_threads(3);
-
-        // Optional 5th arg: path to LightGraph bincode (from load_ldbc)
-        let lightgraph_path: Option<String> = args
-            .get(4)
-            .and_then(|a| a.try_as_string())
-            .and_then(|opt: &Option<String>| opt.clone());
+        let num_threads = args
+            .get(2)
+            .and_then(|a| a.to_u8().ok())
+            .map(|n| if n == 0 { default_threads } else { n as usize })
+            .unwrap_or(default_threads);
 
         println!(
-            "compute_threads={}, scan_threads={}, lightgraph={} (available parallelism: {})",
-            num_threads,
-            scan_threads,
-            lightgraph_path.as_deref().unwrap_or("(none)"),
-            default_threads,
+            "compute_threads={} (available parallelism: {})",
+            num_threads, default_threads,
         );
 
-        // ── Setup graph & thread pools ──
-        let (pool, scan_pool) = create_thread_pools(num_threads, scan_threads)?;
+        let pool = create_thread_pool(num_threads)?;
 
         let graph_container = context.get_graph_container(graph_name.as_str())?;
         let graph_type_ref = graph_container.graph_type();
 
         graph_container.clear_gcard_data();
 
-        // ── Build degree cache ──
+        // ── Get FlatGraph ──
+        type FlatGraphType = FlatGraph;
+        let flat_graph_arc: Arc<FlatGraphType> = graph_container
+            .gcard_flat_graph()
+            .and_then(|arc| Arc::downcast::<FlatGraphType>(arc).ok())
+            .ok_or_else(|| anyhow::anyhow!("FlatGraph not loaded (run load_ldbc first)"))?;
+
+        // ── Build degree cache from FlatGraph ──
         let edges = get_edges_from_catalog(graph_type_ref.as_ref())?;
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
         {
@@ -226,84 +193,25 @@ pub fn build_procedure() -> Procedure {
             }
         }
 
-        // ── Phase 1: Scan neighbor data ──
         let scan_start = std::time::Instant::now();
-        let scanned: Arc<ScannedHops> = if let Some(cached) = graph_container.gcard_scanned_hops() {
-            // ── Fastest path: reuse in-memory cached ScannedHops ──
-            if let Ok(s) = cached.downcast::<ScannedHops>() {
-                println!(
-                    "Reusing cached scanned hops ({:.2} MB)",
-                    s.mem_usage_bytes() as f64 / 1024.0 / 1024.0
-                );
-                s
-            } else {
-                return Err(anyhow::anyhow!("cached scanned hops downcast failed").into());
-            }
-        } else if let Some(bin_path) = lightgraph_path {
-            let p = std::path::Path::new(&bin_path);
-            let s = if bin_path.ends_with(".scanned_hops.bin") {
-                // ── Fast path: deserialize ScannedHops from bincode ──
-                Arc::new(ScannedHops::load_bincode(p)?)
-            } else {
-                // ── Load LightGraph, rebuild ScannedHops ──
-                let light_graph = super::load_ldbc::load_light_graph(p)
-                    .map_err(|e| anyhow::anyhow!("load lightgraph: {}", e))?;
-                let scanned = super::load_ldbc::scan_from_light_graph(
-                    &light_graph,
-                    &edges,
-                    &schema_path,
-                    max_k,
-                    &scan_pool,
-                )?;
-                drop(light_graph);
-                Arc::new(scanned)
-            };
-            // Cache it for subsequent calls in the same process
-            graph_container
-                .set_gcard_scanned_hops(Arc::clone(&s) as Arc<dyn std::any::Any + Send + Sync>);
-            s
-        } else {
-            let graph = match graph_container.graph_storage() {
-                GraphStorage::Memory(g) => Arc::clone(g),
-            };
-            let label_name_to_id = build_label_name_to_id(graph_type_ref.as_ref());
-            let txn = graph
-                .txn_manager()
-                .begin_transaction(Serializable)
-                .map_err(|e| anyhow::anyhow!("begin_transaction: {}", e))?;
-
-            let s = pool.install(|| {
-                super::degree_compute_dense::scan_all_hops(
-                    &txn,
-                    &edges,
-                    &label_name_to_id,
-                    &schema_path,
-                    max_k,
-                    &scan_pool,
-                )
-            })?;
-
-            txn.commit()
-                .map_err(|e| anyhow::anyhow!("commit transaction: {}", e))?;
-            drop(txn);
-            graph.clear_in_memory_data();
-            drop(graph);
-            println!("Graph released from memory");
-
-            let s = Arc::new(s);
-            graph_container
-                .set_gcard_scanned_hops(Arc::clone(&s) as Arc<dyn std::any::Any + Send + Sync>);
-            s
-        };
+        eprintln!("GCard_build: scanning hops from FlatGraph...");
+        let scanned = super::degree_compute_dense::scan_all_hops_from_flat_graph(
+            &flat_graph_arc,
+            &edges,
+            &schema_path,
+            max_k,
+            &pool,
+        )?;
         let scan_elapsed = scan_start.elapsed();
         println!(
-            "Scan time: {:.3}s (neighbor cache: {:.2} MB)",
+            "Scan time: {:.3}s ({:.2} MB)",
             scan_elapsed.as_secs_f64(),
             scanned.mem_usage_bytes() as f64 / 1024.0 / 1024.0,
         );
 
+        let scanned = Arc::new(scanned);
         let compute_start = std::time::Instant::now();
-        let cache: PatternDegCache =
+        let cache =
             super::degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
         let compute_elapsed = compute_start.elapsed();
         println!("Compute time: {:.3}s", compute_elapsed.as_secs_f64());

@@ -19,6 +19,7 @@ pub use catalog::make_alt_key;
 pub use statistic::{Statistic, load_statistic};
 mod graph;
 pub mod load_catalog;
+pub mod load_flatgraph;
 pub mod load_ldbc;
 mod query_graph;
 pub mod random_insert;

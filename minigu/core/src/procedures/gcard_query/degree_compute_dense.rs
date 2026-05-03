@@ -6,6 +6,7 @@ use minigu_storage::tp::MemTransaction;
 use rayon::prelude::*;
 
 use super::catalog::AltKey;
+use super::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::utils::{EdgeEndpoints, PathPattern};
 
 type VertexIds = Arc<Vec<VertexId>>;
@@ -658,4 +659,60 @@ pub fn scan_all_hops_from_raw(
         all_deps,
         remap_tables,
     })
+}
+
+// ----- FlatGraph-based hop building -----
+
+/// Build `ScannedHops` directly from a [`FlatGraph`].
+///
+/// Extracts neighbor VertexIds from FlatGraph's `CsrAdjWithEid` CSR buckets,
+/// dropping edge IDs. This avoids building an intermediate LightGraph.
+pub fn scan_all_hops_from_flat_graph(
+    flat_graph: &FlatGraph,
+    edges: &HashMap<String, EdgeEndpoints>,
+    schema_path: &PathsByLen,
+    max_k: usize,
+    scan_pool: &rayon::ThreadPool,
+) -> Result<ScannedHops, anyhow::Error> {
+    scan_all_hops_from_raw(
+        &|vertex_label, edge_label, outgoing| {
+            let verts = flat_graph.all_vertex_ids_by_label(vertex_label);
+            let key = (vertex_label.to_string(), edge_label.to_string(), outgoing);
+            match flat_graph.hop_csrs().get(&key) {
+                Some(csr) => {
+                    let neighbors_vids = csr.neighbors_vids();
+                    let csr_verts = csr.verts();
+                    let csr_offsets = csr.offsets();
+                    let mut offsets = Vec::with_capacity(verts.len() + 1);
+                    let mut csr_pos = 0usize;
+                    for &vid in verts {
+                        while csr_pos < csr_verts.len() && csr_verts[csr_pos] < vid {
+                            csr_pos += 1;
+                        }
+                        if csr_pos < csr_verts.len() && csr_verts[csr_pos] == vid {
+                            offsets.push(csr_offsets[csr_pos]);
+                        } else {
+                            let cur = offsets.last().copied().unwrap_or(0);
+                            offsets.push(cur);
+                        }
+                    }
+                    offsets.push(neighbors_vids.len());
+                    RawHopData {
+                        src_vids: verts.to_vec(),
+                        neighbors_flat: neighbors_vids,
+                        offsets,
+                    }
+                }
+                None => RawHopData {
+                    src_vids: verts.to_vec(),
+                    neighbors_flat: Vec::new(),
+                    offsets: vec![0; verts.len() + 1],
+                },
+            }
+        },
+        edges,
+        schema_path,
+        max_k,
+        scan_pool,
+    )
 }
