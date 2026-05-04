@@ -90,6 +90,13 @@ pub fn build_procedure() -> Procedure {
             return Err(anyhow::anyhow!("graph '{}' already exists in schema", graph_name).into());
         }
 
+        // ── Persist catalog so the graph is auto-loaded on next startup ──
+        if let Some(ref db_path) = context.database().config().db_path {
+            if let Err(e) = crate::catalog_persistence::save_catalog(db_path, schema) {
+                eprintln!("[load_flatgraph] warning: could not save catalog: {}", e);
+            }
+        }
+
         eprintln!(
             "[load_flatgraph] graph '{}' registered (FlatGraph only)",
             graph_name,

@@ -188,9 +188,10 @@ fn help(ctx: &mut ShellContext, command: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn quit(ctx: &mut ShellContext) -> Result<()> {
-    ctx.should_quit = true;
-    Ok(())
+fn quit(_ctx: &mut ShellContext) -> Result<()> {
+    // Exit immediately without dropping large in-memory structures (FlatGraph, etc.)
+    // to avoid the slow memory deallocation on quit.
+    std::process::exit(0);
 }
 
 fn history(ctx: &mut ShellContext) -> Result<()> {
