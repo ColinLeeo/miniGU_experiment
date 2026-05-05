@@ -26,9 +26,7 @@ use minigu_storage::tp::MemoryGraph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use super::create_catalog::{
-    build_statistic_from_pattern_cache, enumerate_all_paths_walks_in_schema,
-};
+use super::create_catalog::enumerate_all_paths_walks_in_schema;
 use super::degree_compute_dense::{self, RawHopData};
 use super::flat_graph::{FlatGraph, FlatGraphBuilder};
 use crate::procedures::common::Manifest;
@@ -385,14 +383,35 @@ pub(crate) fn rebuild_statistic_from_flat_graph(
     drop(light_graph);
 
     let scanned = Arc::new(scanned);
+    let (max_star_length, max_star_degree) =
+        super::create_catalog::parse_star_collection_config(max_k);
+    eprintln!(
+        "[rebuild_statistic] star collection: max_star_length={}, max_star_degree={}{}",
+        max_star_length,
+        max_star_degree,
+        if max_star_degree == 0 {
+            " (disabled)"
+        } else {
+            ""
+        },
+    );
+
     let t2 = std::time::Instant::now();
-    let cache = degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
+    let (cache, star_cache) = degree_compute_dense::compute_from_scanned_hops_with_star(
+        &scanned,
+        &edges,
+        max_k,
+        max_star_length,
+        max_star_degree,
+        &pool,
+    )?;
     eprintln!(
         "[rebuild_statistic] degree compute done in {:.2}s",
         t2.elapsed().as_secs_f64()
     );
 
-    let statistic = build_statistic_from_pattern_cache(&cache)?;
+    let statistic =
+        super::create_catalog::build_statistic_from_pattern_and_star_cache(&cache, &star_cache)?;
     Ok(statistic)
 }
 
@@ -618,16 +637,37 @@ pub fn build_procedure() -> Procedure {
         }
 
         let scanned = Arc::new(scanned);
+        let (max_star_length, max_star_degree) =
+            super::create_catalog::parse_star_collection_config(max_k);
+        eprintln!(
+            "load_ldbc: star collection max_star_length={}, max_star_degree={}{}",
+            max_star_length,
+            max_star_degree,
+            if max_star_degree == 0 {
+                " (disabled)"
+            } else {
+                ""
+            },
+        );
         let t2 = std::time::Instant::now();
-        let cache =
-            degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
+        let (cache, star_cache) = degree_compute_dense::compute_from_scanned_hops_with_star(
+            &scanned,
+            &edges,
+            max_k,
+            max_star_length,
+            max_star_degree,
+            &pool,
+        )?;
         eprintln!(
             "load_ldbc: degree compute done in {:.2}s",
             t2.elapsed().as_secs_f64()
         );
 
         // ── Build Statistic & DegreeSeqGraphCompressed ──
-        let statistic = build_statistic_from_pattern_cache(&cache)?;
+        let statistic = super::create_catalog::build_statistic_from_pattern_and_star_cache(
+            &cache,
+            &star_cache,
+        )?;
         let size = statistic.serialized_size();
         eprintln!(
             "load_ldbc: statistic serialized size: {:.2} MB",

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use minigu_common::types::{EdgeId, VertexId};
 
-use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha, alpha_refs, beta_right};
+use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
@@ -26,6 +26,7 @@ impl GraphSkeleton<AbstractEdge> {
             edges: std::collections::HashMap::new(),
             outgoing_edges: std::collections::HashMap::new(),
             incoming_edges: std::collections::HashMap::new(),
+            local_pcfs: std::collections::HashMap::new(),
         }
     }
 
@@ -40,6 +41,10 @@ impl GraphSkeleton<AbstractEdge> {
         self.edges.insert(edge_id, edge);
         self.outgoing_edges.entry(src).or_default().push(edge_id);
         self.incoming_edges.entry(dst).or_default().push(edge_id);
+    }
+
+    pub fn add_local_pcf(&mut self, vertex_id: VertexId, pcf: Pcf) {
+        self.local_pcfs.entry(vertex_id).or_default().push(pcf);
     }
 
     pub fn remove_edge(&mut self, edge_id: EdgeId) -> Option<AbstractEdge> {
@@ -155,10 +160,32 @@ impl GraphSkeleton<AbstractEdge> {
         }
     }
 
+    fn multiply_local_and<'a, I>(&'a self, vertex_id: VertexId, pcfs: I) -> Pcf
+    where
+        I: IntoIterator<Item = &'a Pcf>,
+    {
+        // Star statistics are unary factors anchored at `vertex_id`, matching PathCE's
+        // `star_*` temp table shape: (center, center_mode, count). They should be
+        // multiplied with the other factors currently expressed on the same vertex.
+        let mut refs: Vec<&Pcf> = Vec::new();
+        if let Some(local_pcfs) = self.local_pcfs.get(&vertex_id) {
+            refs.extend(local_pcfs.iter());
+        }
+        refs.extend(pcfs);
+        alpha_refs(&refs)
+    }
+
     pub fn get_es(&mut self) -> GCardResult<f64> {
         // `es` 可以理解为当前抽象图估算出来的结果规模。
         // 做法是把抽象图当成一棵（或近似树状）结构，自底向上组合每条边的 PCF。
         if self.vertices.len() <= 1 {
+            if let Some((&vertex_id, _)) = self.vertices.iter().next() {
+                if let Some(local_pcfs) = self.local_pcfs.get(&vertex_id) {
+                    return Ok(self
+                        .multiply_local_and(vertex_id, std::iter::empty())
+                        .get_num_rows());
+                }
+            }
             return Err(GCardError::InvalidState(
                 "AbstractGraph must have at least 2 vertices".to_string(),
             ));
@@ -228,13 +255,7 @@ impl GraphSkeleton<AbstractEdge> {
                         .iter()
                         .filter_map(|(child_id, _)| child_vertex_pcf.get(child_id).cloned())
                         .collect();
-                    let multiplied_child_pcf = if child_pcfs.is_empty() {
-                        Pcf::empty()
-                    } else {
-                        // `alpha_refs` 可以理解成把多个子树的贡献做合并。
-                        let refs: Vec<&Pcf> = child_pcfs.iter().collect();
-                        alpha_refs(&refs)
-                    };
+                    let multiplied_child_pcf = self.multiply_local_and(v, child_pcfs.iter());
                     let projected = if cur_gen > 0 {
                         // 非根节点需要把“孩子方向的统计”投影回父边所处的坐标系。
                         beta_right(
@@ -253,8 +274,25 @@ impl GraphSkeleton<AbstractEdge> {
                         projected
                     }
                 } else {
-                    // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边。
-                    parent_to_vertex_pcf
+                    if cur_gen > 0 {
+                        if self.local_pcfs.contains_key(&v) {
+                            let local_pcf = self.multiply_local_and(v, std::iter::empty());
+                            let projected = beta_right(
+                                &local_pcf,
+                                &vertex_to_parent_pcf,
+                                &parent_to_vertex_pcf,
+                            );
+                            let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
+                            alpha_refs(&pcf_refs)
+                        } else {
+                            // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边。
+                            parent_to_vertex_pcf
+                        }
+                    } else if self.local_pcfs.contains_key(&v) {
+                        self.multiply_local_and(v, std::iter::empty())
+                    } else {
+                        Pcf::empty()
+                    }
                 };
 
                 if cur_gen > 0 {
@@ -277,5 +315,77 @@ impl GraphSkeleton<AbstractEdge> {
             selectivity *= edge.selectivity;
         }
         selectivity
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::AbstractGraph;
+    use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
+    use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
+
+    fn vertex(id: u64, label: &str) -> QueryVertex {
+        QueryVertex {
+            id,
+            label: label.to_string(),
+            predicates: Vec::new(),
+        }
+    }
+
+    fn pcf(constants: Vec<f64>, right_interval_edges: Vec<f64>) -> Pcf {
+        let mut cumulative_rows = Vec::new();
+        let mut left = 0.0;
+        let mut rows = 0.0;
+        for (&constant, &right) in constants.iter().zip(&right_interval_edges) {
+            rows += constant * (right - left);
+            cumulative_rows.push(rows);
+            left = right;
+        }
+        Pcf {
+            constants,
+            right_interval_edges,
+            cumulative_rows,
+        }
+    }
+
+    fn edge(src: u64, dst: u64, src_pcf: Pcf, dst_pcf: Pcf) -> AbstractEdge {
+        AbstractEdge {
+            src,
+            dst,
+            src_pcf: Arc::new(src_pcf),
+            dst_pcf: Arc::new(dst_pcf),
+            predicates: Vec::new(),
+            original_edge_ids: Vec::new(),
+            path_vertices: vec![src, dst],
+            selectivity: 1.0,
+            path_str: String::new(),
+        }
+    }
+
+    #[test]
+    fn leaf_local_pcf_is_projected_to_parent_coordinate_before_joining() {
+        let parent_side = pcf(vec![2.0], vec![10.0]);
+        let leaf_side = pcf(vec![1.0], vec![20.0]);
+        let local_star = pcf(vec![10.0], vec![2.0]);
+        let root_neutral = pcf(vec![1.0], vec![10.0]);
+
+        let mut graph = AbstractGraph::new();
+        graph.add_vertex(vertex(1, "leaf_with_star"));
+        graph.add_vertex(vertex(2, "root"));
+        graph.add_vertex(vertex(3, "other_leaf"));
+        graph.add_edge(1, edge(2, 1, parent_side.clone(), leaf_side.clone()));
+        graph.add_edge(2, edge(2, 3, root_neutral.clone(), root_neutral.clone()));
+        graph.add_local_pcf(1, local_star.clone());
+
+        let projected = beta_right(&local_star, &leaf_side, &parent_side);
+        let expected_leaf = alpha_refs(&[&projected, &parent_side]);
+        let expected = alpha_refs(&[&expected_leaf, &root_neutral]).get_num_rows();
+        let wrong_coordinate_product =
+            alpha_refs(&[&local_star, &parent_side, &root_neutral]).get_num_rows();
+
+        assert_ne!(expected, wrong_coordinate_product);
+        assert_eq!(graph.get_es().unwrap(), expected);
     }
 }

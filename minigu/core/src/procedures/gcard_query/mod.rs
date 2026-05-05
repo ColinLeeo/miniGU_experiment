@@ -31,7 +31,7 @@ pub mod utils;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 use std::{fmt, fs, io};
 
@@ -47,6 +47,11 @@ use crate::procedures::gcard_query::query_graph::QueryGraph;
 use crate::procedures::gcard_query::types::{DecompositionDef, Query};
 
 static GCARD_VERBOSE: AtomicBool = AtomicBool::new(false);
+pub(crate) const GCARD_STAR_CONFIG_UNSET: usize = usize::MAX;
+pub(crate) static GCARD_MAX_STAR_LENGTH_OVERRIDE: AtomicUsize =
+    AtomicUsize::new(GCARD_STAR_CONFIG_UNSET);
+pub(crate) static GCARD_MAX_STAR_DEGREE_OVERRIDE: AtomicUsize =
+    AtomicUsize::new(GCARD_STAR_CONFIG_UNSET);
 pub(crate) static SAMPLING_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 // Fine-grained profiling counters for sampling breakdown
@@ -384,5 +389,33 @@ pub fn build_procedure() -> Procedure {
             Int64,
             [Some(cardinality.ceil() as i64)]
         ))])
+    })
+}
+
+pub fn build_set_star_config_procedure() -> Procedure {
+    let parameters = vec![
+        LogicalType::Int32, // max_star_length
+        LogicalType::Int32, // max_star_degree; 0 disables star use at query time
+    ];
+
+    Procedure::new(parameters, None, move |_context, args| {
+        let max_star_length = args
+            .first()
+            .and_then(|a| a.to_i32().ok())
+            .map(|n| n.max(0) as usize)
+            .ok_or_else(|| anyhow::anyhow!("max_star_length must be an int"))?;
+        let max_star_degree = args
+            .get(1)
+            .and_then(|a| a.to_i32().ok())
+            .map(|n| n.max(0) as usize)
+            .ok_or_else(|| anyhow::anyhow!("max_star_degree must be an int"))?;
+
+        GCARD_MAX_STAR_LENGTH_OVERRIDE.store(max_star_length, Ordering::Relaxed);
+        GCARD_MAX_STAR_DEGREE_OVERRIDE.store(max_star_degree, Ordering::Relaxed);
+        eprintln!(
+            "[gcard] query star config set: max_star_length={}, max_star_degree={}",
+            max_star_length, max_star_degree
+        );
+        Ok(vec![])
     })
 }

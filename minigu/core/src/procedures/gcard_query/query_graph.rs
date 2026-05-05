@@ -19,9 +19,11 @@ use crate::procedures::gcard_query::types::{
     PredicateId, PredicateLocation,
 };
 use crate::procedures::gcard_query::union_find::UnionFind;
+use crate::procedures::gcard_query::utils::{PathPattern, StarStatKey};
 use crate::procedures::gcard_query::{
     BUILD_ABSTRACT_EDGE_NANOS, BUILD_CYCLE_CHECK_NANOS, BUILD_PCF_LOOKUP_NANOS,
-    BUILD_PIVOT_PATH_NANOS, BUILD_SCORE_TREE_NANOS, PredicateApplyType,
+    BUILD_PIVOT_PATH_NANOS, BUILD_SCORE_TREE_NANOS, GCARD_MAX_STAR_DEGREE_OVERRIDE,
+    GCARD_MAX_STAR_LENGTH_OVERRIDE, GCARD_STAR_CONFIG_UNSET, PredicateApplyType,
 };
 
 #[derive(Debug, Clone)]
@@ -40,6 +42,308 @@ impl Endpoints for QueryEdge {
 
     fn dst(&self) -> VertexId {
         self.dst_vertex_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
+    use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
+
+    fn vertex(id: VertexId, label: &str) -> crate::procedures::gcard_query::types::VertexDef {
+        crate::procedures::gcard_query::types::VertexDef {
+            id,
+            label: label.to_string(),
+        }
+    }
+
+    fn edge(
+        id: EdgeId,
+        label: &str,
+        src: VertexId,
+        dst: VertexId,
+    ) -> crate::procedures::gcard_query::types::EdgeDef {
+        crate::procedures::gcard_query::types::EdgeDef {
+            id,
+            label: label.to_string(),
+            src,
+            dst,
+        }
+    }
+
+    #[test]
+    fn star_degree_sequence_is_applied_as_center_local_pcf() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "center"),
+                vertex(2, "a"),
+                vertex(3, "b"),
+                vertex(4, "c"),
+            ],
+            edges: vec![
+                edge(10, "e1", 1, 2),
+                edge(11, "e2", 1, 3),
+                edge(12, "e3", 1, 4),
+            ],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let star_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "c".to_string()],
+                    vec!["e3".to_string()],
+                ),
+            ],
+        );
+        let star_pcf = PiecewiseConstantFunction {
+            constants: vec![7.0],
+            right_interval_edges: vec![6.0],
+            cumulative_rows: vec![42.0],
+        };
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            star_key,
+            CompressedDegreeSeq::SafeBound { function: star_pcf },
+        );
+
+        let mut abstract_graphs = query_graph
+            .build_abstract_graph_flat(
+                1,
+                1,
+                &degree_seq_graph,
+                None,
+                0,
+                &PredicateApplyType::IGNORE,
+            )
+            .unwrap();
+
+        assert_eq!(abstract_graphs.len(), 1);
+        let (abstract_graph, _) = abstract_graphs.get_mut(0).unwrap();
+        assert!(
+            abstract_graph.edges.is_empty(),
+            "star-covered leaf arms should not remain as path abstract edges"
+        );
+        assert_eq!(abstract_graph.local_pcfs.get(&1).unwrap().len(), 1);
+        assert_eq!(abstract_graph.get_es().unwrap(), 42.0);
+    }
+
+    #[test]
+    fn star_matching_deduplicates_repeated_leaf_arms_like_pathce() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "center"),
+                vertex(2, "a"),
+                vertex(3, "a"),
+                vertex(4, "b"),
+            ],
+            edges: vec![
+                edge(10, "e1", 1, 2),
+                edge(11, "e1", 1, 3),
+                edge(12, "e2", 1, 4),
+            ],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let dedup_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+            ],
+        );
+        let repeated_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+            ],
+        );
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            dedup_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction {
+                    constants: vec![7.0],
+                    right_interval_edges: vec![6.0],
+                    cumulative_rows: vec![42.0],
+                },
+            },
+        );
+        degree_seq_graph.star_stats.insert(
+            repeated_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction {
+                    constants: vec![11.0],
+                    right_interval_edges: vec![9.0],
+                    cumulative_rows: vec![99.0],
+                },
+            },
+        );
+
+        let abstract_graphs = query_graph
+            .build_abstract_graph_flat(
+                1,
+                1,
+                &degree_seq_graph,
+                None,
+                0,
+                &PredicateApplyType::IGNORE,
+            )
+            .unwrap();
+
+        let (abstract_graph, _) = abstract_graphs.first().unwrap();
+        let local_pcfs = abstract_graph.local_pcfs.get(&1).unwrap();
+        assert_eq!(
+            local_pcfs.len(),
+            1,
+            "degree-1 star fallback is disabled; duplicate arm should remain as a path edge"
+        );
+        assert_eq!(local_pcfs[0].get_num_rows(), 42.0);
+        assert_eq!(abstract_graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn star_matching_falls_back_to_smaller_available_degree() {
+        let arms = vec![
+            (
+                0,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+            ),
+            (
+                1,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+            ),
+            (
+                2,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "c".to_string()],
+                    vec!["e3".to_string()],
+                ),
+            ),
+            (
+                3,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "d".to_string()],
+                    vec!["e4".to_string()],
+                ),
+            ),
+        ];
+
+        let fallback_key = StarStatKey::new(
+            "center".to_string(),
+            vec![arms[1].1.clone(), arms[2].1.clone(), arms[3].1.clone()],
+        );
+        let fallback_pcf = PiecewiseConstantFunction {
+            constants: vec![13.0],
+            right_interval_edges: vec![12.0],
+            cumulative_rows: vec![99.0],
+        };
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            fallback_key,
+            CompressedDegreeSeq::SafeBound {
+                function: fallback_pcf,
+            },
+        );
+
+        let (selected, pcf) =
+            QueryGraph::find_matching_star_pcf("center", &arms, 4, &degree_seq_graph)
+                .expect("d4 miss should fall back to an available d3 star");
+
+        assert_eq!(selected, vec![1, 2, 3]);
+        assert_eq!(pcf.get_num_rows(), 99.0);
+    }
+
+    #[test]
+    fn star_matching_searches_beyond_first_max_degree_arms() {
+        let arms = vec![
+            (
+                0,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+            ),
+            (
+                1,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+            ),
+            (
+                2,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "c".to_string()],
+                    vec!["e3".to_string()],
+                ),
+            ),
+            (
+                3,
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "d".to_string()],
+                    vec!["e4".to_string()],
+                ),
+            ),
+        ];
+
+        let matched_key = StarStatKey::new(
+            "center".to_string(),
+            vec![arms[1].1.clone(), arms[2].1.clone(), arms[3].1.clone()],
+        );
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            matched_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction {
+                    constants: vec![17.0],
+                    right_interval_edges: vec![2.0],
+                    cumulative_rows: vec![34.0],
+                },
+            },
+        );
+
+        let (selected, pcf) =
+            QueryGraph::find_matching_star_pcf("center", &arms, 3, &degree_seq_graph)
+                .expect("matching should search all degree-3 arm combinations, not just a/b/c");
+
+        assert_eq!(selected, vec![1, 2, 3]);
+        assert_eq!(pcf.get_num_rows(), 34.0);
     }
 }
 
@@ -71,6 +375,7 @@ impl QueryGraph {
                 edges: HashMap::new(),
                 outgoing_edges: HashMap::new(),
                 incoming_edges: HashMap::new(),
+                local_pcfs: HashMap::new(),
             },
             predicate_index: HashMap::new(),
         }
@@ -388,8 +693,9 @@ impl QueryGraph {
                 (edge.clone(), card)
             })
             .collect();
-        // Sort ascending: pick lowest-cardinality edges first → tightest tree.
-        edges_with_card.sort_by(|a, b| a.1.cmp(&b.1));
+        // Sort ascending by cardinality: pick lowest-cardinality edges first → tightest tree.
+        // Use edge id as deterministic tiebreaker.
+        edges_with_card.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id)));
 
         let mut selected_edges = HashSet::new();
         let mut uf = UnionFind::new();
@@ -423,7 +729,9 @@ impl QueryGraph {
         let mut subgraph_outgoing = HashMap::new();
         let mut subgraph_incoming = HashMap::new();
 
-        for &edge_id in selected_edge_ids {
+        let mut selected_edge_ids_sorted: Vec<_> = selected_edge_ids.iter().copied().collect();
+        selected_edge_ids_sorted.sort_unstable();
+        for edge_id in selected_edge_ids_sorted {
             if let Some(edge) = self.inner.edges.get(&edge_id) {
                 subgraph_edges.insert(edge_id, edge.clone());
 
@@ -457,6 +765,7 @@ impl QueryGraph {
                 edges: subgraph_edges,
                 outgoing_edges: subgraph_outgoing,
                 incoming_edges: subgraph_incoming,
+                local_pcfs: HashMap::new(),
             },
             predicate_index: self.predicate_index.clone(),
         }
@@ -498,17 +807,20 @@ impl QueryGraph {
                 break;
             }
 
-            let all_edge_ids: HashSet<EdgeId> = self.inner.edges.keys().copied().collect();
+            let mut all_edge_ids: Vec<EdgeId> = self.inner.edges.keys().copied().collect();
+            all_edge_ids.sort_unstable();
             let mut non_tree_edges: Vec<(EdgeId, u64)> = all_edge_ids
-                .difference(&current.edge_ids)
-                .map(|&eid| {
+                .into_iter()
+                .filter(|eid| !current.edge_ids.contains(eid))
+                .map(|eid| {
                     let card = cardinalities.get(&eid).copied().unwrap_or(1);
                     (eid, card)
                 })
                 .collect();
 
             // Try adding smallest non-tree edges first (smallest perturbation).
-            non_tree_edges.sort_by(|a, b| a.1.cmp(&b.1));
+            // Use edge id as deterministic tiebreaker.
+            non_tree_edges.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
             for (new_edge_id, _new_edge_card) in non_tree_edges {
                 if let Some(new_edge) = self.inner.edges.get(&new_edge_id) {
@@ -529,7 +841,10 @@ impl QueryGraph {
                             })
                             .collect();
 
-                        path_edges_with_card.sort_by(|a, b| b.1.cmp(&a.1));
+                        // Remove largest-cardinality tree edge first (best swap).
+                        // Use edge id as deterministic tiebreaker.
+                        path_edges_with_card
+                            .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
                         for (edge_to_remove, _old_card) in path_edges_with_card {
                             let mut new_edge_set = current.edge_ids.clone();
@@ -1627,6 +1942,18 @@ impl QueryGraph {
 
         let mut abstract_graph = AbstractGraph::new();
         let mut next_edge_id: EdgeId = 1;
+        let (results, local_pcfs) = self.extract_star_local_pcfs(results, degree_seq_graph);
+        for (&center, pcfs) in &local_pcfs {
+            if abstract_graph.get_vertex(center).is_none() {
+                let vertex = self.get_vertex(center).ok_or_else(|| {
+                    GCardError::VertexNotFound(format!("Vertex {} not found", center))
+                })?;
+                abstract_graph.add_vertex(vertex.clone());
+            }
+            for pcf in pcfs {
+                abstract_graph.add_local_pcf(center, pcf.clone());
+            }
+        }
         for result in results {
             let abstract_edge = result?;
             let src_vertex = self.get_vertex(abstract_edge.src).unwrap();
@@ -1642,6 +1969,236 @@ impl QueryGraph {
         }
 
         Ok(abstract_graph)
+    }
+
+    fn extract_star_local_pcfs(
+        &self,
+        results: Vec<GCardResult<AbstractEdge>>,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> (Vec<GCardResult<AbstractEdge>>, HashMap<VertexId, Vec<Pcf>>) {
+        let mut edges = Vec::new();
+        let mut passthrough_errors = Vec::new();
+        for result in results {
+            match result {
+                Ok(edge) => edges.push(edge),
+                Err(err) => passthrough_errors.push(Err(err)),
+            }
+        }
+
+        let mut candidates_by_center: HashMap<VertexId, Vec<(usize, PathPattern)>> = HashMap::new();
+        for (idx, edge) in edges.iter().enumerate() {
+            if !edge.predicates.is_empty() {
+                continue;
+            }
+            for center in [edge.src, edge.dst] {
+                let other = if center == edge.src {
+                    edge.dst
+                } else {
+                    edge.src
+                };
+                if self.get_degree(other) != 1 {
+                    continue;
+                }
+                if let Some(arm) = self.star_arm_for_edge(edge, center) {
+                    candidates_by_center
+                        .entry(center)
+                        .or_default()
+                        .push((idx, arm));
+                }
+            }
+        }
+
+        let catalog_max_star_degree = degree_seq_graph
+            .star_stats
+            .keys()
+            .map(|key| key.degree)
+            .max()
+            .unwrap_or(0);
+        let catalog_max_star_length = degree_seq_graph
+            .star_stats
+            .keys()
+            .map(|key| key.max_arm_len)
+            .max()
+            .unwrap_or(0);
+        let star_degree_override = GCARD_MAX_STAR_DEGREE_OVERRIDE.load(Ordering::Relaxed);
+        let max_star_degree = if star_degree_override != GCARD_STAR_CONFIG_UNSET {
+            star_degree_override
+        } else {
+            std::env::var("GCARD_MAX_STAR_DEGREE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(catalog_max_star_degree)
+        };
+        let star_length_override = GCARD_MAX_STAR_LENGTH_OVERRIDE.load(Ordering::Relaxed);
+        let max_star_length = if star_length_override != GCARD_STAR_CONFIG_UNSET {
+            star_length_override
+        } else {
+            std::env::var("GCARD_MAX_STAR_LENGTH")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(catalog_max_star_length)
+        };
+
+        let mut consumed = HashSet::new();
+        let mut local_pcfs: HashMap<VertexId, Vec<Pcf>> = HashMap::new();
+        let mut centers: Vec<_> = candidates_by_center.keys().copied().collect();
+        centers.sort_unstable();
+        for center in centers {
+            if max_star_degree == 0 {
+                continue;
+            }
+            let center_label = match self.get_vertex(center) {
+                Some(v) => v.label.clone(),
+                None => continue,
+            };
+            let mut mergeable = candidates_by_center
+                .remove(&center)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(idx, _)| !consumed.contains(idx))
+                .filter(|(_, arm)| arm.es.len() <= max_star_length)
+                .collect::<Vec<_>>();
+
+            mergeable.sort_by(|a, b| a.1.vs.cmp(&b.1.vs).then(a.1.es.cmp(&b.1.es)));
+
+            while !mergeable.is_empty() {
+                let mut unique_arms = Vec::new();
+                let mut last_arm: Option<&PathPattern> = None;
+                for (i, (_, arm)) in mergeable.iter().enumerate() {
+                    if last_arm.is_some_and(|last| last == arm) {
+                        continue;
+                    }
+                    unique_arms.push((i, arm.clone()));
+                    last_arm = Some(arm);
+                }
+
+                let Some((selected_indices, pcf)) = Self::find_matching_star_pcf(
+                    &center_label,
+                    &unique_arms,
+                    max_star_degree,
+                    degree_seq_graph,
+                ) else {
+                    break;
+                };
+
+                for &i in &selected_indices {
+                    consumed.insert(mergeable[i].0);
+                }
+                local_pcfs.entry(center).or_default().push(pcf);
+                for i in selected_indices.into_iter().rev() {
+                    mergeable.remove(i);
+                }
+            }
+        }
+
+        let mut out = passthrough_errors;
+        out.extend(
+            edges
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, edge)| (!consumed.contains(&idx)).then_some(Ok(edge))),
+        );
+        (out, local_pcfs)
+    }
+
+    fn find_matching_star_pcf(
+        center_label: &str,
+        unique_arms: &[(usize, PathPattern)],
+        max_star_degree: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> Option<(Vec<usize>, Pcf)> {
+        let max_degree = max_star_degree.min(unique_arms.len());
+        if max_degree < 2 {
+            return None;
+        }
+        for degree in (2..=max_degree).rev() {
+            let mut selected = Vec::with_capacity(degree);
+            if let Some(matched) = Self::find_matching_star_pcf_at_degree(
+                center_label,
+                unique_arms,
+                degree,
+                0,
+                &mut selected,
+                degree_seq_graph,
+            ) {
+                return Some(matched);
+            }
+        }
+        None
+    }
+
+    fn find_matching_star_pcf_at_degree(
+        center_label: &str,
+        unique_arms: &[(usize, PathPattern)],
+        target_degree: usize,
+        start: usize,
+        selected: &mut Vec<usize>,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> Option<(Vec<usize>, Pcf)> {
+        if selected.len() == target_degree {
+            let arms = selected
+                .iter()
+                .map(|&idx| unique_arms[idx].1.clone())
+                .collect::<Vec<_>>();
+            let star_key = StarStatKey::new(center_label.to_string(), arms);
+            return degree_seq_graph
+                .star_stats
+                .contains_key(&star_key)
+                .then(|| {
+                    let pcf = degree_seq_graph.get_piece_func_by_star(&star_key);
+                    let mergeable_indices = selected
+                        .iter()
+                        .map(|&idx| unique_arms[idx].0)
+                        .collect::<Vec<_>>();
+                    (mergeable_indices, pcf)
+                });
+        }
+
+        let remaining_needed = target_degree - selected.len();
+        if unique_arms.len().saturating_sub(start) < remaining_needed {
+            return None;
+        }
+
+        for idx in start..unique_arms.len() {
+            if unique_arms.len() - idx < remaining_needed {
+                break;
+            }
+            selected.push(idx);
+            if let Some(matched) = Self::find_matching_star_pcf_at_degree(
+                center_label,
+                unique_arms,
+                target_degree,
+                idx + 1,
+                selected,
+                degree_seq_graph,
+            ) {
+                return Some(matched);
+            }
+            selected.pop();
+        }
+        None
+    }
+
+    fn star_arm_for_edge(&self, edge: &AbstractEdge, center: VertexId) -> Option<PathPattern> {
+        let mut node_labels = edge
+            .path_vertices
+            .iter()
+            .map(|vid| self.get_vertex(*vid).map(|v| v.label.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        let mut edge_labels = edge
+            .original_edge_ids
+            .iter()
+            .map(|eid| self.get_edge(*eid).map(|e| e.label.clone()))
+            .collect::<Option<Vec<_>>>()?;
+
+        if edge.dst == center {
+            node_labels.reverse();
+            edge_labels.reverse();
+        } else if edge.src != center {
+            return None;
+        }
+
+        Some(PathPattern::new_without_reverse(node_labels, edge_labels))
     }
 
     fn fill_pcf_for_abstract_edge_flat(

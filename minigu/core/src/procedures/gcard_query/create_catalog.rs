@@ -6,7 +6,7 @@ use minigu_context::procedure::Procedure;
 use rayon::ThreadPoolBuilder;
 
 use super::Statistic;
-use super::degree_compute_dense::{PathsByLen, PatternDegCache};
+use super::degree_compute_dense::{PathsByLen, PatternDegCache, StarDegCache};
 use super::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::statistic::save_statistic;
 use crate::procedures::gcard_query::utils::{EdgeEndpoints, PathPattern, get_edges_from_catalog};
@@ -70,8 +70,27 @@ fn create_thread_pool(num_threads: usize) -> Result<rayon::ThreadPool, anyhow::E
         .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))
 }
 
+pub(super) fn parse_star_collection_config(max_k: usize) -> (usize, usize) {
+    let max_star_length = std::env::var("GCARD_MAX_STAR_LENGTH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(max_k);
+    let max_star_degree = std::env::var("GCARD_MAX_STAR_DEGREE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    (max_star_length.min(max_k), max_star_degree)
+}
+
 pub(super) fn build_statistic_from_pattern_cache(
     cache: &PatternDegCache,
+) -> Result<Statistic, anyhow::Error> {
+    build_statistic_from_pattern_and_star_cache(cache, &StarDegCache::new())
+}
+
+pub(super) fn build_statistic_from_pattern_and_star_cache(
+    cache: &PatternDegCache,
+    star_cache: &StarDegCache,
 ) -> Result<Statistic, anyhow::Error> {
     let mut statistic = Statistic::default();
     for (path_pattern, endpoint_degrees) in cache {
@@ -82,12 +101,23 @@ pub(super) fn build_statistic_from_pattern_cache(
                 .map_err(|e| anyhow::anyhow!("Statistic::insert_or_update: {}", e))?;
         }
     }
-    println!("=== Per-label path count in Statistic ===");
+    for (star_key, (vertex_ids, frequencies)) in star_cache {
+        statistic
+            .insert_or_update_star(
+                &star_key.center_label,
+                vertex_ids,
+                star_key.clone(),
+                frequencies,
+            )
+            .map_err(|e| anyhow::anyhow!("Statistic::insert_or_update_star: {}", e))?;
+    }
+    println!("=== Per-label path/star count in Statistic ===");
     for (label, ls) in &statistic.label_path_statistic {
         println!(
-            "  {:20} paths: {:5}  vertices: {:10}",
+            "  {:20} paths: {:5}  stars: {:5}  vertices: {:10}",
             label,
             ls.path_statistic.len(),
+            ls.star_statistic.len(),
             ls.vertex_ids.len()
         );
     }
@@ -96,12 +126,13 @@ pub(super) fn build_statistic_from_pattern_cache(
 
 fn build_and_persist_statistic(
     cache: &PatternDegCache,
+    star_cache: &StarDegCache,
     graph_container: &minigu_context::graph::GraphContainer,
     db_path: &Option<std::path::PathBuf>,
     graph_name: &str,
     max_k: usize,
 ) -> Result<(), anyhow::Error> {
-    let statistic = build_statistic_from_pattern_cache(cache)?;
+    let statistic = build_statistic_from_pattern_and_star_cache(cache, star_cache)?;
     let size = statistic.serialized_size();
     println!(
         "Statistic estimated bincode size: {} bytes - {:.2} MB",
@@ -162,6 +193,17 @@ pub fn build_procedure() -> Procedure {
             "compute_threads={} (available parallelism: {})",
             num_threads, default_threads,
         );
+        let (max_star_length, max_star_degree) = parse_star_collection_config(max_k);
+        println!(
+            "star collection: max_star_length={}, max_star_degree={}{}",
+            max_star_length,
+            max_star_degree,
+            if max_star_degree == 0 {
+                " (disabled)"
+            } else {
+                ""
+            },
+        );
 
         let pool = create_thread_pool(num_threads)?;
 
@@ -211,8 +253,15 @@ pub fn build_procedure() -> Procedure {
 
         let scanned = Arc::new(scanned);
         let compute_start = std::time::Instant::now();
-        let cache =
-            super::degree_compute_dense::compute_from_scanned_hops(&scanned, &edges, max_k, &pool)?;
+        let (cache, star_cache): (PatternDegCache, StarDegCache) =
+            super::degree_compute_dense::compute_from_scanned_hops_with_star(
+                &scanned,
+                &edges,
+                max_k,
+                max_star_length,
+                max_star_degree,
+                &pool,
+            )?;
         let compute_elapsed = compute_start.elapsed();
         println!("Compute time: {:.3}s", compute_elapsed.as_secs_f64());
         println!(
@@ -224,7 +273,14 @@ pub fn build_procedure() -> Procedure {
         drop(scanned);
 
         // ── Build statistic & persist ──
-        build_and_persist_statistic(&cache, &graph_container, &db_path, &graph_name, max_k)?;
+        build_and_persist_statistic(
+            &cache,
+            &star_cache,
+            &graph_container,
+            &db_path,
+            &graph_name,
+            max_k,
+        )?;
 
         Ok(vec![])
     })

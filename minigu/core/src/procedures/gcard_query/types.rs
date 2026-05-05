@@ -118,8 +118,20 @@ impl Ord for CandidateTree {
     fn cmp(&self, other: &Self) -> Ordering {
         // Lower total cardinality = better tree → should be popped first from max-heap.
         // Reverse order so BinaryHeap (max-heap) pops lowest-cardinality trees first.
-        other.total_score.cmp(&self.total_score)
+        // Use edge_ids as deterministic tiebreaker.
+        let self_key = sorted_edge_ids(&self.edge_ids);
+        let other_key = sorted_edge_ids(&other.edge_ids);
+        other
+            .total_score
+            .cmp(&self.total_score)
+            .then_with(|| other_key.cmp(&self_key))
     }
+}
+
+fn sorted_edge_ids(edge_ids: &HashSet<EdgeId>) -> Vec<EdgeId> {
+    let mut ids: Vec<_> = edge_ids.iter().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 impl Query {

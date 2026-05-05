@@ -1,13 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use itertools::Itertools;
 use minigu_common::types::{LabelId, VertexId};
 use minigu_storage::tp::MemTransaction;
 use rayon::prelude::*;
 
 use super::catalog::AltKey;
 use super::flat_graph::FlatGraph;
-use crate::procedures::gcard_query::utils::{EdgeEndpoints, PathPattern};
+use crate::procedures::gcard_query::utils::{
+    EdgeEndpoints, PathPattern, StarStatKey, build_undirected_adj,
+};
 
 type VertexIds = Arc<Vec<VertexId>>;
 
@@ -18,6 +21,7 @@ type VertexIds = Arc<Vec<VertexId>>;
 pub type DegreeSeq = (VertexIds, Vec<u64>);
 pub type PathsByLen = HashMap<usize, HashSet<PathPattern>>;
 pub type PatternDegCache = HashMap<PathPattern, HashMap<String, DegreeSeq>>;
+pub type StarDegCache = HashMap<StarStatKey, DegreeSeq>;
 
 // ----- Neighbor-cached, dependency-driven computation -----
 
@@ -250,6 +254,70 @@ fn hop_key_for_pattern_start(
     }
 }
 
+fn enumerate_oriented_arms_in_schema(
+    edges: &HashMap<String, EdgeEndpoints>,
+    max_len: usize,
+) -> HashMap<String, Vec<PathPattern>> {
+    let vertex_types: HashSet<String> = edges
+        .values()
+        .flat_map(|e| [e.src_label.as_str(), e.dst_label.as_str()])
+        .map(String::from)
+        .collect();
+    let adj = build_undirected_adj(edges);
+    let mut out: HashMap<String, Vec<PathPattern>> = HashMap::new();
+
+    fn dfs(
+        center: &str,
+        adj: &HashMap<String, Vec<(String, String)>>,
+        max_len: usize,
+        node_seq: &mut Vec<String>,
+        edge_seq: &mut Vec<String>,
+        out: &mut HashMap<String, Vec<PathPattern>>,
+    ) {
+        let cur_len = edge_seq.len();
+        if cur_len > 0 {
+            out.entry(center.to_string())
+                .or_default()
+                .push(PathPattern::new_without_reverse(
+                    node_seq.clone(),
+                    edge_seq.clone(),
+                ));
+        }
+        if cur_len == max_len {
+            return;
+        }
+        let cur_node = node_seq.last().unwrap().clone();
+        if let Some(nbrs) = adj.get(&cur_node) {
+            for (edge_name, next_node) in nbrs {
+                edge_seq.push(edge_name.clone());
+                node_seq.push(next_node.clone());
+                dfs(center, adj, max_len, node_seq, edge_seq, out);
+                node_seq.pop();
+                edge_seq.pop();
+            }
+        }
+    }
+
+    for center in vertex_types {
+        let mut node_seq = vec![center.clone()];
+        let mut edge_seq = Vec::new();
+        dfs(
+            &center,
+            &adj,
+            max_len,
+            &mut node_seq,
+            &mut edge_seq,
+            &mut out,
+        );
+    }
+
+    for arms in out.values_mut() {
+        arms.sort_by(|a, b| a.vs.cmp(&b.vs).then(a.es.cmp(&b.es)));
+        arms.dedup_by(|a, b| a.vs == b.vs && a.es == b.es);
+    }
+    out
+}
+
 /// Internal dense cache: PathPattern → HopKey → Vec<u64> (indexed by hop's src_verts).
 /// Keyed by HopKey (not vertex label name) to avoid collisions when both endpoints
 /// of a pattern share the same vertex label but use different hops
@@ -442,6 +510,19 @@ pub fn compute_from_scanned_hops(
     max_k: usize,
     compute_pool: &rayon::ThreadPool,
 ) -> Result<PatternDegCache, anyhow::Error> {
+    let (path_cache, _) =
+        compute_from_scanned_hops_with_star(scanned, edges, max_k, 0, 0, compute_pool)?;
+    Ok(path_cache)
+}
+
+pub fn compute_from_scanned_hops_with_star(
+    scanned: &ScannedHops,
+    edges: &HashMap<String, EdgeEndpoints>,
+    max_k: usize,
+    max_star_length: usize,
+    max_star_degree: usize,
+    compute_pool: &rayon::ThreadPool,
+) -> Result<(PatternDegCache, StarDegCache), anyhow::Error> {
     let all_deps = &scanned.all_deps;
     let vec_caches = &scanned.vec_caches;
     let remap_tables = &scanned.remap_tables;
@@ -501,6 +582,19 @@ pub fn compute_from_scanned_hops(
         }
     }
 
+    let star_output = if max_star_length > 0 && max_star_degree > 0 {
+        compute_star_degrees_from_internal(
+            scanned,
+            edges,
+            &cache,
+            max_star_length,
+            max_star_degree,
+            compute_pool,
+        )?
+    } else {
+        HashMap::new()
+    };
+
     // Convert InternalDegCache (Vec<u64>) → PatternDegCache (DegreeSeq).
     // Consumes the cache to move degree Vecs (no clone). Uses Arc for shared src_verts.
     let mut output: PatternDegCache = HashMap::with_capacity(cache.len());
@@ -515,7 +609,98 @@ pub fn compute_from_scanned_hops(
         output.insert(pattern, out_endpoints);
     }
 
-    Ok(output)
+    Ok((output, star_output))
+}
+
+fn compute_star_degrees_from_internal(
+    scanned: &ScannedHops,
+    edges: &HashMap<String, EdgeEndpoints>,
+    cache: &InternalDegCache,
+    max_star_length: usize,
+    max_star_degree: usize,
+    compute_pool: &rayon::ThreadPool,
+) -> Result<StarDegCache, anyhow::Error> {
+    let arms_by_center = enumerate_oriented_arms_in_schema(edges, max_star_length);
+    let mut tasks: Vec<(String, Vec<PathPattern>)> = Vec::new();
+
+    for (center_label, mut arms) in arms_by_center {
+        arms.retain(|p| !p.es.is_empty() && p.es.len() <= max_star_length);
+        arms.sort_by(|a, b| a.vs.cmp(&b.vs).then(a.es.cmp(&b.es)));
+        if !arms.is_empty() {
+            tasks.push((center_label, arms));
+        }
+    }
+    tasks.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let per_center: Vec<Result<Vec<(StarStatKey, DegreeSeq)>, anyhow::Error>> = compute_pool
+        .install(|| {
+            tasks
+                .par_iter()
+                .map(|(center_label, arms)| {
+                    let mut rows = Vec::new();
+                    let max_degree = max_star_degree.min(arms.len());
+                    for degree in 2..=max_degree {
+                        for comb in arms.iter().combinations(degree) {
+                            let mut arm_entries = Vec::with_capacity(degree);
+                            for arm in &comb {
+                                let hop = hop_key_for_pattern_start(arm, edges);
+                                let canonical = arm.canonical();
+                                let degs = cache
+                                    .get(&canonical)
+                                    .and_then(|m| m.get(&hop))
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "degree vector missing for star arm {} at hop {:?}",
+                                            arm,
+                                            hop
+                                        )
+                                    })?;
+                                let data = scanned.vec_caches.get(&hop).ok_or_else(|| {
+                                    anyhow::anyhow!("vec cache missing for star hop {:?}", hop)
+                                })?;
+                                arm_entries.push((arm, data, degs));
+                            }
+
+                            let (_, first_data, first_degs) = arm_entries[0];
+                            let vertex_ids = Arc::clone(&first_data.src_verts);
+                            let mut star_degs = first_degs.clone();
+                            for (_, data, degs) in arm_entries.iter().skip(1) {
+                                if data.src_verts.as_slice() == vertex_ids.as_slice() {
+                                    for (dst, src) in star_degs.iter_mut().zip(degs.iter()) {
+                                        *dst = dst.saturating_mul(*src);
+                                    }
+                                } else {
+                                    for (idx, vertex_id) in vertex_ids.iter().enumerate() {
+                                        let rhs = data
+                                            .src_vid_to_idx
+                                            .get(vertex_id)
+                                            .map(|i| degs[*i as usize])
+                                            .unwrap_or(0);
+                                        star_degs[idx] = star_degs[idx].saturating_mul(rhs);
+                                    }
+                                }
+                            }
+
+                            let key = StarStatKey::new(
+                                center_label.clone(),
+                                comb.into_iter().cloned().collect(),
+                            );
+                            rows.push((key, (vertex_ids, star_degs)));
+                        }
+                    }
+                    Ok(rows)
+                })
+                .collect()
+        });
+
+    let mut out = HashMap::new();
+    for rows in per_center {
+        for (key, seq) in rows? {
+            out.insert(key, seq);
+        }
+    }
+    eprintln!("Computed PathCE-style star degree sequences: {}", out.len());
+    Ok(out)
 }
 
 // ----- Combined entry point -----
@@ -743,5 +928,96 @@ mod tests {
         assert_eq!(raw.src_vids, vec![1, 2, 3, 4]);
         assert_eq!(raw.neighbors_flat, vec![10, 30]);
         assert_eq!(raw.offsets, vec![0, 1, 1, 2, 2]);
+    }
+
+    fn vec_neighbor_data(src_verts: Vec<VertexId>) -> VecNeighborData {
+        VecNeighborData {
+            src_vid_to_idx: src_verts
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v, i as u32))
+                .collect(),
+            src_verts: Arc::new(src_verts),
+            dst_verts: Vec::new(),
+            flat_neighbors: Vec::new(),
+            offsets: vec![0; 3],
+        }
+    }
+
+    fn one_hop_arm(center: &str, edge: &str, leaf: &str) -> PathPattern {
+        PathPattern::new_without_reverse(
+            vec![center.to_string(), leaf.to_string()],
+            vec![edge.to_string()],
+        )
+    }
+
+    #[test]
+    fn pathce_style_star_degree_sequences_multiply_distinct_rooted_arms() {
+        let center = "a".to_string();
+        let vertex_ids = vec![10, 20];
+        let arm_specs = [
+            ("ab", "b", vec![2, 3]),
+            ("ac", "c", vec![5, 7]),
+            ("ad", "d", vec![11, 13]),
+        ];
+
+        let mut edges = HashMap::new();
+        let mut vec_caches = HashMap::new();
+        let mut cache: InternalDegCache = HashMap::new();
+        let mut arms = Vec::new();
+
+        for (edge_label, leaf_label, degrees) in arm_specs {
+            edges.insert(
+                edge_label.to_string(),
+                EdgeEndpoints {
+                    src_label: center.clone(),
+                    dst_label: leaf_label.to_string(),
+                },
+            );
+
+            let arm = one_hop_arm(&center, edge_label, leaf_label);
+            let hop = hop_key_for_pattern_start(&arm, &edges);
+            vec_caches.insert(hop.clone(), vec_neighbor_data(vertex_ids.clone()));
+            cache
+                .entry(arm.canonical())
+                .or_default()
+                .insert(hop, degrees);
+
+            let reverse_arm = one_hop_arm(leaf_label, edge_label, &center);
+            let reverse_hop = hop_key_for_pattern_start(&reverse_arm, &edges);
+            vec_caches.insert(reverse_hop.clone(), vec_neighbor_data(vec![100, 200]));
+            cache
+                .entry(reverse_arm.canonical())
+                .or_default()
+                .insert(reverse_hop, vec![1, 1]);
+            arms.push(arm);
+        }
+
+        let scanned = ScannedHops {
+            vec_caches,
+            all_deps: Vec::new(),
+            remap_tables: HashMap::new(),
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap();
+
+        let star_cache =
+            compute_star_degrees_from_internal(&scanned, &edges, &cache, 1, 3, &pool).unwrap();
+
+        let degree_three_key = StarStatKey::new(center.clone(), arms.clone());
+        let (actual_vertices, actual_degrees) = star_cache.get(&degree_three_key).unwrap();
+        assert_eq!(actual_vertices.as_slice(), vertex_ids.as_slice());
+        assert_eq!(actual_degrees, &vec![2 * 5 * 11, 3 * 7 * 13]);
+
+        let repeated_arm_key = StarStatKey::new(
+            center,
+            vec![arms[0].clone(), arms[0].clone(), arms[0].clone()],
+        );
+        assert!(
+            !star_cache.contains_key(&repeated_arm_key),
+            "PathCE-style combinations should not generate repeated-arm stars"
+        );
     }
 }
