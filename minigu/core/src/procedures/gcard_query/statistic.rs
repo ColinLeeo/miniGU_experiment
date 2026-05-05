@@ -23,6 +23,7 @@ use crate::procedures::gcard_query::catalog::{
     AltKey, CompressedDegreeSeq, DegreeSeqGraphCompressed,
 };
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
+use crate::procedures::gcard_query::utils::StarStatKey;
 
 type VertexVec = Vec<VertexId>;
 
@@ -38,6 +39,8 @@ pub(crate) struct LabelStatistic {
     #[serde(skip, default)]
     pub(crate) rank_index: HashMap<VertexId, usize>,
     pub(crate) path_statistic: HashMap<AltKey, BlockStatistic>,
+    #[serde(default)]
+    pub(crate) star_statistic: HashMap<StarStatKey, BlockStatistic>,
 }
 
 impl LabelStatistic {
@@ -72,6 +75,24 @@ fn alt_key_serialized_size(alt_key: &AltKey) -> usize {
     string_vec_bincode_size(&alt_key.raw) * 2
 }
 
+fn star_key_serialized_size(star_key: &StarStatKey) -> usize {
+    let mut total = string_bincode_size(&star_key.center_label);
+    total += LEN_U64; // degree
+    total += LEN_U64; // max_arm_len
+    total += LEN_U64; // arms count
+    for arm in &star_key.arms {
+        total += LEN_U64;
+        for v in &arm.vs {
+            total += string_bincode_size(v);
+        }
+        total += LEN_U64;
+        for e in &arm.es {
+            total += string_bincode_size(e);
+        }
+    }
+    total
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Statistic {
     pub label_path_statistic: HashMap<String, LabelStatistic>,
@@ -91,6 +112,33 @@ impl Statistic {
         alt_key: AltKey,
         frequencies: &[u64],
     ) -> GCardResult<()> {
+        self.insert_or_update_with(label, vertex_ids, frequencies, |entry, block| {
+            entry.path_statistic.insert(alt_key, block);
+        })
+    }
+
+    pub fn insert_or_update_star(
+        &mut self,
+        label: &str,
+        vertex_ids: &[VertexId],
+        star_key: StarStatKey,
+        frequencies: &[u64],
+    ) -> GCardResult<()> {
+        self.insert_or_update_with(label, vertex_ids, frequencies, |entry, block| {
+            entry.star_statistic.insert(star_key, block);
+        })
+    }
+
+    fn insert_or_update_with<F>(
+        &mut self,
+        label: &str,
+        vertex_ids: &[VertexId],
+        frequencies: &[u64],
+        insert: F,
+    ) -> GCardResult<()>
+    where
+        F: FnOnce(&mut LabelStatistic, BlockStatistic),
+    {
         if vertex_ids.len() != frequencies.len() {
             return Err(GCardError::InvalidData(
                 "vertex_ids and frequencies length mismatch".into(),
@@ -134,7 +182,7 @@ impl Statistic {
             entry.rebuild_rank_index();
         }
 
-        entry.path_statistic.insert(alt_key, block);
+        insert(entry, block);
         Ok(())
     }
 
@@ -143,6 +191,13 @@ impl Statistic {
         let mut at_limit_weighted = 0.0f64;
         for ls in self.label_path_statistic.values() {
             for bs in ls.path_statistic.values() {
+                let n = bs.bucket_ids.len();
+                if n > 0 {
+                    at_limit_weighted += bs.upper_limit_ratio() * n as f64;
+                    total += n;
+                }
+            }
+            for bs in ls.star_statistic.values() {
                 let n = bs.bucket_ids.len();
                 if n > 0 {
                     at_limit_weighted += bs.upper_limit_ratio() * n as f64;
@@ -202,6 +257,7 @@ impl Statistic {
         // 从“可更新真身”转换到“查询友好视图”。
         let mut edge_set_to_endpoints: HashMap<AltKey, HashMap<String, CompressedDegreeSeq>> =
             HashMap::new();
+        let mut star_stats: HashMap<StarStatKey, CompressedDegreeSeq> = HashMap::new();
         for (node_name, ls) in &self.label_path_statistic {
             for (alt_key, block) in &ls.path_statistic {
                 if let Some(seq) = block.get_compressed_degree_seq()? {
@@ -211,9 +267,15 @@ impl Statistic {
                         .insert(node_name.clone(), seq);
                 }
             }
+            for (star_key, block) in &ls.star_statistic {
+                if let Some(seq) = block.get_compressed_degree_seq()? {
+                    star_stats.insert(star_key.clone(), seq);
+                }
+            }
         }
         Ok(DegreeSeqGraphCompressed {
             edge_set_to_endpoints,
+            star_stats,
         })
     }
 
@@ -320,6 +382,9 @@ impl Statistic {
             for bs in ls.path_statistic.values_mut() {
                 bs.remove_at_rank(rank);
             }
+            for bs in ls.star_statistic.values_mut() {
+                bs.remove_at_rank(rank);
+            }
             ls.rebuild_rank_index();
         }
     }
@@ -349,6 +414,11 @@ impl Statistic {
                 total += alt_key_serialized_size(alt_key);
                 // BlockStatistic uses `serialize_bytes`, so bincode stores:
                 // [byte_len: u64][entry_count: u64][payload bytes...]
+                total += LEN_U64 + LEN_U64 + block.serialize().len();
+            }
+            total += LEN_U64; // star_statistic count
+            for (star_key, block) in &ls.star_statistic {
+                total += star_key_serialized_size(star_key);
                 total += LEN_U64 + LEN_U64 + block.serialize().len();
             }
         }
@@ -393,4 +463,38 @@ pub fn load_statistic(path: &Path) -> Result<Option<Statistic>, anyhow::Error> {
         bytes.len() as f64 / 1024.0 / 1024.0
     );
     Ok(Some(statistic))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedures::gcard_query::utils::PathPattern;
+
+    #[test]
+    fn star_statistic_is_stored_once_for_center_vertices() {
+        let star_key = StarStatKey::new(
+            "person".to_string(),
+            vec![PathPattern::new_without_reverse(
+                vec!["person".to_string(), "post".to_string()],
+                vec!["created".to_string()],
+            )],
+        );
+        let mut statistic = Statistic::default();
+
+        statistic
+            .insert_or_update_star("person", &[1, 2, 3], star_key.clone(), &[4, 5, 6])
+            .unwrap();
+
+        let person_stats = statistic.label_path_statistic.get("person").unwrap();
+        assert_eq!(person_stats.star_statistic.len(), 1);
+        assert_eq!(person_stats.vertex_ids, vec![1, 2, 3]);
+
+        let compressed = statistic.to_degree_seq_graph_compressed().unwrap();
+        assert_eq!(compressed.star_stats.len(), 1);
+        assert!(compressed.star_stats.contains_key(&star_key));
+        assert!(
+            compressed.edge_set_to_endpoints.is_empty(),
+            "star statistics should not be expanded into path-style endpoint maps"
+        );
+    }
 }

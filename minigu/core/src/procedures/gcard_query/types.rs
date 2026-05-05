@@ -115,8 +115,18 @@ impl PartialOrd for CandidateTree {
 
 impl Ord for CandidateTree {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.total_score.cmp(&other.total_score)
+        let self_key = sorted_edge_ids(&self.edge_ids);
+        let other_key = sorted_edge_ids(&other.edge_ids);
+        self.total_score
+            .cmp(&other.total_score)
+            .then_with(|| other_key.cmp(&self_key))
     }
+}
+
+fn sorted_edge_ids(edge_ids: &HashSet<EdgeId>) -> Vec<EdgeId> {
+    let mut ids: Vec<_> = edge_ids.iter().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 impl Query {

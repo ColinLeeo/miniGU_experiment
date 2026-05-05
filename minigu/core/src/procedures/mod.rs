@@ -60,6 +60,10 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
             "load_flatgraph".to_string(),
             gcard_query::load_flatgraph::build_procedure(),
         ),
+        (
+            "set_gcard_star_config".to_string(),
+            gcard_query::build_set_star_config_procedure(),
+        ),
         ("gcard_query".to_string(), gcard_query::build_procedure()),
         ("mutate_graph".to_string(), mutate_graph::build_procedure()),
         (

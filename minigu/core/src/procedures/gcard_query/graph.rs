@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use minigu_common::types::{EdgeId, VertexId};
 
+use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::types::QueryVertex;
 
 pub trait Endpoints {
@@ -15,6 +16,7 @@ pub struct GraphSkeleton<E> {
     pub edges: HashMap<EdgeId, E>,
     pub outgoing_edges: HashMap<VertexId, Vec<EdgeId>>,
     pub incoming_edges: HashMap<VertexId, Vec<EdgeId>>,
+    pub local_pcfs: HashMap<VertexId, Vec<Pcf>>,
 }
 
 impl<E> GraphSkeleton<E> {

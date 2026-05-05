@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
+use crate::procedures::gcard_query::utils::StarStatKey;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AltKey {
@@ -217,12 +218,15 @@ pub struct DegreeSeqGraphCompressed {
     /// `Person-knows-Person` 这条路径下，
     /// 既可能存“以左端 Person 为观察端点”的统计，也可能存右端 Person 的统计。
     pub edge_set_to_endpoints: HashMap<AltKey, HashMap<String, CompressedDegreeSeq>>,
+    #[serde(default)]
+    pub star_stats: HashMap<StarStatKey, CompressedDegreeSeq>,
 }
 
 impl DegreeSeqGraphCompressed {
     pub fn new() -> Self {
         Self {
             edge_set_to_endpoints: HashMap::new(),
+            star_stats: HashMap::new(),
         }
     }
 
@@ -241,6 +245,13 @@ impl DegreeSeqGraphCompressed {
         } else {
             PiecewiseConstantFunction::empty()
         }
+    }
+
+    pub fn get_piece_func_by_star(&self, star: &StarStatKey) -> PiecewiseConstantFunction {
+        self.star_stats
+            .get(star)
+            .map(|v| v.to_pcf())
+            .unwrap_or_else(PiecewiseConstantFunction::empty)
     }
 
     /// Incrementally rebuild only the dirty `(AltKey, label)` entries

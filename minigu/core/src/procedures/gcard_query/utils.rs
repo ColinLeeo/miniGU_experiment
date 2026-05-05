@@ -121,6 +121,44 @@ impl Hash for PathPattern {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct StarStatKey {
+    pub center_label: String,
+    pub degree: usize,
+    pub max_arm_len: usize,
+    pub arms: Vec<PathPattern>,
+}
+
+impl StarStatKey {
+    pub fn new(center_label: String, mut arms: Vec<PathPattern>) -> Self {
+        arms.sort_by(|a, b| a.vs.cmp(&b.vs).then(a.es.cmp(&b.es)));
+        let degree = arms.len();
+        let max_arm_len = arms.iter().map(|p| p.es.len()).max().unwrap_or(0);
+        StarStatKey {
+            center_label,
+            degree,
+            max_arm_len,
+            arms,
+        }
+    }
+}
+
+impl fmt::Display for StarStatKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let arms = self
+            .arms
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        write!(
+            f,
+            "star(center={}, degree={}, max_arm_len={}, arms=[{}])",
+            self.center_label, self.degree, self.max_arm_len, arms
+        )
+    }
+}
+
 pub fn get_edges_from_catalog(
     catalog: &dyn GraphTypeProvider,
 ) -> Result<HashMap<String, EdgeEndpoints>, anyhow::Error> {
