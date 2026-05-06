@@ -663,6 +663,47 @@ pub fn scan_all_hops_from_raw(
 
 // ----- FlatGraph-based hop building -----
 
+fn raw_hop_data_from_flat_csr(
+    verts: &[VertexId],
+    csr: Option<&crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid>,
+) -> RawHopData {
+    match csr {
+        Some(csr) => {
+            let neighbors_vids = csr.neighbors_vids();
+            let csr_verts = csr.verts();
+            let csr_offsets = csr.offsets();
+            let mut offsets = Vec::with_capacity(verts.len() + 1);
+            let mut csr_pos = 0usize;
+            for &vid in verts {
+                while csr_pos < csr_verts.len() && csr_verts[csr_pos] < vid {
+                    csr_pos += 1;
+                }
+                if csr_pos < csr_verts.len() && csr_verts[csr_pos] == vid {
+                    offsets.push(csr_offsets[csr_pos]);
+                } else {
+                    let cur = if csr_pos < csr_verts.len() {
+                        csr_offsets[csr_pos]
+                    } else {
+                        neighbors_vids.len()
+                    };
+                    offsets.push(cur);
+                }
+            }
+            offsets.push(neighbors_vids.len());
+            RawHopData {
+                src_vids: verts.to_vec(),
+                neighbors_flat: neighbors_vids,
+                offsets,
+            }
+        }
+        None => RawHopData {
+            src_vids: verts.to_vec(),
+            neighbors_flat: Vec::new(),
+            offsets: vec![0; verts.len() + 1],
+        },
+    }
+}
+
 /// Build `ScannedHops` directly from a [`FlatGraph`].
 ///
 /// Extracts neighbor VertexIds from FlatGraph's `CsrAdjWithEid` CSR buckets,
@@ -678,41 +719,29 @@ pub fn scan_all_hops_from_flat_graph(
         &|vertex_label, edge_label, outgoing| {
             let verts = flat_graph.all_vertex_ids_by_label(vertex_label);
             let key = (vertex_label.to_string(), edge_label.to_string(), outgoing);
-            match flat_graph.hop_csrs().get(&key) {
-                Some(csr) => {
-                    let neighbors_vids = csr.neighbors_vids();
-                    let csr_verts = csr.verts();
-                    let csr_offsets = csr.offsets();
-                    let mut offsets = Vec::with_capacity(verts.len() + 1);
-                    let mut csr_pos = 0usize;
-                    for &vid in verts {
-                        while csr_pos < csr_verts.len() && csr_verts[csr_pos] < vid {
-                            csr_pos += 1;
-                        }
-                        if csr_pos < csr_verts.len() && csr_verts[csr_pos] == vid {
-                            offsets.push(csr_offsets[csr_pos]);
-                        } else {
-                            let cur = offsets.last().copied().unwrap_or(0);
-                            offsets.push(cur);
-                        }
-                    }
-                    offsets.push(neighbors_vids.len());
-                    RawHopData {
-                        src_vids: verts.to_vec(),
-                        neighbors_flat: neighbors_vids,
-                        offsets,
-                    }
-                }
-                None => RawHopData {
-                    src_vids: verts.to_vec(),
-                    neighbors_flat: Vec::new(),
-                    offsets: vec![0; verts.len() + 1],
-                },
-            }
+            raw_hop_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key))
         },
         edges,
         schema_path,
         max_k,
         scan_pool,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flat_csr_raw_hop_offsets_preserve_degrees_before_missing_vertices() {
+        let csr = crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid::build(vec![
+            (1, 10, 100),
+            (3, 30, 300),
+        ]);
+        let raw = raw_hop_data_from_flat_csr(&[1, 2, 3, 4], Some(&csr));
+
+        assert_eq!(raw.src_vids, vec![1, 2, 3, 4]);
+        assert_eq!(raw.neighbors_flat, vec![10, 30]);
+        assert_eq!(raw.offsets, vec![0, 1, 1, 2, 2]);
+    }
 }
