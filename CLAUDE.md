@@ -26,9 +26,16 @@ cargo test -p <crate> --test <test_name>      # single test
 
 # Lint & format
 cargo clippy --tests --features std,serde,miette --no-deps
+RUSTFLAGS="-Dwarnings" cargo clippy --tests --features std,serde,miette --no-deps  # CI mode (warnings = errors)
 cargo fmt
 cargo fmt --check
 taplo fmt --check --diff   # TOML files
+
+# Full CI check (runs all of the above in sequence)
+./scripts/run_ci.sh
+
+# Build docs
+cargo doc --lib --no-deps --features std,serde,miette
 ```
 
 ## Codebase Architecture
@@ -89,6 +96,8 @@ Executors live in `minigu/gql/execution/src/executor/` and implement the `Execut
 - **Error handling:** `thiserror` + `miette` for diagnostics; each crate has its own `Error` enum and a local `Result<T>` alias.
 - **Concurrency:** `Arc`/`RwLock` for shared state; `DashMap`/`DashSet` for concurrent maps; `rayon` for parallelism.
 - **Catalog hierarchy:** `MemoryCatalog` → `MemoryDirectoryCatalog` → `MemorySchemaCatalog` → graphs/procedures.
+- **Formatting conventions:** `rustfmt.toml` enforces `imports_granularity = "Module"`, `group_imports = "StdExternalCrate"`, edition 2024 style. Imports must be grouped as std → external → crate-local.
+- **Clippy:** `clippy.toml` sets `avoid-breaking-exported-api = false` — clippy will flag API-breaking issues rather than silently allowing them.
 
 ### GCard: Graph Cardinality Estimation（核心算法）
 
@@ -147,8 +156,4 @@ procedures/gcard_query/
 - **INNER (0)**: 在抽象图构建阶段就应用谓词（融入 PCF 计算）
 - **OUTER (1)**: 先算无谓词基数，再乘以选择率
 - **IGNORE (2)**: 完全忽略谓词
-
-
-
-
 

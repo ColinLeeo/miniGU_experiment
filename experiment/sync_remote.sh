@@ -59,6 +59,7 @@ RSYNC_EXCLUDES=(
     # load_ldbc 生成的大型缓存文件（远程自动生成，无需同步）
     "*.lightgraph.bin"
     "*.scanned_hops.bin"
+    "*.bin"
 
     # 实验结果
     "experiment/result/"
