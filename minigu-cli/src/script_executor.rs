@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
+use minigu::common::data_chunk::display::{TableBuilder, TableOptions, TableStyle};
 use minigu::database::{Database, DatabaseConfig};
 
 #[derive(Debug, Parser, Clone)]
@@ -21,6 +22,7 @@ impl ScriptExecutor {
             let line = line.trim();
             match line {
                 "" => continue,
+                _ if line.starts_with("--") => continue,
                 ":quit" => break,
                 ":timing" => {
                     timing = !timing;
@@ -32,13 +34,26 @@ impl ScriptExecutor {
                     } else {
                         (timing, line)
                     };
+                    let start = Instant::now();
+                    let result = session.query(query)?;
+                    let elapsed = start.elapsed();
+
+                    // Print result table (like shell mode)
+                    if let Some(schema) = result.schema() {
+                        let options = TableOptions::new().with_style(TableStyle::Csv(b','));
+                        let mut builder = TableBuilder::new(Some(schema.clone()), options);
+                        let mut num_rows = 0;
+                        for chunk in result {
+                            num_rows += chunk.cardinality();
+                            builder = builder.append_chunk(&chunk);
+                        }
+                        let table = builder.build();
+                        println!("{table}");
+                        eprintln!("({} rows)", num_rows);
+                    }
+
                     if timed {
-                        let start = Instant::now();
-                        session.query(query)?;
-                        let elapsed = start.elapsed();
                         eprintln!("Time: {:.3}s", elapsed.as_secs_f64());
-                    } else {
-                        session.query(line)?;
                     }
                 }
             };

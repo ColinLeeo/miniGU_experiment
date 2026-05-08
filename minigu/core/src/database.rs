@@ -97,7 +97,8 @@ impl Database {
                                 }
                             }
                             container.set_statistic(Arc::new(statistic));
-                            // Initialize an empty update log (default max_k=3)
+                            // Initialize an empty update log (max_k must match K used to build
+                            // statistic)
                             container.set_gcard_update_log(new_gcard_update_log(2));
                             eprintln!("[database] Statistic loaded, update log initialized");
                         }

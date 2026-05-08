@@ -116,6 +116,73 @@ pub(crate) fn export_csv_snapshot(fg: &FlatGraph, output_dir: &Path) -> anyhow::
     Ok(())
 }
 
+/// Export a single edge type's CSV to the given file path.
+pub(crate) fn export_single_edge_csv(
+    fg: &FlatGraph,
+    edge_label: &str,
+    output_path: &Path,
+) -> anyhow::Result<()> {
+    // Ensure parent directory exists.
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut eids: Vec<EdgeId> = Vec::new();
+    for eid in fg.all_edge_ids() {
+        if let Some((_, _, _, _, el)) = fg.edge_endpoints(eid) {
+            if el == edge_label {
+                eids.push(eid);
+            }
+        }
+    }
+    eids.sort_unstable();
+
+    // Reuse the existing write_edge_csv logic but write to a specific file path.
+    let prop_names = fg
+        .edge_prop_schema()
+        .get(edge_label)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut file = io::BufWriter::new(fs::File::create(output_path)?);
+
+    // Header
+    let mut header = "src,dst".to_string();
+    for name in &prop_names {
+        header.push(',');
+        header.push_str(name);
+    }
+    writeln!(file, "{}", header)?;
+
+    // Rows
+    for eid in &eids {
+        if let Some((src, _, dst, _, _)) = fg.edge_endpoints(*eid) {
+            let mut line = format!("{},{}", src, dst);
+            if let Some(props) = fg.edge_props(*eid) {
+                for (i, _) in prop_names.iter().enumerate() {
+                    line.push(',');
+                    if i < props.len() {
+                        line.push_str(&scalar_to_csv(&props[i]));
+                    }
+                }
+            } else {
+                for _ in &prop_names {
+                    line.push(',');
+                }
+            }
+            writeln!(file, "{}", line)?;
+        }
+    }
+
+    eprintln!(
+        "[export_single_edge_csv] wrote {} edges of '{}' to {}",
+        eids.len(),
+        edge_label,
+        output_path.display()
+    );
+    Ok(())
+}
+
 fn write_vertex_csv(fg: &FlatGraph, output_dir: &Path, label: &str) -> anyhow::Result<()> {
     let vids = fg.all_vertex_ids_by_label(label);
     let prop_names = fg

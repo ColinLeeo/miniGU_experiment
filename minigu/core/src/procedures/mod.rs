@@ -82,5 +82,9 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
             "random_insert".to_string(),
             gcard_query::random_insert::build_procedure(),
         ),
+        (
+            "export_edge_csv".to_string(),
+            gcard_query::export_edge_csv::build_procedure(),
+        ),
     ]
 }

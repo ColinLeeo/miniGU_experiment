@@ -8,6 +8,7 @@ mod degree_compute;
 mod degree_compute_dense;
 mod degreepiecewise;
 pub mod error;
+pub mod export_edge_csv;
 pub mod export_flatgraph_snapshot;
 pub mod flat_graph;
 pub mod stat_quality;

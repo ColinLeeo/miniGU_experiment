@@ -1864,6 +1864,17 @@ impl QueryGraph {
             0.0
         };
 
+        eprintln!(
+            "[selectivity-debug] path={}, src_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, sel={:.6}",
+            abstract_edge.path_str,
+            compiled.src_label,
+            sampled_starts.len(),
+            struct_success_sample_count,
+            sum_struct_weight,
+            sum_pred_weight,
+            selectivity,
+        );
+
         Ok(selectivity)
     }
 
@@ -1912,7 +1923,22 @@ impl QueryGraph {
                                     cached
                                 } else {
                                     let p = match props.get(rp.prop_index) {
-                                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                                        Some(v) => {
+                                            if crate::procedures::gcard_query::GCARD_VERBOSE
+                                                .load(std::sync::atomic::Ordering::Relaxed)
+                                                && weight == 1.0
+                                            {
+                                                eprintln!(
+                                                    "[pred-debug] vid={}, prop_idx={}, stored={:?}, expected={:?}, op={:?}",
+                                                    current_vid,
+                                                    rp.prop_index,
+                                                    v,
+                                                    &rp.value,
+                                                    &rp.op
+                                                );
+                                            }
+                                            self.compare_values(v, &rp.op, &rp.value)?
+                                        }
                                         None => false,
                                     };
                                     local_pred_cache.insert((pid, current_vid), p);
