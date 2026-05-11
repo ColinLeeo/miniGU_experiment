@@ -149,6 +149,7 @@ fn do_random_insert(
         for _ in 0..n_insert {
             let vid = next_vid;
             next_vid += 1;
+            fg.observe_vertex_stats(label, &empty_props);
             fg.record_insert_vertex(vid, label, empty_props.clone());
             inserted_vertex_count += 1;
         }
@@ -213,6 +214,7 @@ fn do_random_insert(
             let eid = next_eid;
             next_eid += 1;
 
+            fg.observe_edge_stats(edge_label, &empty_props);
             fg.record_insert_edge(
                 eid,
                 src,

@@ -263,9 +263,9 @@ pub fn build_procedure() -> Procedure {
                 let estimate_start = Instant::now();
                 let total_count = abstract_graphs_with_scores.len();
                 let mut min_nonzero_es = f64::INFINITY;
-                let mut score_of_min_es: Option<u32> = None;
+                let mut score_of_min_es: Option<u64> = None;
                 let mut index_of_min_es: Option<usize> = None;
-                let mut max_score: u32 = 0;
+                let mut max_score: u64 = 0;
                 #[allow(dead_code)]
                 let mut min_es_abstract_graph: Option<AbstractGraph> = None;
                 for (idx, (mut abs, score)) in abstract_graphs_with_scores.into_iter().enumerate() {

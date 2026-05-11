@@ -112,50 +112,153 @@ impl QueryGraph {
         }
     }
 
-    pub fn score_single_edge(
+    /// Estimate the cardinality of each query edge using FlatGraph statistics.
+    ///
+    /// For each edge, the base cardinality is the edge count for that label.
+    /// If the edge or its endpoints carry predicates, selectivity is applied
+    /// using the independence assumption:
+    ///   effective = edge_count × sel(edge_preds) × sel(src_preds) × sel(dst_preds)
+    pub fn estimate_edge_cardinalities(
         &self,
-        edge: &QueryEdge,
-        predicate_vertices: &HashSet<VertexId>,
-        k_path: &HashSet<EdgeId>,
-    ) -> u32 {
-        // 这里是一个启发式打分，而不是严格统计意义上的代价模型。
-        // 目标是优先把“更有信息量”的边放进生成树，便于后续压缩和估算。
-        // 这里一个引申的思想：我希望获取更有价值的信息，
-        // 对我结果影响越大，我就越应该对其打分高。
-        if !edge.predicates.is_empty() {
-            return 5;
+        flat_graph: Option<&FlatGraph>,
+    ) -> HashMap<EdgeId, u64> {
+        let mut result = HashMap::new();
+        for edge in self.inner.edges.values() {
+            let base = flat_graph
+                .map(|fg| fg.edge_count_by_label(&edge.label) as u64)
+                .unwrap_or(1);
+
+            let mut selectivity = 1.0f64;
+
+            if let Some(fg) = flat_graph {
+                // Edge predicates.
+                for pred in &edge.predicates {
+                    selectivity *= Self::estimate_selectivity_from_stats(
+                        fg.edge_column_stats(&edge.label, &pred.property),
+                        &pred.op,
+                        &pred.value,
+                    );
+                }
+
+                // Source vertex predicates.
+                if let Some(src_vertex) = self.inner.vertices.get(&edge.src_vertex_id) {
+                    for pred in &src_vertex.predicates {
+                        selectivity *= Self::estimate_selectivity_from_stats(
+                            fg.vertex_column_stats(&src_vertex.label, &pred.property),
+                            &pred.op,
+                            &pred.value,
+                        );
+                    }
+                }
+
+                // Destination vertex predicates.
+                if let Some(dst_vertex) = self.inner.vertices.get(&edge.dst_vertex_id) {
+                    for pred in &dst_vertex.predicates {
+                        selectivity *= Self::estimate_selectivity_from_stats(
+                            fg.vertex_column_stats(&dst_vertex.label, &pred.property),
+                            &pred.op,
+                            &pred.value,
+                        );
+                    }
+                }
+            }
+
+            let effective = (base as f64 * selectivity).ceil().max(1.0) as u64;
+            result.insert(edge.id, effective);
         }
-        let src_has_predicate = predicate_vertices.contains(&edge.src_vertex_id);
-        let dst_has_predicate = predicate_vertices.contains(&edge.dst_vertex_id);
-        if src_has_predicate && dst_has_predicate {
-            return 4;
-        }
-        if k_path.contains(&edge.id) {
-            return 3;
-        }
-        if k_path.contains(&edge.id) {
-            return 2;
-        }
-        1
+        result
     }
 
-    pub fn score_edges(&self, k: usize) -> HashMap<EdgeId, u32> {
-        // 先识别谓词顶点，再找谓词之间长度 <= k 的重要路径边，
-        // 最后把这些信息折叠成每条边的局部启发式分数。
-        let predicate_vertices: HashSet<VertexId> = self
-            .inner
-            .vertices
-            .iter()
-            .filter(|(_, v)| !v.predicates.is_empty())
-            .map(|(id, _)| *id)
-            .collect();
-        let k_path_edges = self.find_k_path_edges_between_predicates(&predicate_vertices, k);
-        let mut scores = HashMap::new();
-        for edge in self.inner.edges.values() {
-            let score = self.score_single_edge(edge, &predicate_vertices, &k_path_edges);
-            scores.insert(edge.id, score);
+    /// Estimate selectivity of a single predicate using column statistics.
+    fn estimate_selectivity_from_stats(
+        col_stats: Option<&super::flat_graph::stats::ColumnStats>,
+        op: &ComparisonOp,
+        value: &ScalarValue,
+    ) -> f64 {
+        use super::flat_graph::stats::cmp_scalar;
+
+        let Some(stats) = col_stats else {
+            // No stats available — assume Kuzu's default.
+            return match op {
+                ComparisonOp::Eq => 0.01,
+                _ => 0.1,
+            };
+        };
+
+        let non_null = stats.total_count - stats.null_count;
+        if non_null == 0 {
+            return 0.0;
         }
-        scores
+
+        match op {
+            ComparisonOp::Eq | ComparisonOp::Ne => {
+                let ndv = stats.ndv().max(1);
+                let sel = 1.0 / ndv as f64;
+                if matches!(op, ComparisonOp::Ne) {
+                    1.0 - sel
+                } else {
+                    sel
+                }
+            }
+            ComparisonOp::Gt | ComparisonOp::Ge | ComparisonOp::Lt | ComparisonOp::Le => {
+                // Uniform distribution assumption: sel = (max - value) / (max - min).
+                let (Some(min_val), Some(max_val)) = (&stats.min, &stats.max) else {
+                    return 0.1; // fallback
+                };
+                let to_f64 = |v: &ScalarValue| -> Option<f64> {
+                    use ScalarValue::*;
+                    match v {
+                        Int8(Some(n)) => Some(*n as f64),
+                        Int16(Some(n)) => Some(*n as f64),
+                        Int32(Some(n)) => Some(*n as f64),
+                        Int64(Some(n)) => Some(*n as f64),
+                        UInt8(Some(n)) => Some(*n as f64),
+                        UInt16(Some(n)) => Some(*n as f64),
+                        UInt32(Some(n)) => Some(*n as f64),
+                        UInt64(Some(n)) => Some(*n as f64),
+                        Float32(Some(n)) => Some(n.into_inner() as f64),
+                        Float64(Some(n)) => Some(n.into_inner()),
+                        _ => None,
+                    }
+                };
+                let (Some(fmin), Some(fmax), Some(fval)) =
+                    (to_f64(min_val), to_f64(max_val), to_f64(value))
+                else {
+                    // Non-numeric: compare against min/max boundaries.
+                    return match op {
+                        ComparisonOp::Gt | ComparisonOp::Ge => {
+                            if cmp_scalar(value, max_val) != Some(std::cmp::Ordering::Less) {
+                                0.0 // value >= max → nothing passes
+                            } else {
+                                0.5
+                            }
+                        }
+                        ComparisonOp::Lt | ComparisonOp::Le => {
+                            if cmp_scalar(value, min_val) != Some(std::cmp::Ordering::Greater) {
+                                0.0
+                            } else {
+                                0.5
+                            }
+                        }
+                        _ => 0.5,
+                    };
+                };
+                let range = fmax - fmin;
+                if range <= 0.0 {
+                    return if fval >= fmin && fval <= fmax {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                }
+                let sel = match op {
+                    ComparisonOp::Gt | ComparisonOp::Ge => ((fmax - fval) / range).clamp(0.0, 1.0),
+                    ComparisonOp::Lt | ComparisonOp::Le => ((fval - fmin) / range).clamp(0.0, 1.0),
+                    _ => 0.5,
+                };
+                sel
+            }
+        }
     }
 
     pub fn find_k_path_edges_between_predicates(
@@ -270,29 +373,35 @@ impl QueryGraph {
         pairs
     }
 
-    pub fn build_best_spanning_tree(&self, scores: &HashMap<EdgeId, u32>) -> Option<CandidateTree> {
-        let mut edges_with_scores: Vec<_> = self
+    /// Build the best spanning tree by greedily picking lowest-cardinality edges
+    /// (Kruskal's algorithm, ascending cardinality order).
+    pub fn build_best_spanning_tree(
+        &self,
+        cardinalities: &HashMap<EdgeId, u64>,
+    ) -> Option<CandidateTree> {
+        let mut edges_with_card: Vec<_> = self
             .inner
             .edges
             .values()
             .map(|edge| {
-                let score = scores.get(&edge.id).copied().unwrap_or(0);
-                (edge.clone(), score)
+                let card = cardinalities.get(&edge.id).copied().unwrap_or(1);
+                (edge.clone(), card)
             })
             .collect();
-        edges_with_scores.sort_by(|a, b| b.1.cmp(&a.1));
+        // Sort ascending: pick lowest-cardinality edges first → tightest tree.
+        edges_with_card.sort_by(|a, b| a.1.cmp(&b.1));
 
         let mut selected_edges = HashSet::new();
         let mut uf = UnionFind::new();
-        let mut total_score = 0;
+        let mut total_score: u64 = 0;
 
-        for (edge, score) in edges_with_scores {
+        for (edge, card) in edges_with_card {
             uf.make_set(edge.src_vertex_id);
             uf.make_set(edge.dst_vertex_id);
 
             if uf.union(edge.src_vertex_id, edge.dst_vertex_id) {
                 selected_edges.insert(edge.id);
-                total_score += score;
+                total_score += card;
             }
         }
 
@@ -355,14 +464,14 @@ impl QueryGraph {
 
     pub fn build_k_best_trees(
         &self,
-        scores: &HashMap<EdgeId, u32>,
+        cardinalities: &HashMap<EdgeId, u64>,
         k: usize,
-    ) -> Vec<(QueryGraph, u32)> {
+    ) -> Vec<(QueryGraph, u64)> {
         if k == 0 {
             return Vec::new();
         }
 
-        let first_tree = self.build_best_spanning_tree(scores);
+        let first_tree = self.build_best_spanning_tree(cardinalities);
         if first_tree.is_none() {
             return Vec::new();
         }
@@ -390,17 +499,18 @@ impl QueryGraph {
             }
 
             let all_edge_ids: HashSet<EdgeId> = self.inner.edges.keys().copied().collect();
-            let mut non_tree_edges: Vec<(EdgeId, u32)> = all_edge_ids
+            let mut non_tree_edges: Vec<(EdgeId, u64)> = all_edge_ids
                 .difference(&current.edge_ids)
                 .map(|&eid| {
-                    let score = scores.get(&eid).copied().unwrap_or(0);
-                    (eid, score)
+                    let card = cardinalities.get(&eid).copied().unwrap_or(1);
+                    (eid, card)
                 })
                 .collect();
 
-            non_tree_edges.sort_by(|a, b| b.1.cmp(&a.1));
+            // Try adding smallest non-tree edges first (smallest perturbation).
+            non_tree_edges.sort_by(|a, b| a.1.cmp(&b.1));
 
-            for (new_edge_id, _new_edge_score) in non_tree_edges {
+            for (new_edge_id, _new_edge_card) in non_tree_edges {
                 if let Some(new_edge) = self.inner.edges.get(&new_edge_id) {
                     let src = new_edge.src_vertex_id;
                     let dst = new_edge.dst_vertex_id;
@@ -410,17 +520,18 @@ impl QueryGraph {
                     {
                         // 往树里加一条非树边会形成环。
                         // 为了保持树结构，必须从这条环上再删掉一条边。
-                        let mut path_edges_with_scores: Vec<(EdgeId, u32)> = path_edges
+                        // 优先删除基数最大的树边，使新树总基数尽量小。
+                        let mut path_edges_with_card: Vec<(EdgeId, u64)> = path_edges
                             .iter()
                             .map(|&eid| {
-                                let score = scores.get(&eid).copied().unwrap_or(0);
-                                (eid, score)
+                                let card = cardinalities.get(&eid).copied().unwrap_or(1);
+                                (eid, card)
                             })
                             .collect();
 
-                        path_edges_with_scores.sort_by(|a, b| a.1.cmp(&b.1));
+                        path_edges_with_card.sort_by(|a, b| b.1.cmp(&a.1));
 
-                        for (edge_to_remove, _old_score) in path_edges_with_scores {
+                        for (edge_to_remove, _old_card) in path_edges_with_card {
                             let mut new_edge_set = current.edge_ids.clone();
                             new_edge_set.remove(&edge_to_remove);
                             new_edge_set.insert(new_edge_id);
@@ -433,9 +544,9 @@ impl QueryGraph {
                             }
 
                             if self.is_tree(&new_edge_set) {
-                                let total_score: u32 = new_edge_set
+                                let total_score: u64 = new_edge_set
                                     .iter()
-                                    .map(|&eid| scores.get(&eid).copied().unwrap_or(0))
+                                    .map(|&eid| cardinalities.get(&eid).copied().unwrap_or(1))
                                     .sum();
 
                                 let candidate =
@@ -459,9 +570,9 @@ impl QueryGraph {
                         }
 
                         if self.is_tree(&new_edge_set) {
-                            let total_score: u32 = new_edge_set
+                            let total_score: u64 = new_edge_set
                                 .iter()
-                                .map(|&eid| scores.get(&eid).copied().unwrap_or(0))
+                                .map(|&eid| cardinalities.get(&eid).copied().unwrap_or(1))
                                 .sum();
 
                             let candidate = crate::procedures::gcard_query::types::CandidateTree {
@@ -1291,7 +1402,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
-    ) -> GCardResult<Vec<(AbstractGraph, u32)>> {
+    ) -> GCardResult<Vec<(AbstractGraph, u64)>> {
         let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
         // String-keyed vertex sample cache (label → sampled vertex IDs).
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
@@ -1318,11 +1429,11 @@ impl QueryGraph {
 
         // ── Cycle case: enumerate spanning trees ──────────────────────────────
         let t_tree = std::time::Instant::now();
-        let scores = self.score_edges(k);
-        let trees_with_scores = self.build_k_best_trees(&scores, tree_num.max(1));
+        let cardinalities = self.estimate_edge_cardinalities(flat_graph);
+        let trees_with_scores = self.build_k_best_trees(&cardinalities, tree_num.max(1));
         BUILD_SCORE_TREE_NANOS.fetch_add(t_tree.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        let results: Vec<GCardResult<(AbstractGraph, u32)>> = trees_with_scores
+        let results: Vec<GCardResult<(AbstractGraph, u64)>> = trees_with_scores
             .par_iter()
             .map(|(tree, tree_score)| {
                 self.build_abstract_graph_from_query_graph_flat(
@@ -1365,7 +1476,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
-    ) -> GCardResult<Vec<(AbstractGraph, u32)>> {
+    ) -> GCardResult<Vec<(AbstractGraph, u64)>> {
         let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
         let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());

@@ -25,6 +25,7 @@
 //! ```
 
 pub mod csr;
+pub mod stats;
 pub mod update;
 
 use std::collections::{HashMap, HashSet};
@@ -89,6 +90,11 @@ pub struct FlatGraph {
     /// Required to identify which CSR buckets are affected when an edge is deleted.
     edge_info: HashMap<EdgeId, EdgeInfo>,
 
+    // ── Column/table statistics ──────────────────────────────────────────────
+    /// Per-label, per-property statistics (NDV, min/max) collected at build time.
+    #[serde(default)]
+    graph_stats: stats::GraphStats,
+
     // ── Pending structural changes ─────────────────────────────────────────────
     pending: PendingChanges,
 }
@@ -111,6 +117,8 @@ pub struct FlatGraphBuilder {
     edge_info: HashMap<EdgeId, EdgeInfo>,
     /// 构建 CSR 之前的暂存三元组。
     edge_triples: HashMap<(String, String, bool), Vec<(VertexId, VertexId, EdgeId)>>,
+    /// Statistics collected during construction.
+    graph_stats: stats::GraphStats,
 }
 
 impl FlatGraphBuilder {
@@ -145,7 +153,14 @@ impl FlatGraphBuilder {
             .entry(label_lc.clone())
             .or_default()
             .push(vid);
-        self.vertex_label_map.insert(vid, label_lc);
+        self.vertex_label_map.insert(vid, label_lc.clone());
+
+        // Collect column stats.
+        if let Some(schema) = self.vertex_prop_schema.get(&label_lc) {
+            let table = self.graph_stats.vertex_stats.entry(label_lc).or_default();
+            table.observe_row(schema, &props);
+        }
+
         if !props.is_empty() {
             self.vertex_props.insert(vid, props);
         }
@@ -187,9 +202,16 @@ impl FlatGraphBuilder {
                 src_label: src_lc,
                 dst,
                 dst_label: dst_lc,
-                edge_label: el_lc,
+                edge_label: el_lc.clone(),
             },
         );
+
+        // Collect column stats.
+        if let Some(schema) = self.edge_prop_schema.get(&el_lc) {
+            let table = self.graph_stats.edge_stats.entry(el_lc).or_default();
+            table.observe_row(schema, &props);
+        }
+
         if !props.is_empty() {
             self.edge_props.insert(eid, props);
         }
@@ -222,6 +244,7 @@ impl FlatGraphBuilder {
             edge_prop_schema: self.edge_prop_schema,
             edge_type_schema: self.edge_type_schema,
             edge_info: self.edge_info,
+            graph_stats: self.graph_stats,
             pending: PendingChanges::default(),
         }
     }
@@ -406,6 +429,63 @@ impl FlatGraph {
             .get(edge_label)?
             .iter()
             .position(|s| s == prop_name)
+    }
+
+    // ── Statistics queries ─────────────────────────────────────────────────────
+
+    /// All collected statistics.
+    pub fn graph_stats(&self) -> &stats::GraphStats {
+        &self.graph_stats
+    }
+
+    /// Statistics for a vertex label, if available.
+    pub fn vertex_table_stats(&self, label: &str) -> Option<&stats::TableStats> {
+        self.graph_stats.vertex_stats.get(label)
+    }
+
+    /// Statistics for an edge label, if available.
+    pub fn edge_table_stats(&self, edge_label: &str) -> Option<&stats::TableStats> {
+        self.graph_stats.edge_stats.get(edge_label)
+    }
+
+    /// Column stats for a specific vertex property.
+    pub fn vertex_column_stats(&self, label: &str, prop: &str) -> Option<&stats::ColumnStats> {
+        self.graph_stats.vertex_stats.get(label)?.columns.get(prop)
+    }
+
+    /// Column stats for a specific edge property.
+    pub fn edge_column_stats(&self, edge_label: &str, prop: &str) -> Option<&stats::ColumnStats> {
+        self.graph_stats
+            .edge_stats
+            .get(edge_label)?
+            .columns
+            .get(prop)
+    }
+
+    // ── Statistics update ──────────────────────────────────────────────────────
+
+    /// Update vertex statistics after an insert.
+    pub fn observe_vertex_stats(&mut self, label: &str, props: &[ScalarValue]) {
+        if let Some(schema) = self.vertex_prop_schema.get(label).cloned() {
+            let table = self
+                .graph_stats
+                .vertex_stats
+                .entry(label.to_string())
+                .or_default();
+            table.observe_row(&schema, props);
+        }
+    }
+
+    /// Update edge statistics after an insert.
+    pub fn observe_edge_stats(&mut self, edge_label: &str, props: &[ScalarValue]) {
+        if let Some(schema) = self.edge_prop_schema.get(edge_label).cloned() {
+            let table = self
+                .graph_stats
+                .edge_stats
+                .entry(edge_label.to_string())
+                .or_default();
+            table.observe_row(&schema, props);
+        }
     }
 
     // ── Update recording ──────────────────────────────────────────────────────

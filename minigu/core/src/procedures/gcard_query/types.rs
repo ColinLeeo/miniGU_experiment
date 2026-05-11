@@ -96,7 +96,8 @@ pub struct QueryVertex {
 #[derive(Clone, Debug)]
 pub struct CandidateTree {
     pub edge_ids: HashSet<EdgeId>,
-    pub total_score: u32,
+    /// Sum of edge cardinalities in this tree.  Lower = tighter upper bound.
+    pub total_score: u64,
 }
 
 impl PartialEq for CandidateTree {
@@ -115,7 +116,9 @@ impl PartialOrd for CandidateTree {
 
 impl Ord for CandidateTree {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.total_score.cmp(&other.total_score)
+        // Lower total cardinality = better tree → should be popped first from max-heap.
+        // Reverse order so BinaryHeap (max-heap) pops lowest-cardinality trees first.
+        other.total_score.cmp(&self.total_score)
     }
 }
 
