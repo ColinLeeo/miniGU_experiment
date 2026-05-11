@@ -1,0 +1,94 @@
+{
+    "entities": [
+      {
+        "label": {
+          "id": 0,
+          "name": "COACH"
+        },
+        "columns": []
+      },
+      {
+        "label": {
+          "id": 1,
+          "name": "PLAYER"
+        },
+        "columns": []
+      },
+      {
+        "label": {
+          "id": 2,
+          "name": "FAN"
+        },
+        "columns": []
+      },
+      {
+        "label": {
+          "id": 3,
+          "name": "TICKET"
+        },
+        "columns": []
+      }
+    ],
+    "relations": [
+      {
+        "label": {
+          "id": 0,
+          "name": "GUIDE"
+        },
+        "entity_pairs": [
+          {
+            "src": {
+              "id": 0,
+              "name": "COACH"
+            },
+            "dst": {
+              "id": 1,
+              "name": "PLAYER"
+            }
+          }
+        ],
+        "columns": []
+      },
+      {
+        "label": {
+          "id": 1,
+          "name": "LOVEDBY"
+        },
+        "entity_pairs": [
+          {
+            "src": {
+              "id": 1,
+              "name": "PLAYER"
+            },
+            "dst": {
+              "id": 2,
+              "name": "FAN"
+            }
+          }
+        ],
+        "columns": []
+      },
+      {
+        "label": {
+          "id": 2,
+          "name": "BUY"
+        },
+        "entity_pairs": [
+          {
+            "src": {
+              "id": 2,
+              "name": "FAN"
+            },
+            "dst": {
+              "id": 3,
+              "name": "TICKET"
+            }
+          }
+        ],
+        "columns": []
+      }
+    ],
+    "is_table_id": true,
+    "is_column_id": false
+  }
+  

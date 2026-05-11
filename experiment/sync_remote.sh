@@ -65,7 +65,13 @@ RSYNC_EXCLUDES=(
     "experiment/result/"
 
     # baseline（含 boost 等大量源码，远程单独构建）
-    "experiment/baseline/"
+    # "experiment/baseline/"
+    # 排除 baseline 内的构建产物（远程编译重新生成）
+    "experiment/baseline/*/target/"
+    "experiment/baseline/*/build/"
+    "experiment/baseline/glogs/store/exp_store/target/"
+    "experiment/baseline/glogs/ir/target/"
+    "experiment/baseline/glogs/ir/integrated/target/"
     "experiment/dataset/ldbc/*.bin"
     "experiment/dataset/ldbc/sf1_pipe/"
 

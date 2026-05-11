@@ -1,0 +1,17 @@
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/Manifest.toml
+/deps/deps.jl
+/docs/build
+/docs/Manifest.toml
+/test/coverage/Manifest.toml
+/.ipynb_checkpoints/
+/queryset/
+/dataset/
+/TrueCardinalities/
+/Experiments/Results/*
+/Experiments/SerializedSummaries/*
+/Experiments/ConvertedGraphs/*
+/.vscode
+*.obj
