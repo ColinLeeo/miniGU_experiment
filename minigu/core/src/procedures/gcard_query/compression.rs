@@ -273,14 +273,21 @@ pub fn decode_dict_keys(data: &[u8]) -> Option<(Vec<Vec<u32>>, usize)> {
 pub fn report_component_sizes(stat: &super::Statistic) {
     let mut total_vertex_ids_raw: usize = 0;
     let mut total_vertex_ids_compressed: usize = 0;
-    let mut total_bucket_ids_raw: usize = 0;
-    let mut total_bucket_ids_compressed: usize = 0;
-    let mut total_prefix_raw: usize = 0;
-    let mut total_prefix_compressed: usize = 0;
-    let mut total_res_vec_raw: usize = 0;
-    let mut total_res_vec_encoded: usize = 0;
+    let mut path_bucket_ids_raw: usize = 0;
+    let mut path_bucket_ids_compressed: usize = 0;
+    let mut path_prefix_raw: usize = 0;
+    let mut path_prefix_compressed: usize = 0;
+    let mut path_res_vec_raw: usize = 0;
+    let mut path_res_vec_encoded: usize = 0;
+    let mut star_bucket_ids_raw: usize = 0;
+    let mut star_bucket_ids_compressed: usize = 0;
+    let mut star_prefix_raw: usize = 0;
+    let mut star_prefix_compressed: usize = 0;
+    let mut star_res_vec_raw: usize = 0;
+    let mut star_res_vec_encoded: usize = 0;
     let mut all_alt_keys: Vec<&AltKey> = Vec::new();
     let mut alt_key_raw_size: usize = 0;
+    let mut star_key_raw_size: usize = 0;
 
     for ls in stat.label_path_statistic.values() {
         // vertex_ids
@@ -291,20 +298,20 @@ pub fn report_component_sizes(stat: &super::Statistic) {
 
         for (alt_key, block) in &ls.path_statistic {
             // bucket_ids
-            total_bucket_ids_raw += block.bucket_ids.len();
-            let rle = encode_zstd(&block.bucket_ids);
-            total_bucket_ids_compressed += rle.len();
+            path_bucket_ids_raw += block.bucket_ids.len();
+            let zstd = encode_zstd(&block.bucket_ids);
+            path_bucket_ids_compressed += zstd.len();
 
             // prefix
-            total_prefix_raw += block.prefix.len();
+            path_prefix_raw += block.prefix.len();
             let zstd = encode_zstd(&block.prefix);
-            total_prefix_compressed += zstd.len();
+            path_prefix_compressed += zstd.len();
 
             // res_vec
             let raw_res = block.res_vec.len() * 8;
             let encoded_res = encode_raw_u64s(&block.res_vec);
-            total_res_vec_raw += raw_res;
-            total_res_vec_encoded += encoded_res.len();
+            path_res_vec_raw += raw_res;
+            path_res_vec_encoded += encoded_res.len();
 
             // alt_key raw size
             let mut key_size = 8; // segment count
@@ -314,6 +321,23 @@ pub fn report_component_sizes(stat: &super::Statistic) {
             alt_key_raw_size += key_size;
             all_alt_keys.push(alt_key);
         }
+
+        for (star_key, block) in &ls.star_statistic {
+            star_bucket_ids_raw += block.bucket_ids.len();
+            let zstd = encode_zstd(&block.bucket_ids);
+            star_bucket_ids_compressed += zstd.len();
+
+            star_prefix_raw += block.prefix.len();
+            let zstd = encode_zstd(&block.prefix);
+            star_prefix_compressed += zstd.len();
+
+            let raw_res = block.res_vec.len() * 8;
+            let encoded_res = encode_raw_u64s(&block.res_vec);
+            star_res_vec_raw += raw_res;
+            star_res_vec_encoded += encoded_res.len();
+
+            star_key_raw_size += star_key_bincode_size(star_key);
+        }
     }
 
     // String dictionary for AltKeys
@@ -321,17 +345,26 @@ pub fn report_component_sizes(stat: &super::Statistic) {
     let dict_bytes = encode_string_dict(&dict);
     let keys_bytes = encode_dict_keys(&encoded_keys);
     let alt_key_compressed = dict_bytes.len() + keys_bytes.len();
+    let star_key_compressed = star_key_raw_size;
 
     let total_raw = total_vertex_ids_raw
-        + total_bucket_ids_raw
-        + total_prefix_raw
-        + total_res_vec_raw
-        + alt_key_raw_size;
+        + path_bucket_ids_raw
+        + path_prefix_raw
+        + path_res_vec_raw
+        + star_bucket_ids_raw
+        + star_prefix_raw
+        + star_res_vec_raw
+        + alt_key_raw_size
+        + star_key_raw_size;
     let total_compressed = total_vertex_ids_compressed
-        + total_bucket_ids_compressed
-        + total_prefix_compressed
-        + total_res_vec_encoded
-        + alt_key_compressed;
+        + path_bucket_ids_compressed
+        + path_prefix_compressed
+        + path_res_vec_encoded
+        + star_bucket_ids_compressed
+        + star_prefix_compressed
+        + star_res_vec_encoded
+        + alt_key_compressed
+        + star_key_compressed;
 
     println!("=== Per-component compression report ===");
     println!(
@@ -345,20 +378,47 @@ pub fn report_component_sizes(stat: &super::Statistic) {
         total_vertex_ids_compressed,
     );
     print_row(
-        "bucket_ids (RLE)",
-        total_bucket_ids_raw,
-        total_bucket_ids_compressed,
+        "path bucket_ids (zstd)",
+        path_bucket_ids_raw,
+        path_bucket_ids_compressed,
     );
-    print_row("prefix (zstd)", total_prefix_raw, total_prefix_compressed);
-    print_row("res_vec (raw)", total_res_vec_raw, total_res_vec_encoded);
+    print_row(
+        "path prefix (zstd)",
+        path_prefix_raw,
+        path_prefix_compressed,
+    );
+    print_row("path res_vec (raw)", path_res_vec_raw, path_res_vec_encoded);
+    print_row(
+        "star bucket_ids (zstd)",
+        star_bucket_ids_raw,
+        star_bucket_ids_compressed,
+    );
+    print_row(
+        "star prefix (zstd)",
+        star_prefix_raw,
+        star_prefix_compressed,
+    );
+    print_row("star res_vec (raw)", star_res_vec_raw, star_res_vec_encoded);
     print_row("alt_keys (dict)", alt_key_raw_size, alt_key_compressed);
+    print_row(
+        "star_keys (bincode)",
+        star_key_raw_size,
+        star_key_compressed,
+    );
     println!("  {:-<56}", "");
     print_row("TOTAL", total_raw, total_compressed);
     println!(
-        "Estimated custom-compressed statistic payload: {} bytes (not written by save_statistic)",
+        "Estimated component-compressed statistic payload: {} bytes",
         total_compressed
     );
+    println!(
+        "Note: BlockStatistic bucket_ids/prefix compression is persisted by save_statistic; vertex/key dictionary sizes are report-only estimates."
+    );
     println!("========================================");
+}
+
+fn star_key_bincode_size(star_key: &crate::procedures::gcard_query::utils::StarStatKey) -> usize {
+    bincode::serialized_size(star_key).unwrap_or(0) as usize
 }
 
 fn print_row(name: &str, raw: usize, compressed: usize) {

@@ -15,11 +15,39 @@ pub struct AbstractEdge {
     pub dst: VertexId,
     pub src_pcf: Arc<Pcf>,
     pub dst_pcf: Arc<Pcf>,
+    pub functional: FunctionalDirection,
     pub predicates: Vec<PredicateDef>,
     pub original_edge_ids: Vec<EdgeId>,
     pub path_vertices: Vec<VertexId>,
     pub selectivity: f64,
     pub path_str: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FunctionalDirection {
+    None,
+    SrcToDst,
+    DstToSrc,
+    Both,
+}
+
+impl FunctionalDirection {
+    pub fn from_flags(src_to_dst: bool, dst_to_src: bool) -> Self {
+        match (src_to_dst, dst_to_src) {
+            (true, true) => Self::Both,
+            (true, false) => Self::SrcToDst,
+            (false, true) => Self::DstToSrc,
+            (false, false) => Self::None,
+        }
+    }
+
+    pub fn is_functional_src_to_dst(self) -> bool {
+        matches!(self, Self::SrcToDst | Self::Both)
+    }
+
+    pub fn is_functional_dst_to_src(self) -> bool {
+        matches!(self, Self::DstToSrc | Self::Both)
+    }
 }
 
 pub type PredicateId = u32;

@@ -17,7 +17,8 @@ use crate::catalog_persistence::{
 };
 use crate::error::Result;
 use crate::procedures::{
-    FlatGraph, build_predefined_procedures, load_statistic, new_gcard_update_log,
+    FlatGraph, add_functional_path_aliases_for_existing_catalog, build_predefined_procedures,
+    edge_cardinalities_from_schema, get_edges_from_catalog, load_statistic, new_gcard_update_log,
 };
 use crate::session::Session;
 
@@ -88,7 +89,16 @@ impl Database {
                     match load_statistic(&stat_path) {
                         Ok(Some(statistic)) => {
                             match statistic.to_degree_seq_graph_compressed() {
-                                Ok(dsgc) => {
+                                Ok(mut dsgc) => {
+                                    if let Ok(edges) =
+                                        get_edges_from_catalog(container.graph_type().as_ref())
+                                    {
+                                        dsgc.edge_cardinalities =
+                                            edge_cardinalities_from_schema(&edges);
+                                        add_functional_path_aliases_for_existing_catalog(
+                                            &mut dsgc, &edges,
+                                        );
+                                    }
                                     container.set_degree_seq_graph_compressed(Arc::new(dsgc));
                                     eprintln!("[database] DegreeSeqGraphCompressed rebuilt");
                                 }

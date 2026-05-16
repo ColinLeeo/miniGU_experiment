@@ -11,7 +11,7 @@ use minigu_catalog::provider::GraphTypeProvider;
 use minigu_common::types::LabelId;
 use serde::{Deserialize, Serialize};
 
-use crate::procedures::gcard_query::catalog::AltKey;
+use crate::procedures::gcard_query::catalog::{AltKey, EdgeCardinality};
 use crate::procedures::gcard_query::make_alt_key;
 
 /// Source and destination vertex label names for one edge type.
@@ -22,6 +22,38 @@ pub struct EdgeEndpoints {
     pub src_label: String,
     /// 边类型允许的终点标签。
     pub dst_label: String,
+    /// Schema-level edge cardinality, manually maintained like PathCE.
+    pub cardinality: EdgeCardinality,
+}
+
+pub fn manual_edge_cardinality(edge_label: &str) -> EdgeCardinality {
+    match edge_label.to_ascii_lowercase().as_str() {
+        "city_ispartof_country"
+        | "comment_hascreator_person"
+        | "comment_islocatedin_country"
+        | "comment_replyof_comment"
+        | "comment_replyof_post"
+        | "company_islocatedin_country"
+        | "country_ispartof_continent"
+        | "forum_hasmoderator_person"
+        | "person_islocatedin_city"
+        | "post_hascreator_person"
+        | "post_islocatedin_country"
+        | "tag_hastype_tagclass"
+        | "tagclass_issubclassof_tagclass"
+        | "university_islocatedin_city" => EdgeCardinality::ManyToOne,
+        "forum_containerof_post" => EdgeCardinality::OneToMany,
+        _ => EdgeCardinality::ManyToMany,
+    }
+}
+
+pub fn edge_cardinalities_from_schema(
+    edges: &HashMap<String, EdgeEndpoints>,
+) -> HashMap<String, EdgeCardinality> {
+    edges
+        .iter()
+        .map(|(label, endpoints)| (label.clone(), endpoints.cardinality))
+        .collect()
 }
 
 // ----- Path pattern (string-based, canonical form for path set equality) -----
@@ -200,10 +232,11 @@ pub fn get_edges_from_catalog(
             .cloned()
             .unwrap_or_else(|| format!("Unknown_{}", dst_id));
         edges.insert(
-            edge_name,
+            edge_name.clone(),
             EdgeEndpoints {
                 src_label,
                 dst_label,
+                cardinality: manual_edge_cardinality(&edge_name),
             },
         );
     }
@@ -225,4 +258,25 @@ pub fn build_undirected_adj(
             .push((edge_name.clone(), e.src_label.clone()));
     }
     adj
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ldbc_edge_cardinality_is_schema_defined() {
+        assert_eq!(
+            manual_edge_cardinality("comment_replyof_comment"),
+            EdgeCardinality::ManyToOne
+        );
+        assert_eq!(
+            manual_edge_cardinality("forum_containerof_post"),
+            EdgeCardinality::OneToMany
+        );
+        assert_eq!(
+            manual_edge_cardinality("person_knows_person"),
+            EdgeCardinality::ManyToMany
+        );
+    }
 }

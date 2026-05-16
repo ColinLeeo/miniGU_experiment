@@ -268,14 +268,16 @@ impl Statistic {
                 }
             }
             for (star_key, block) in &ls.star_statistic {
-                if let Some(seq) = block.get_compressed_degree_seq()? {
+                if let Some(seq) = block.get_bucket_max_degree_seq()? {
                     star_stats.insert(star_key.clone(), seq);
                 }
             }
         }
         Ok(DegreeSeqGraphCompressed {
             edge_set_to_endpoints,
+            path_aliases: HashMap::new(),
             star_stats,
+            edge_cardinalities: HashMap::new(),
         })
     }
 
@@ -404,25 +406,9 @@ impl Statistic {
     }
 
     pub fn serialized_size(&self) -> usize {
-        // 估算当前 bincode 持久化格式的文件大小。
-        let mut total = LEN_U64; // label count
-        for (label, ls) in &self.label_path_statistic {
-            total += string_bincode_size(label);
-            total += LEN_U64 + ls.vertex_ids.len() * LEN_U64; // vertex_ids len + data
-            total += LEN_U64; // path_statistic count
-            for (alt_key, block) in &ls.path_statistic {
-                total += alt_key_serialized_size(alt_key);
-                // BlockStatistic uses `serialize_bytes`, so bincode stores:
-                // [byte_len: u64][entry_count: u64][payload bytes...]
-                total += LEN_U64 + LEN_U64 + block.serialize().len();
-            }
-            total += LEN_U64; // star_statistic count
-            for (star_key, block) in &ls.star_statistic {
-                total += star_key_serialized_size(star_key);
-                total += LEN_U64 + LEN_U64 + block.serialize().len();
-            }
-        }
-        total
+        // Estimate the actual bincode persistence format. This stays aligned with
+        // `BlockStatistic`'s custom serde payload, including compressed star blocks.
+        bincode::serialized_size(self).unwrap_or(0) as usize
     }
 
     pub fn report_compressed_sizes(&self) {

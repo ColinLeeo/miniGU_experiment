@@ -19,6 +19,13 @@ use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::utils::StarStatKey;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EdgeCardinality {
+    ManyToMany,
+    ManyToOne,
+    OneToMany,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AltKey {
     /// 原始交错序列，例如：
@@ -113,6 +120,12 @@ pub enum CompressedDegreeSeq {
         /// 每个桶中有多少条目。
         counts: Vec<u64>,
     },
+    BucketMax {
+        /// 每个桶中有多少条目。
+        counts: Vec<u64>,
+        /// 每个桶使用从 BlockStatistic 恢复出的观测上界代表值。
+        bucket_max_values: Vec<u64>,
+    },
 }
 
 impl CompressedDegreeSeq {
@@ -131,6 +144,10 @@ impl CompressedDegreeSeq {
                 base,
                 counts,
             } => Self::fast_compressor_to_pcf(*base, counts),
+            CompressedDegreeSeq::BucketMax {
+                counts,
+                bucket_max_values,
+            } => Self::bucket_values_to_pcf(counts, bucket_max_values),
         }
     }
 
@@ -146,16 +163,26 @@ impl CompressedDegreeSeq {
     fn fast_compressor_to_pcf(base: u64, counts: &[u64]) -> PiecewiseConstantFunction {
         // 这里不把桶展开回完整 degree sequence，
         // 而是直接从“桶计数”构造分段常数函数，避免 O(num_vertices) 的恢复成本。
-        let total_rows: f64 = {
-            let mut s = 0u128;
-            for (i, &c) in counts.iter().enumerate() {
-                if c == 0 {
-                    continue;
-                }
-                s += base.pow(i as u32) as u128 * c as u128;
-            }
-            s as f64
-        };
+        let bucket_values = (0..counts.len())
+            .map(|i| base.pow(i as u32))
+            .collect::<Vec<_>>();
+        Self::bucket_values_to_pcf(counts, &bucket_values)
+    }
+
+    fn bucket_values_to_pcf(counts: &[u64], bucket_values: &[u64]) -> PiecewiseConstantFunction {
+        let mut buckets = counts
+            .iter()
+            .copied()
+            .zip(bucket_values.iter().copied())
+            .filter(|&(count, value)| count > 0 && value > 0)
+            .collect::<Vec<_>>();
+
+        buckets.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let total_rows: f64 = buckets
+            .iter()
+            .map(|&(count, value)| value as u128 * count as u128)
+            .sum::<u128>() as f64;
 
         if total_rows == 0.0 {
             return PiecewiseConstantFunction::empty();
@@ -169,11 +196,8 @@ impl CompressedDegreeSeq {
         let mut cum_x: f64 = 0.0;
 
         // 按度值从大到小输出段，和 CDF 模型保持一致。
-        for (i, &c) in counts.iter().enumerate().rev() {
-            if c == 0 {
-                continue;
-            }
-            let degree_val = base.pow(i as u32) as f64;
+        for (c, degree) in buckets {
+            let degree_val = degree as f64;
             let rows_in_bin = degree_val * c as f64;
 
             // CDF 模型里，一段的横向宽度等于 “该桶总行数 / 桶代表的度值”，
@@ -210,6 +234,13 @@ impl CompressedDegreeSeq {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PathAlias {
+    pub source: AltKey,
+    #[serde(default)]
+    pub endpoint_map: HashMap<String, String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DegreeSeqGraphCompressed {
     /// 路径模式 -> 端点标签 -> 压缩后的度序列统计。
@@ -218,15 +249,23 @@ pub struct DegreeSeqGraphCompressed {
     /// `Person-knows-Person` 这条路径下，
     /// 既可能存“以左端 Person 为观察端点”的统计，也可能存右端 Person 的统计。
     pub edge_set_to_endpoints: HashMap<AltKey, HashMap<String, CompressedDegreeSeq>>,
+    /// Schema-only functional extensions. These keys are not scanned; they
+    /// redirect a longer path to an existing <=K source path.
+    #[serde(default)]
+    pub path_aliases: HashMap<AltKey, PathAlias>,
     #[serde(default)]
     pub star_stats: HashMap<StarStatKey, CompressedDegreeSeq>,
+    #[serde(default)]
+    pub edge_cardinalities: HashMap<String, EdgeCardinality>,
 }
 
 impl DegreeSeqGraphCompressed {
     pub fn new() -> Self {
         Self {
             edge_set_to_endpoints: HashMap::new(),
+            path_aliases: HashMap::new(),
             star_stats: HashMap::new(),
+            edge_cardinalities: HashMap::new(),
         }
     }
 
@@ -236,15 +275,90 @@ impl DegreeSeqGraphCompressed {
         target_node: &str,
     ) -> PiecewiseConstantFunction {
         // 这里会忽略 target_node 大小写，减少上层调用时的大小写耦合。
+        let (path, target_node) = self
+            .path_aliases
+            .get(path)
+            .map(|alias| {
+                let mapped_target = alias
+                    .endpoint_map
+                    .iter()
+                    .find(|(alias_label, _)| alias_label.eq_ignore_ascii_case(target_node))
+                    .map(|(_, source_label)| source_label.as_str())
+                    .unwrap_or(target_node);
+                (&alias.source, mapped_target)
+            })
+            .unwrap_or((path, target_node));
+
         if let Some(endpoints) = self.edge_set_to_endpoints.get(path) {
             endpoints
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(target_node))
                 .map(|(_, v)| v.to_pcf())
-                .expect("not found")
+                .unwrap_or_else(PiecewiseConstantFunction::empty)
         } else {
             PiecewiseConstantFunction::empty()
         }
+    }
+
+    pub fn path_has_endpoint_pair(&self, path: &AltKey, src_label: &str, dst_label: &str) -> bool {
+        if Self::endpoint_pair_exists(self.edge_set_to_endpoints.get(path), src_label, dst_label) {
+            return true;
+        }
+
+        let Some(alias) = self.path_aliases.get(path) else {
+            return false;
+        };
+        let src_label = self.map_alias_endpoint(alias, src_label);
+        let dst_label = self.map_alias_endpoint(alias, dst_label);
+        Self::endpoint_pair_exists(
+            self.edge_set_to_endpoints.get(&alias.source),
+            &src_label,
+            &dst_label,
+        )
+    }
+
+    pub fn alias_endpoint_sources(
+        &self,
+        path: &AltKey,
+        src_label: &str,
+        dst_label: &str,
+    ) -> Option<(String, String)> {
+        let alias = self.path_aliases.get(path)?;
+        let src_label = self.map_alias_endpoint(alias, src_label);
+        let dst_label = self.map_alias_endpoint(alias, dst_label);
+        if Self::endpoint_pair_exists(
+            self.edge_set_to_endpoints.get(&alias.source),
+            &src_label,
+            &dst_label,
+        ) {
+            Some((src_label, dst_label))
+        } else {
+            None
+        }
+    }
+
+    fn map_alias_endpoint(&self, alias: &PathAlias, label: &str) -> String {
+        alias
+            .endpoint_map
+            .iter()
+            .find(|(alias_label, _)| alias_label.eq_ignore_ascii_case(label))
+            .map(|(_, source_label)| source_label.clone())
+            .unwrap_or_else(|| label.to_string())
+    }
+
+    fn endpoint_pair_exists(
+        endpoints: Option<&HashMap<String, CompressedDegreeSeq>>,
+        src_label: &str,
+        dst_label: &str,
+    ) -> bool {
+        endpoints.is_some_and(|endpoints| {
+            endpoints
+                .keys()
+                .any(|label| label.eq_ignore_ascii_case(src_label))
+                && endpoints
+                    .keys()
+                    .any(|label| label.eq_ignore_ascii_case(dst_label))
+        })
     }
 
     pub fn get_piece_func_by_star(&self, star: &StarStatKey) -> PiecewiseConstantFunction {
@@ -252,6 +366,13 @@ impl DegreeSeqGraphCompressed {
             .get(star)
             .map(|v| v.to_pcf())
             .unwrap_or_else(PiecewiseConstantFunction::empty)
+    }
+
+    pub fn edge_cardinality(&self, edge_label: &str) -> Option<EdgeCardinality> {
+        self.edge_cardinalities
+            .iter()
+            .find(|(label, _)| label.eq_ignore_ascii_case(edge_label))
+            .map(|(_, card)| *card)
     }
 
     /// Incrementally rebuild only the dirty `(AltKey, label)` entries

@@ -916,6 +916,7 @@ pub fn scan_all_hops_from_flat_graph(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::procedures::gcard_query::catalog::EdgeCardinality;
 
     fn vec_neighbor_data(src_verts: Vec<VertexId>) -> VecNeighborData {
         VecNeighborData {
@@ -972,6 +973,7 @@ mod tests {
                 EdgeEndpoints {
                     src_label: center.clone(),
                     dst_label: leaf_label.to_string(),
+                    cardinality: EdgeCardinality::ManyToMany,
                 },
             );
 

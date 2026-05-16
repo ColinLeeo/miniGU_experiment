@@ -26,12 +26,14 @@ use minigu_storage::tp::MemoryGraph;
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use super::create_catalog::enumerate_all_paths_walks_in_schema;
+use super::create_catalog::{add_functional_path_aliases, enumerate_all_paths_walks_in_schema};
 use super::degree_compute_dense::{self, RawHopData};
 use super::flat_graph::{FlatGraph, FlatGraphBuilder};
 use crate::procedures::common::Manifest;
 use crate::procedures::gcard_query::statistic::save_statistic;
-use crate::procedures::gcard_query::utils::{EdgeEndpoints, get_edges_from_catalog};
+use crate::procedures::gcard_query::utils::{
+    EdgeEndpoints, edge_cardinalities_from_schema, get_edges_from_catalog,
+};
 use crate::procedures::import_graph::{get_graph_type_from_manifest, property_to_scalar_value};
 
 // ---------------------------------------------------------------------------
@@ -675,9 +677,15 @@ pub fn build_procedure() -> Procedure {
         );
         statistic.report_compressed_sizes();
 
-        let degree_seq = statistic
+        let mut degree_seq = statistic
             .to_degree_seq_graph_compressed()
             .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
+        degree_seq.edge_cardinalities = edge_cardinalities_from_schema(&edges);
+        let alias_count = add_functional_path_aliases(&mut degree_seq, &edges, max_k);
+        eprintln!(
+            "load_ldbc: functional path aliases generated: {} (not scanned)",
+            alias_count
+        );
 
         // ── Persist statistic as bincode ──
         // Written to the shared cache directory (parent of the SF dir) with an

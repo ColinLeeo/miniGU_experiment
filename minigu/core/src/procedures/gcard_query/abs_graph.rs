@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt::Write;
 
 use minigu_common::types::{EdgeId, VertexId};
 
 use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
-use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
+use crate::procedures::gcard_query::types::{AbstractEdge, FunctionalDirection, QueryVertex};
 
 impl Endpoints for AbstractEdge {
     fn src(&self) -> VertexId {
@@ -160,6 +161,19 @@ impl GraphSkeleton<AbstractEdge> {
         }
     }
 
+    fn edge_is_functional_from_to(&self, edge_id: EdgeId, from: VertexId, to: VertexId) -> bool {
+        let Some(edge) = self.edges.get(&edge_id) else {
+            return false;
+        };
+        if edge.src == from && edge.dst == to {
+            edge.functional.is_functional_src_to_dst()
+        } else if edge.dst == from && edge.src == to {
+            edge.functional.is_functional_dst_to_src()
+        } else {
+            false
+        }
+    }
+
     fn multiply_local_and<'a, I>(&'a self, vertex_id: VertexId, pcfs: I) -> Pcf
     where
         I: IntoIterator<Item = &'a Pcf>,
@@ -267,7 +281,9 @@ impl GraphSkeleton<AbstractEdge> {
                         multiplied_child_pcf
                     };
                     if cur_gen > 0 {
-                        // 然后再把“来自孩子的贡献”和“本节点到父节点的边 PCF”乘起来。
+                        // 然后再把“来自孩子的贡献”和“父节点到本节点的 fanout”乘起来。
+                        // 即使本节点到父节点是 n-1，父节点到本节点仍可能是一对多；
+                        // 这里估计的是完整 assignment 数，不能跳过 parent 侧 fanout。
                         let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
                         alpha_refs(&pcf_refs)
                     } else {
@@ -316,6 +332,135 @@ impl GraphSkeleton<AbstractEdge> {
         }
         selectivity
     }
+
+    pub fn describe_plan(&self) -> String {
+        let mut out = String::new();
+        let mut edge_ids: Vec<_> = self.edges.keys().copied().collect();
+        edge_ids.sort_unstable();
+        let _ = writeln!(out, "  abstract_edges:");
+        for edge_id in edge_ids {
+            let edge = &self.edges[&edge_id];
+            let src_label = self
+                .vertices
+                .get(&edge.src)
+                .map(|v| v.label.as_str())
+                .unwrap_or("?");
+            let dst_label = self
+                .vertices
+                .get(&edge.dst)
+                .map(|v| v.label.as_str())
+                .unwrap_or("?");
+            let _ = writeln!(
+                out,
+                "    ae{}: {}({}) -> {}({}), originals={:?}, path_vertices={:?}, functional={:?}, path={}",
+                edge_id,
+                edge.src,
+                src_label,
+                edge.dst,
+                dst_label,
+                edge.original_edge_ids,
+                edge.path_vertices,
+                edge.functional,
+                edge.path_str
+            );
+        }
+        if !self.local_pcfs.is_empty() {
+            let mut centers: Vec<_> = self.local_pcfs.keys().copied().collect();
+            centers.sort_unstable();
+            let _ = writeln!(out, "  local_star_pcfs:");
+            for center in centers {
+                let label = self
+                    .vertices
+                    .get(&center)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                let count = self.local_pcfs.get(&center).map(|v| v.len()).unwrap_or(0);
+                let _ = writeln!(out, "    {}({}): {} local factors", center, label, count);
+            }
+        }
+
+        let Some(root) = self.pick_root() else {
+            let _ = writeln!(out, "  merge_order: <empty>");
+            return out;
+        };
+        let generations = self.get_topological_generations(root);
+        let max_gen = generations.values().copied().max().unwrap_or(0);
+        let root_label = self
+            .vertices
+            .get(&root)
+            .map(|v| v.label.as_str())
+            .unwrap_or("?");
+        let _ = writeln!(out, "  root: {}({})", root, root_label);
+
+        let mut parent_map: HashMap<VertexId, (VertexId, EdgeId)> = HashMap::new();
+        let mut children_map: HashMap<VertexId, Vec<(VertexId, EdgeId)>> = HashMap::new();
+        for (&edge_id, edge) in &self.edges {
+            let src_gen = generations.get(&edge.src).copied();
+            let dst_gen = generations.get(&edge.dst).copied();
+            if let (Some(sg), Some(dg)) = (src_gen, dst_gen) {
+                if sg + 1 == dg {
+                    parent_map.insert(edge.dst, (edge.src, edge_id));
+                    children_map
+                        .entry(edge.src)
+                        .or_default()
+                        .push((edge.dst, edge_id));
+                } else if dg + 1 == sg {
+                    parent_map.insert(edge.src, (edge.dst, edge_id));
+                    children_map
+                        .entry(edge.dst)
+                        .or_default()
+                        .push((edge.src, edge_id));
+                }
+            }
+        }
+        for children in children_map.values_mut() {
+            children.sort_unstable_by_key(|(child, edge_id)| (*child, *edge_id));
+        }
+
+        let _ = writeln!(out, "  merge_order:");
+        for cur_gen in (0..=max_gen).rev() {
+            let mut vertices: Vec<_> = generations
+                .iter()
+                .filter_map(|(&v, &g)| (g == cur_gen).then_some(v))
+                .collect();
+            vertices.sort_unstable();
+            for v in vertices {
+                let label = self
+                    .vertices
+                    .get(&v)
+                    .map(|x| x.label.as_str())
+                    .unwrap_or("?");
+                let children = children_map.get(&v).cloned().unwrap_or_default();
+                let child_desc = children
+                    .iter()
+                    .map(|(child, edge_id)| format!("{} via ae{}", child, edge_id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                match parent_map.get(&v) {
+                    Some((parent, edge_id)) => {
+                        let op = if self.edge_is_functional_from_to(*edge_id, v, *parent) {
+                            "beta -> alpha(parent edge, functional child->parent)"
+                        } else {
+                            "beta -> alpha(parent edge)"
+                        };
+                        let _ = writeln!(
+                            out,
+                            "    gen{} vertex {}({}) children=[{}] -> parent {} via ae{} [{}]",
+                            cur_gen, v, label, child_desc, parent, edge_id, op
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(
+                            out,
+                            "    gen{} root {}({}) children=[{}] -> final rows",
+                            cur_gen, v, label, child_desc
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -324,7 +469,7 @@ mod tests {
 
     use super::AbstractGraph;
     use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
-    use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
+    use crate::procedures::gcard_query::types::{AbstractEdge, FunctionalDirection, QueryVertex};
 
     fn vertex(id: u64, label: &str) -> QueryVertex {
         QueryVertex {
@@ -351,11 +496,22 @@ mod tests {
     }
 
     fn edge(src: u64, dst: u64, src_pcf: Pcf, dst_pcf: Pcf) -> AbstractEdge {
+        edge_with_functional(src, dst, src_pcf, dst_pcf, FunctionalDirection::None)
+    }
+
+    fn edge_with_functional(
+        src: u64,
+        dst: u64,
+        src_pcf: Pcf,
+        dst_pcf: Pcf,
+        functional: FunctionalDirection,
+    ) -> AbstractEdge {
         AbstractEdge {
             src,
             dst,
             src_pcf: Arc::new(src_pcf),
             dst_pcf: Arc::new(dst_pcf),
+            functional,
             predicates: Vec::new(),
             original_edge_ids: Vec::new(),
             path_vertices: vec![src, dst],
@@ -387,5 +543,45 @@ mod tests {
 
         assert_ne!(expected, wrong_coordinate_product);
         assert_eq!(graph.get_es().unwrap(), expected);
+    }
+
+    #[test]
+    fn functional_child_to_parent_edge_keeps_parent_fanout() {
+        let parent_side = pcf(vec![2.0], vec![10.0]);
+        let leaf_side = pcf(vec![1.0], vec![20.0]);
+        let local_star = pcf(vec![10.0], vec![2.0]);
+        let root_neutral = pcf(vec![1.0], vec![10.0]);
+
+        let mut nonfunctional = AbstractGraph::new();
+        nonfunctional.add_vertex(vertex(1, "leaf_with_star"));
+        nonfunctional.add_vertex(vertex(2, "root"));
+        nonfunctional.add_vertex(vertex(3, "other_leaf"));
+        nonfunctional.add_edge(1, edge(2, 1, parent_side.clone(), leaf_side.clone()));
+        nonfunctional.add_edge(2, edge(2, 3, root_neutral.clone(), root_neutral.clone()));
+        nonfunctional.add_local_pcf(1, local_star.clone());
+
+        let mut functional = AbstractGraph::new();
+        functional.add_vertex(vertex(1, "leaf_with_star"));
+        functional.add_vertex(vertex(2, "root"));
+        functional.add_vertex(vertex(3, "other_leaf"));
+        functional.add_edge(
+            1,
+            edge_with_functional(
+                2,
+                1,
+                parent_side.clone(),
+                leaf_side.clone(),
+                FunctionalDirection::DstToSrc,
+            ),
+        );
+        functional.add_edge(2, edge(2, 3, root_neutral.clone(), root_neutral.clone()));
+        functional.add_local_pcf(1, local_star.clone());
+
+        let projected = beta_right(&local_star, &leaf_side, &parent_side);
+        let expected =
+            alpha_refs(&[&alpha_refs(&[&projected, &parent_side]), &root_neutral]).get_num_rows();
+
+        assert_eq!(nonfunctional.get_es().unwrap(), expected);
+        assert_eq!(functional.get_es().unwrap(), expected);
     }
 }

@@ -7,16 +7,17 @@ use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
 use rayon::prelude::*;
 
-use crate::procedures::gcard_query::PredicateApplyType::INNER;
 use crate::procedures::gcard_query::abs_graph::AbstractGraph;
-use crate::procedures::gcard_query::catalog::{DegreeSeqGraphCompressed, make_alt_key};
+use crate::procedures::gcard_query::catalog::{
+    DegreeSeqGraphCompressed, EdgeCardinality, make_alt_key,
+};
 use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{
-    AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef, PredicateDef,
-    PredicateId, PredicateLocation,
+    AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef,
+    FunctionalDirection, PredicateDef, PredicateId, PredicateLocation,
 };
 use crate::procedures::gcard_query::union_find::UnionFind;
 use crate::procedures::gcard_query::utils::{PathPattern, StarStatKey};
@@ -50,6 +51,7 @@ mod tests {
     use super::*;
     use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
     use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
+    use crate::procedures::gcard_query::types::QueryVertex;
 
     fn vertex(id: VertexId, label: &str) -> crate::procedures::gcard_query::types::VertexDef {
         crate::procedures::gcard_query::types::VertexDef {
@@ -232,6 +234,81 @@ mod tests {
     }
 
     #[test]
+    fn star_extraction_uses_candidate_tree_degree_for_cyclic_queries() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "center"), vertex(2, "a"), vertex(3, "b")],
+            edges: vec![
+                edge(10, "e1", 1, 2),
+                edge(11, "e2", 1, 3),
+                edge(12, "cycle", 2, 3),
+            ],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+        let tree_scope = query_graph.subgraph_without_edges(&HashSet::from([12]));
+
+        let star_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["e1".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["e2".to_string()],
+                ),
+            ],
+        );
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        insert_empty_path_stat(
+            &mut degree_seq_graph,
+            vec!["center".to_string(), "a".to_string()],
+            vec!["e1".to_string()],
+        );
+        insert_empty_path_stat(
+            &mut degree_seq_graph,
+            vec!["center".to_string(), "b".to_string()],
+            vec!["e2".to_string()],
+        );
+        degree_seq_graph.star_stats.insert(
+            star_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction {
+                    constants: vec![5.0],
+                    right_interval_edges: vec![4.0],
+                    cumulative_rows: vec![20.0],
+                },
+            },
+        );
+
+        let abstract_graphs = query_graph
+            .build_abstract_graph_candidates_from_query_graph_flat(
+                &tree_scope,
+                1,
+                false,
+                &degree_seq_graph,
+                None,
+                0,
+                &PredicateApplyType::IGNORE,
+                &Arc::new(DashMap::new()),
+                &Arc::new(DashMap::new()),
+                &Arc::new(DashMap::new()),
+            )
+            .unwrap();
+
+        let abstract_graph = abstract_graphs.first().unwrap();
+        assert!(
+            abstract_graph.edges.is_empty(),
+            "tree-local leaves should be star-covered even when their original graph degree is > 1"
+        );
+        assert_eq!(
+            abstract_graph.local_pcfs.get(&1).unwrap()[0].get_num_rows(),
+            20.0
+        );
+    }
+
+    #[test]
     fn star_matching_falls_back_to_smaller_available_degree() {
         let arms = vec![
             (
@@ -344,6 +421,119 @@ mod tests {
 
         assert_eq!(selected, vec![1, 2, 3]);
         assert_eq!(pcf.get_num_rows(), 34.0);
+    }
+
+    fn contract_test_graph() -> QueryGraph {
+        let mut graph = QueryGraph::new();
+        for (id, label) in [(1, "A"), (2, "B"), (3, "C")] {
+            graph.inner.vertices.insert(
+                id,
+                QueryVertex {
+                    id,
+                    label: label.to_string(),
+                    predicates: Vec::new(),
+                },
+            );
+        }
+
+        graph.inner.edges.insert(
+            1,
+            QueryEdge {
+                id: 1,
+                label: "livesIn".to_string(),
+                src_vertex_id: 1,
+                dst_vertex_id: 2,
+                predicates: Vec::new(),
+            },
+        );
+        graph.inner.edges.insert(
+            2,
+            QueryEdge {
+                id: 2,
+                label: "knows".to_string(),
+                src_vertex_id: 2,
+                dst_vertex_id: 3,
+                predicates: Vec::new(),
+            },
+        );
+        graph.inner.outgoing_edges.insert(1, vec![1]);
+        graph.inner.incoming_edges.insert(2, vec![1]);
+        graph.inner.outgoing_edges.insert(2, vec![2]);
+        graph.inner.incoming_edges.insert(3, vec![2]);
+        graph
+    }
+
+    fn insert_empty_path_stat(
+        degree_seq_graph: &mut DegreeSeqGraphCompressed,
+        nodes: Vec<String>,
+        edges: Vec<String>,
+    ) {
+        let mut endpoints = HashMap::new();
+        for label in [nodes.first().unwrap(), nodes.last().unwrap()] {
+            endpoints.insert(
+                label.clone(),
+                CompressedDegreeSeq::SafeBound {
+                    function: PiecewiseConstantFunction::empty(),
+                },
+            );
+        }
+        degree_seq_graph
+            .edge_set_to_endpoints
+            .insert(make_alt_key(&nodes, &edges), endpoints);
+    }
+
+    #[test]
+    fn cardinality_aware_path_build_contracts_functional_cut_with_catalog() {
+        let graph = contract_test_graph();
+        let path = Path {
+            start: 1,
+            end: 3,
+            vertices: vec![1, 2, 3],
+            edges: vec![1, 2],
+        };
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("livesIn".to_string(), EdgeCardinality::ManyToOne);
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("knows".to_string(), EdgeCardinality::ManyToMany);
+        insert_empty_path_stat(
+            &mut degree_seq_graph,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+            vec!["livesIn".to_string(), "knows".to_string()],
+        );
+
+        let abstract_edges = graph
+            .build_abstract_edges_cardinality_aware_for_path(&path, 1, &degree_seq_graph)
+            .expect("path should build");
+
+        assert_eq!(abstract_edges.len(), 1);
+        assert_eq!(abstract_edges[0].path_vertices, vec![1, 2, 3]);
+        assert_eq!(abstract_edges[0].original_edge_ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn cardinality_aware_path_build_keeps_cut_without_catalog() {
+        let graph = contract_test_graph();
+        let path = Path {
+            start: 1,
+            end: 3,
+            vertices: vec![1, 2, 3],
+            edges: vec![1, 2],
+        };
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("livesIn".to_string(), EdgeCardinality::ManyToOne);
+
+        let abstract_edges = graph
+            .build_abstract_edges_cardinality_aware_for_path(&path, 1, &degree_seq_graph)
+            .expect("path should build");
+
+        assert_eq!(abstract_edges.len(), 2);
+        assert_eq!(abstract_edges[0].original_edge_ids, vec![1]);
+        assert_eq!(abstract_edges[1].original_edge_ids, vec![2]);
     }
 }
 
@@ -1226,71 +1416,13 @@ impl QueryGraph {
         path: &Path,
         k: usize,
     ) -> GCardResult<Vec<AbstractEdge>> {
-        let l = path.edges.len();
-        if l == 0 {
-            return Ok(Vec::new());
-        }
-
-        let num_abstract_edges = (l as f64 / k as f64).ceil() as usize;
-
-        if l % k == 0 {
-            return self.build_abstract_edges_even(path, k);
-        }
-
-        self.build_abstract_edges_optimal(path, k, num_abstract_edges)
+        let ranges = self.abstract_edge_ranges_for_path(path, k);
+        self.build_abstract_edges_from_ranges(path, &ranges)
     }
 
     fn build_abstract_edges_even(&self, path: &Path, k: usize) -> GCardResult<Vec<AbstractEdge>> {
-        let mut abstract_edges = Vec::new();
-        let mut edge_idx = 0;
-
-        while edge_idx < path.edges.len() {
-            let end_idx = (edge_idx + k).min(path.edges.len());
-            let abstract_edge_edges = &path.edges[edge_idx..end_idx];
-
-            let mut predicates = Vec::new();
-            for &edge_id in abstract_edge_edges {
-                if let Some(edge) = self.inner.edges.get(&edge_id) {
-                    predicates.extend(edge.predicates.clone());
-                }
-            }
-
-            let src_vertex_idx = edge_idx;
-            let dst_vertex_idx = if end_idx < path.vertices.len() {
-                end_idx
-            } else {
-                path.vertices.len() - 1
-            };
-
-            let src = path.vertices[src_vertex_idx];
-            let dst = path.vertices[dst_vertex_idx];
-
-            let path_vertices = path.vertices[src_vertex_idx..=dst_vertex_idx].to_vec();
-            for &vertex_id in &path_vertices {
-                if let Some(vertex) = self.inner.vertices.get(&vertex_id) {
-                    predicates.extend(vertex.predicates.clone());
-                }
-            }
-
-            let src_pcf = Arc::new(Pcf::empty());
-            let dst_pcf = Arc::new(Pcf::empty());
-
-            abstract_edges.push(AbstractEdge {
-                src,
-                dst,
-                src_pcf,
-                dst_pcf,
-                predicates,
-                original_edge_ids: abstract_edge_edges.to_vec(),
-                path_vertices,
-                selectivity: 1.0,
-                path_str: String::new(),
-            });
-
-            edge_idx += k;
-        }
-
-        Ok(abstract_edges)
+        let ranges = self.abstract_edge_ranges_even(path, k);
+        self.build_abstract_edges_from_ranges(path, &ranges)
     }
 
     fn build_abstract_edges_optimal(
@@ -1325,56 +1457,335 @@ impl QueryGraph {
             sol
         });
 
-        let mut abstract_edges = Vec::new();
+        let mut ranges = Vec::new();
         let mut edge_idx = 0;
 
         for &edge_count in &solution {
             let end_idx = (edge_idx + edge_count).min(path.edges.len());
-            let abstract_edge_edges = &path.edges[edge_idx..end_idx];
-
-            let mut predicates = Vec::new();
-            for &edge_id in abstract_edge_edges {
-                if let Some(edge) = self.inner.edges.get(&edge_id) {
-                    predicates.extend(edge.predicates.clone());
-                }
-            }
-
-            let src_vertex_idx = edge_idx;
-            let dst_vertex_idx = if end_idx < path.vertices.len() {
-                end_idx
-            } else {
-                path.vertices.len() - 1
-            };
-
-            let src = path.vertices[src_vertex_idx];
-            let dst = path.vertices[dst_vertex_idx];
-
-            let path_vertices = path.vertices[src_vertex_idx..=dst_vertex_idx].to_vec();
-            for &vertex_id in &path_vertices {
-                if let Some(vertex) = self.inner.vertices.get(&vertex_id) {
-                    predicates.extend(vertex.predicates.clone());
-                }
-            }
-
-            let src_pcf = Arc::new(Pcf::empty());
-            let dst_pcf = Arc::new(Pcf::empty());
-
-            abstract_edges.push(AbstractEdge {
-                src,
-                dst,
-                src_pcf,
-                dst_pcf,
-                predicates,
-                original_edge_ids: abstract_edge_edges.to_vec(),
-                path_vertices,
-                selectivity: 1.0,
-                path_str: String::new(),
-            });
-
+            ranges.push((edge_idx, end_idx));
             edge_idx += edge_count;
         }
 
-        Ok(abstract_edges)
+        self.build_abstract_edges_from_ranges(path, &ranges)
+    }
+
+    fn build_abstract_edges_cardinality_aware_for_path(
+        &self,
+        path: &Path,
+        k: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> GCardResult<Vec<AbstractEdge>> {
+        let mut ranges = self.abstract_edge_ranges_for_path(path, k);
+
+        let mut i = 0;
+        while i + 1 < ranges.len() {
+            let cut_edge_idx = ranges[i].1;
+            let merged = (ranges[i].0, ranges[i + 1].1);
+
+            if self.can_contract_path_cut(path, cut_edge_idx, degree_seq_graph)
+                && self.path_slice_has_catalog(path, merged.0, merged.1, degree_seq_graph)
+            {
+                ranges[i] = merged;
+                ranges.remove(i + 1);
+                i = i.saturating_sub(1);
+            } else {
+                i += 1;
+            }
+        }
+
+        self.build_abstract_edges_from_ranges(path, &ranges)
+    }
+
+    fn build_abstract_edge_candidates_for_path(
+        &self,
+        path: &Path,
+        k: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> GCardResult<Vec<Vec<AbstractEdge>>> {
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+
+        let mut add_ranges = |ranges: Vec<(usize, usize)>,
+                              candidates: &mut Vec<Vec<AbstractEdge>>|
+         -> GCardResult<()> {
+            if seen.insert(ranges.clone()) {
+                candidates.push(self.build_abstract_edges_from_ranges(path, &ranges)?);
+            }
+            Ok(())
+        };
+
+        let mut functional_ranges = self.abstract_edge_ranges_for_path(path, k);
+        let mut i = 0;
+        while i + 1 < functional_ranges.len() {
+            let cut_edge_idx = functional_ranges[i].1;
+            let merged = (functional_ranges[i].0, functional_ranges[i + 1].1);
+
+            if self.can_contract_path_cut(path, cut_edge_idx, degree_seq_graph)
+                && self.path_slice_has_catalog(path, merged.0, merged.1, degree_seq_graph)
+            {
+                functional_ranges[i] = merged;
+                functional_ranges.remove(i + 1);
+                i = i.saturating_sub(1);
+            } else {
+                i += 1;
+            }
+        }
+        add_ranges(functional_ranges, &mut candidates)?;
+
+        for ranges in self.abstract_edge_range_variants_for_path(path, k) {
+            add_ranges(ranges, &mut candidates)?;
+        }
+
+        Ok(candidates)
+    }
+
+    fn abstract_edge_ranges_for_path(&self, path: &Path, k: usize) -> Vec<(usize, usize)> {
+        let l = path.edges.len();
+        if l == 0 {
+            return Vec::new();
+        }
+
+        let num_abstract_edges = (l as f64 / k as f64).ceil() as usize;
+
+        if l % k == 0 {
+            return self.abstract_edge_ranges_even(path, k);
+        }
+
+        let mut solution = Vec::new();
+        let short_size = l.saturating_sub((num_abstract_edges - 1) * k);
+        let mut min_predicate_count = usize::MAX;
+
+        for short_pos in 0..num_abstract_edges {
+            let mut candidate = vec![k; num_abstract_edges];
+            candidate[short_pos] = short_size;
+            let short_start = short_pos * k;
+            let short_end = short_start + short_size;
+            let short_predicate_count =
+                self.count_predicates_in_range(path, short_start, short_end);
+
+            if short_predicate_count < min_predicate_count {
+                min_predicate_count = short_predicate_count;
+                solution = candidate;
+            }
+        }
+
+        if solution.is_empty() {
+            solution = vec![k; num_abstract_edges - 1];
+            solution.push(l - (num_abstract_edges - 1) * k);
+        }
+
+        let mut ranges = Vec::with_capacity(solution.len());
+        let mut edge_idx = 0;
+        for edge_count in solution {
+            let end_idx = (edge_idx + edge_count).min(path.edges.len());
+            ranges.push((edge_idx, end_idx));
+            edge_idx += edge_count;
+        }
+        ranges
+    }
+
+    fn abstract_edge_range_variants_for_path(
+        &self,
+        path: &Path,
+        k: usize,
+    ) -> Vec<Vec<(usize, usize)>> {
+        let l = path.edges.len();
+        if l == 0 {
+            return vec![Vec::new()];
+        }
+        if l % k == 0 {
+            return vec![self.abstract_edge_ranges_even(path, k)];
+        }
+
+        let num_abstract_edges = (l as f64 / k as f64).ceil() as usize;
+        let short_size = l.saturating_sub((num_abstract_edges - 1) * k);
+        let mut variants = Vec::with_capacity(num_abstract_edges);
+
+        for short_pos in 0..num_abstract_edges {
+            let mut solution = vec![k; num_abstract_edges];
+            solution[short_pos] = short_size;
+
+            let mut ranges = Vec::with_capacity(solution.len());
+            let mut edge_idx = 0;
+            for edge_count in solution {
+                let end_idx = (edge_idx + edge_count).min(path.edges.len());
+                ranges.push((edge_idx, end_idx));
+                edge_idx += edge_count;
+            }
+            variants.push(ranges);
+        }
+
+        variants
+    }
+
+    fn abstract_edge_ranges_even(&self, path: &Path, k: usize) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut edge_idx = 0;
+
+        while edge_idx < path.edges.len() {
+            let end_idx = (edge_idx + k).min(path.edges.len());
+            ranges.push((edge_idx, end_idx));
+            edge_idx += k;
+        }
+
+        ranges
+    }
+
+    fn build_abstract_edges_from_ranges(
+        &self,
+        path: &Path,
+        ranges: &[(usize, usize)],
+    ) -> GCardResult<Vec<AbstractEdge>> {
+        ranges
+            .iter()
+            .map(|&(start_edge_idx, end_edge_idx)| {
+                self.build_abstract_edge_from_range(path, start_edge_idx, end_edge_idx)
+            })
+            .collect()
+    }
+
+    fn build_abstract_edge_from_range(
+        &self,
+        path: &Path,
+        start_edge_idx: usize,
+        end_edge_idx: usize,
+    ) -> GCardResult<AbstractEdge> {
+        let abstract_edge_edges = &path.edges[start_edge_idx..end_edge_idx];
+
+        let mut predicates = Vec::new();
+        for &edge_id in abstract_edge_edges {
+            if let Some(edge) = self.inner.edges.get(&edge_id) {
+                predicates.extend(edge.predicates.clone());
+            }
+        }
+
+        let src_vertex_idx = start_edge_idx;
+        let dst_vertex_idx = if end_edge_idx < path.vertices.len() {
+            end_edge_idx
+        } else {
+            path.vertices.len() - 1
+        };
+
+        let src = path.vertices[src_vertex_idx];
+        let dst = path.vertices[dst_vertex_idx];
+
+        let path_vertices = path.vertices[src_vertex_idx..=dst_vertex_idx].to_vec();
+        for &vertex_id in &path_vertices {
+            if let Some(vertex) = self.inner.vertices.get(&vertex_id) {
+                predicates.extend(vertex.predicates.clone());
+            }
+        }
+
+        Ok(AbstractEdge {
+            src,
+            dst,
+            src_pcf: Arc::new(Pcf::empty()),
+            dst_pcf: Arc::new(Pcf::empty()),
+            functional: FunctionalDirection::None,
+            predicates,
+            original_edge_ids: abstract_edge_edges.to_vec(),
+            path_vertices,
+            selectivity: 1.0,
+            path_str: String::new(),
+        })
+    }
+
+    fn can_contract_path_cut(
+        &self,
+        path: &Path,
+        cut_edge_idx: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> bool {
+        if cut_edge_idx == 0 || cut_edge_idx >= path.edges.len() {
+            return false;
+        }
+
+        let shared_vertex_id = path.vertices[cut_edge_idx];
+        if self
+            .inner
+            .vertices
+            .get(&shared_vertex_id)
+            .map(|v| !v.predicates.is_empty())
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        self.edge_is_functional(path.edges[cut_edge_idx - 1], degree_seq_graph)
+            || self.edge_is_functional(path.edges[cut_edge_idx], degree_seq_graph)
+    }
+
+    fn edge_is_functional(
+        &self,
+        edge_id: EdgeId,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> bool {
+        let Some(edge) = self.inner.edges.get(&edge_id) else {
+            return false;
+        };
+
+        degree_seq_graph
+            .edge_cardinalities
+            .iter()
+            .find(|(label, _)| label.eq_ignore_ascii_case(&edge.label))
+            .map(|(_, card)| {
+                matches!(
+                    card,
+                    EdgeCardinality::ManyToOne | EdgeCardinality::OneToMany
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn path_slice_has_catalog(
+        &self,
+        path: &Path,
+        start_edge_idx: usize,
+        end_edge_idx: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> bool {
+        if start_edge_idx >= end_edge_idx || end_edge_idx >= path.vertices.len() {
+            return false;
+        }
+
+        let mut node_labels = Vec::with_capacity(end_edge_idx - start_edge_idx + 1);
+        for &vertex_id in &path.vertices[start_edge_idx..=end_edge_idx] {
+            let Some(vertex) = self.inner.vertices.get(&vertex_id) else {
+                return false;
+            };
+            node_labels.push(vertex.label.clone());
+        }
+
+        let mut edge_labels = Vec::with_capacity(end_edge_idx - start_edge_idx);
+        for &edge_id in &path.edges[start_edge_idx..end_edge_idx] {
+            let Some(edge) = self.inner.edges.get(&edge_id) else {
+                return false;
+            };
+            edge_labels.push(edge.label.clone());
+        }
+
+        let key = make_alt_key(&node_labels, &edge_labels);
+        let src_label = &node_labels[0];
+        let dst_label = node_labels.last().expect("non-empty path slice");
+        if degree_seq_graph.edge_set_to_endpoints.contains_key(&key)
+            && degree_seq_graph.path_has_endpoint_pair(&key, src_label, dst_label)
+        {
+            return true;
+        }
+
+        let Some((source_src_label, source_dst_label)) =
+            degree_seq_graph.alias_endpoint_sources(&key, src_label, dst_label)
+        else {
+            return false;
+        };
+
+        let src_is_extension = !source_src_label.eq_ignore_ascii_case(src_label);
+        let dst_is_extension = !source_dst_label.eq_ignore_ascii_case(dst_label);
+        let src_vertex_id = path.vertices[start_edge_idx];
+        let dst_vertex_id = path.vertices[end_edge_idx];
+
+        (!src_is_extension || self.get_neighbor_edge_pairs(src_vertex_id).len() == 1)
+            && (!dst_is_extension || self.get_neighbor_edge_pairs(dst_vertex_id).len() == 1)
     }
 
     fn find_path_edges_in_tree(
@@ -1613,9 +2024,10 @@ impl QueryGraph {
         BUILD_CYCLE_CHECK_NANOS.fetch_add(t_cycle.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         if !has_cycle {
-            let abstract_graph = self.build_abstract_graph_from_query_graph_flat(
+            let abstract_graphs = self.build_abstract_graph_candidates_from_query_graph_flat(
                 self,
                 k,
+                false,
                 degree_seq_graph,
                 flat_graph,
                 sample_size,
@@ -1624,7 +2036,10 @@ impl QueryGraph {
                 &flat_vertex_cache,
                 &pred_cache,
             )?;
-            return Ok(vec![(abstract_graph, 0)]);
+            return Ok(abstract_graphs
+                .into_iter()
+                .map(|abstract_graph| (abstract_graph, 0))
+                .collect());
         }
 
         // ── Cycle case: enumerate spanning trees ──────────────────────────────
@@ -1633,12 +2048,13 @@ impl QueryGraph {
         let trees_with_scores = self.build_k_best_trees(&scores, tree_num.max(1));
         BUILD_SCORE_TREE_NANOS.fetch_add(t_tree.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
-        let results: Vec<GCardResult<(AbstractGraph, u32)>> = trees_with_scores
+        let results: Vec<GCardResult<Vec<(AbstractGraph, u32)>>> = trees_with_scores
             .par_iter()
             .map(|(tree, tree_score)| {
-                self.build_abstract_graph_from_query_graph_flat(
+                self.build_abstract_graph_candidates_from_query_graph_flat(
                     tree,
                     k,
+                    true,
                     degree_seq_graph,
                     flat_graph,
                     sample_size,
@@ -1647,13 +2063,18 @@ impl QueryGraph {
                     &flat_vertex_cache,
                     &pred_cache,
                 )
-                .map(|ag| (ag, *tree_score))
+                .map(|graphs| {
+                    graphs
+                        .into_iter()
+                        .map(|graph| (graph, *tree_score))
+                        .collect()
+                })
             })
             .collect();
 
         let mut abstract_graphs = Vec::new();
         for r in results {
-            abstract_graphs.push(r?);
+            abstract_graphs.extend(r?);
         }
         Ok(abstract_graphs)
     }
@@ -1773,6 +2194,7 @@ impl QueryGraph {
             dst,
             src_pcf: Arc::new(Pcf::empty()),
             dst_pcf: Arc::new(Pcf::empty()),
+            functional: FunctionalDirection::None,
             predicates,
             original_edge_ids: def.original_edge_ids.clone(),
             path_vertices: def.path_vertices.clone(),
@@ -1783,10 +2205,68 @@ impl QueryGraph {
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    fn functional_direction_for_abstract_edge(
+        &self,
+        abstract_edge: &AbstractEdge,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> FunctionalDirection {
+        if abstract_edge.original_edge_ids.is_empty()
+            || abstract_edge.path_vertices.len() != abstract_edge.original_edge_ids.len() + 1
+        {
+            return FunctionalDirection::None;
+        }
+
+        let mut src_to_dst = true;
+        let mut dst_to_src = true;
+
+        for (vertices, edge_id) in abstract_edge
+            .path_vertices
+            .windows(2)
+            .zip(&abstract_edge.original_edge_ids)
+        {
+            let current = vertices[0];
+            let next = vertices[1];
+            let Some(edge) = self.inner.edges.get(edge_id) else {
+                return FunctionalDirection::None;
+            };
+            let Some(cardinality) = degree_seq_graph.edge_cardinality(&edge.label) else {
+                return FunctionalDirection::None;
+            };
+
+            let follows_edge_direction =
+                edge.src_vertex_id == current && edge.dst_vertex_id == next;
+            let follows_reverse_direction =
+                edge.dst_vertex_id == current && edge.src_vertex_id == next;
+            if !follows_edge_direction && !follows_reverse_direction {
+                return FunctionalDirection::None;
+            }
+
+            let step_src_to_dst = if follows_edge_direction {
+                matches!(cardinality, EdgeCardinality::ManyToOne)
+            } else {
+                matches!(cardinality, EdgeCardinality::OneToMany)
+            };
+            let step_dst_to_src = if follows_edge_direction {
+                matches!(cardinality, EdgeCardinality::OneToMany)
+            } else {
+                matches!(cardinality, EdgeCardinality::ManyToOne)
+            };
+
+            src_to_dst &= step_src_to_dst;
+            dst_to_src &= step_dst_to_src;
+            if !src_to_dst && !dst_to_src {
+                return FunctionalDirection::None;
+            }
+        }
+
+        FunctionalDirection::from_flags(src_to_dst, dst_to_src)
+    }
+
     fn build_abstract_graph_from_query_graph_flat(
         &self,
         query_graph: &QueryGraph,
         k: usize,
+        enable_star_first: bool,
         degree_seq_graph: &DegreeSeqGraphCompressed,
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
@@ -1795,19 +2275,123 @@ impl QueryGraph {
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
     ) -> GCardResult<AbstractGraph> {
+        self.build_abstract_graph_candidates_from_query_graph_flat(
+            query_graph,
+            k,
+            enable_star_first,
+            degree_seq_graph,
+            flat_graph,
+            sample_size,
+            predicate_apply_type,
+            selectivity_cache,
+            flat_vertex_cache,
+            pred_cache,
+        )?
+        .into_iter()
+        .next()
+        .ok_or_else(|| GCardError::InvalidState("no abstract graph candidate".to_string()))
+    }
+
+    fn build_abstract_graph_candidates_from_query_graph_flat(
+        &self,
+        query_graph: &QueryGraph,
+        k: usize,
+        enable_star_first: bool,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+        sample_size: usize,
+        predicate_apply_type: &PredicateApplyType,
+        selectivity_cache: &Arc<DashMap<String, f64>>,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+    ) -> GCardResult<Vec<AbstractGraph>> {
         let t_pivot = std::time::Instant::now();
         let pivot_nodes = query_graph.find_pivot_nodes();
         let paths = query_graph.find_paths_from_pivots(&pivot_nodes);
         BUILD_PIVOT_PATH_NANOS.fetch_add(t_pivot.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let t_ae = std::time::Instant::now();
-        let mut all_abstract_edges: Vec<AbstractEdge> = Vec::new();
+        let limit = Self::split_candidate_limit();
+        let mut edge_sets: Vec<Vec<AbstractEdge>> = vec![Vec::new()];
         for path in paths {
-            let abstract_edges = query_graph.build_abstract_edges_for_path(&path, k)?;
-            all_abstract_edges.extend(abstract_edges);
+            let path_candidates =
+                query_graph.build_abstract_edge_candidates_for_path(&path, k, degree_seq_graph)?;
+            let mut next = Vec::new();
+            for existing in &edge_sets {
+                for candidate in &path_candidates {
+                    let mut combined = existing.clone();
+                    combined.extend(candidate.clone());
+                    next.push(combined);
+                    if next.len() >= limit {
+                        break;
+                    }
+                }
+                if next.len() >= limit {
+                    break;
+                }
+            }
+            edge_sets = next;
         }
         BUILD_ABSTRACT_EDGE_NANOS.fetch_add(t_ae.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
+        let mut graphs = edge_sets
+            .into_iter()
+            .map(|edges| {
+                self.build_abstract_graph_from_edges_flat(
+                    query_graph,
+                    edges,
+                    HashMap::new(),
+                    degree_seq_graph,
+                    flat_graph,
+                    sample_size,
+                    predicate_apply_type,
+                    selectivity_cache,
+                    flat_vertex_cache,
+                    pred_cache,
+                )
+            })
+            .collect::<GCardResult<Vec<_>>>()?;
+
+        if enable_star_first {
+            if let Some(graph) = self.build_star_first_abstract_graph_candidate(
+                query_graph,
+                k,
+                degree_seq_graph,
+                flat_graph,
+                sample_size,
+                predicate_apply_type,
+                selectivity_cache,
+                flat_vertex_cache,
+                pred_cache,
+            )? {
+                graphs.push(graph);
+            }
+        }
+
+        Ok(graphs)
+    }
+
+    fn split_candidate_limit() -> usize {
+        std::env::var("GCARD_SPLIT_CANDIDATE_LIMIT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(16)
+    }
+
+    fn build_abstract_graph_from_edges_flat(
+        &self,
+        degree_scope: &QueryGraph,
+        all_abstract_edges: Vec<AbstractEdge>,
+        initial_local_pcfs: HashMap<VertexId, Vec<Pcf>>,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+        sample_size: usize,
+        predicate_apply_type: &PredicateApplyType,
+        selectivity_cache: &Arc<DashMap<String, f64>>,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+    ) -> GCardResult<AbstractGraph> {
         let results: Vec<GCardResult<AbstractEdge>> = all_abstract_edges
             .into_par_iter()
             .map(|mut abstract_edge| {
@@ -1827,7 +2411,19 @@ impl QueryGraph {
 
         let mut abstract_graph = AbstractGraph::new();
         let mut next_edge_id: EdgeId = 1;
-        let (results, local_pcfs) = self.extract_star_local_pcfs(results, degree_seq_graph);
+        let (results, local_pcfs) =
+            self.extract_star_local_pcfs(results, degree_scope, degree_seq_graph);
+        for (&center, pcfs) in &initial_local_pcfs {
+            if abstract_graph.get_vertex(center).is_none() {
+                let vertex = self.get_vertex(center).ok_or_else(|| {
+                    GCardError::VertexNotFound(format!("Vertex {} not found", center))
+                })?;
+                abstract_graph.add_vertex(vertex.clone());
+            }
+            for pcf in pcfs {
+                abstract_graph.add_local_pcf(center, pcf.clone());
+            }
+        }
         for (&center, pcfs) in &local_pcfs {
             if abstract_graph.get_vertex(center).is_none() {
                 let vertex = self.get_vertex(center).ok_or_else(|| {
@@ -1856,9 +2452,193 @@ impl QueryGraph {
         Ok(abstract_graph)
     }
 
+    fn build_star_first_abstract_graph_candidate(
+        &self,
+        query_graph: &QueryGraph,
+        k: usize,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+        sample_size: usize,
+        predicate_apply_type: &PredicateApplyType,
+        selectivity_cache: &Arc<DashMap<String, f64>>,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+    ) -> GCardResult<Option<AbstractGraph>> {
+        let (local_pcfs, consumed_edges) =
+            query_graph.extract_decomposition_star_local_pcfs(degree_seq_graph);
+        if consumed_edges.is_empty() {
+            return Ok(None);
+        }
+
+        let residual = query_graph.subgraph_without_edges(&consumed_edges);
+        let pivot_nodes = residual.find_pivot_nodes();
+        let paths = residual.find_paths_from_pivots(&pivot_nodes);
+        let mut all_abstract_edges = Vec::new();
+        for path in paths {
+            let abstract_edges = residual.build_abstract_edges_cardinality_aware_for_path(
+                &path,
+                k,
+                degree_seq_graph,
+            )?;
+            all_abstract_edges.extend(abstract_edges);
+        }
+
+        self.build_abstract_graph_from_edges_flat(
+            &residual,
+            all_abstract_edges,
+            local_pcfs,
+            degree_seq_graph,
+            flat_graph,
+            sample_size,
+            predicate_apply_type,
+            selectivity_cache,
+            flat_vertex_cache,
+            pred_cache,
+        )
+        .map(Some)
+    }
+
+    fn subgraph_without_edges(&self, consumed_edges: &HashSet<EdgeId>) -> QueryGraph {
+        let mut graph = QueryGraph::new();
+        graph.inner.vertices = self.inner.vertices.clone();
+        graph.predicate_index = self.predicate_index.clone();
+
+        for (&edge_id, edge) in &self.inner.edges {
+            if consumed_edges.contains(&edge_id) {
+                continue;
+            }
+            graph.inner.edges.insert(edge_id, edge.clone());
+            graph
+                .inner
+                .outgoing_edges
+                .entry(edge.src_vertex_id)
+                .or_default()
+                .push(edge_id);
+            graph
+                .inner
+                .incoming_edges
+                .entry(edge.dst_vertex_id)
+                .or_default()
+                .push(edge_id);
+        }
+
+        graph
+    }
+
+    fn extract_decomposition_star_local_pcfs(
+        &self,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> (HashMap<VertexId, Vec<Pcf>>, HashSet<EdgeId>) {
+        let catalog_max_star_degree = degree_seq_graph
+            .star_stats
+            .keys()
+            .map(|key| key.degree)
+            .max()
+            .unwrap_or(0);
+        let catalog_max_star_length = degree_seq_graph
+            .star_stats
+            .keys()
+            .map(|key| key.max_arm_len)
+            .max()
+            .unwrap_or(0);
+        let star_degree_override = GCARD_MAX_STAR_DEGREE_OVERRIDE.load(Ordering::Relaxed);
+        let max_star_degree = if star_degree_override != GCARD_STAR_CONFIG_UNSET {
+            star_degree_override
+        } else {
+            std::env::var("GCARD_MAX_STAR_DEGREE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(catalog_max_star_degree)
+        };
+        let star_length_override = GCARD_MAX_STAR_LENGTH_OVERRIDE.load(Ordering::Relaxed);
+        let max_star_length = if star_length_override != GCARD_STAR_CONFIG_UNSET {
+            star_length_override
+        } else {
+            std::env::var("GCARD_MAX_STAR_LENGTH")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(catalog_max_star_length)
+        };
+
+        if max_star_degree == 0 || max_star_length == 0 {
+            return (HashMap::new(), HashSet::new());
+        }
+
+        let mut consumed_edges = HashSet::new();
+        let mut local_pcfs: HashMap<VertexId, Vec<Pcf>> = HashMap::new();
+        let mut centers = self.inner.vertices.keys().copied().collect::<Vec<_>>();
+        centers.sort_unstable();
+
+        for center in centers {
+            let center_label = match self.get_vertex(center) {
+                Some(v) => v.label.clone(),
+                None => continue,
+            };
+            let mut mergeable = Vec::new();
+            for edge_id in self.get_neighbor_edges(center) {
+                if consumed_edges.contains(&edge_id) {
+                    continue;
+                }
+                let Some(edge) = self.get_edge(edge_id) else {
+                    continue;
+                };
+                if !edge.predicates.is_empty() {
+                    continue;
+                }
+                let other = if edge.src_vertex_id == center {
+                    edge.dst_vertex_id
+                } else {
+                    edge.src_vertex_id
+                };
+                if self.get_degree(other) != 1 {
+                    continue;
+                }
+                let Some(arm) = self.star_arm_for_single_edge(edge, center) else {
+                    continue;
+                };
+                if arm.es.len() <= max_star_length {
+                    mergeable.push((edge_id, arm));
+                }
+            }
+
+            mergeable.sort_by(|a, b| a.1.vs.cmp(&b.1.vs).then(a.1.es.cmp(&b.1.es)));
+            while !mergeable.is_empty() {
+                let mut unique_arms = Vec::new();
+                let mut last_arm: Option<&PathPattern> = None;
+                for (i, (_, arm)) in mergeable.iter().enumerate() {
+                    if last_arm.is_some_and(|last| last == arm) {
+                        continue;
+                    }
+                    unique_arms.push((i, arm.clone()));
+                    last_arm = Some(arm);
+                }
+
+                let Some((selected_indices, pcf)) = Self::find_matching_star_pcf(
+                    &center_label,
+                    &unique_arms,
+                    max_star_degree,
+                    degree_seq_graph,
+                ) else {
+                    break;
+                };
+
+                for &i in &selected_indices {
+                    consumed_edges.insert(mergeable[i].0);
+                }
+                local_pcfs.entry(center).or_default().push(pcf);
+                for i in selected_indices.into_iter().rev() {
+                    mergeable.remove(i);
+                }
+            }
+        }
+
+        (local_pcfs, consumed_edges)
+    }
+
     fn extract_star_local_pcfs(
         &self,
         results: Vec<GCardResult<AbstractEdge>>,
+        degree_scope: &QueryGraph,
         degree_seq_graph: &DegreeSeqGraphCompressed,
     ) -> (Vec<GCardResult<AbstractEdge>>, HashMap<VertexId, Vec<Pcf>>) {
         let mut edges = Vec::new();
@@ -1881,7 +2661,7 @@ impl QueryGraph {
                 } else {
                     edge.src
                 };
-                if self.get_degree(other) != 1 {
+                if degree_scope.get_degree(other) != 1 {
                     continue;
                 }
                 if let Some(arm) = self.star_arm_for_edge(edge, center) {
@@ -2086,6 +2866,23 @@ impl QueryGraph {
         Some(PathPattern::new_without_reverse(node_labels, edge_labels))
     }
 
+    fn star_arm_for_single_edge(&self, edge: &QueryEdge, center: VertexId) -> Option<PathPattern> {
+        let center_label = self.get_vertex(center)?.label.clone();
+        let other = if edge.src_vertex_id == center {
+            edge.dst_vertex_id
+        } else if edge.dst_vertex_id == center {
+            edge.src_vertex_id
+        } else {
+            return None;
+        };
+        let other_label = self.get_vertex(other)?.label.clone();
+
+        Some(PathPattern::new_without_reverse(
+            vec![center_label, other_label],
+            vec![edge.label.clone()],
+        ))
+    }
+
     fn fill_pcf_for_abstract_edge_flat(
         &self,
         abstract_edge: &mut AbstractEdge,
@@ -2123,6 +2920,8 @@ impl QueryGraph {
         }
 
         let alt_key = make_alt_key(&node_labels, &edge_labels);
+        abstract_edge.functional =
+            self.functional_direction_for_abstract_edge(abstract_edge, degree_seq_graph);
 
         let src_label = self
             .inner
@@ -2164,8 +2963,10 @@ impl QueryGraph {
         // ── Predicate sampling (FlatGraph path) ───────────────────────────────
         if let Some(fg) = flat_graph {
             let selectivity = if !abstract_edge.predicates.is_empty()
-                && matches!(predicate_apply_type, PredicateApplyType::INNER)
-            {
+                && matches!(
+                    predicate_apply_type,
+                    PredicateApplyType::INNER | PredicateApplyType::SCALE
+                ) {
                 let cache_key =
                     Self::build_selectivity_cache_key(&alt_key, &abstract_edge.predicates);
                 if let Some(cached) = selectivity_cache.get(&cache_key) {
@@ -2193,9 +2994,16 @@ impl QueryGraph {
             };
 
             abstract_edge.selectivity = selectivity;
-            if matches!(predicate_apply_type, INNER) {
-                src_pcf_func = src_pcf_func.truncate_by_ratio(selectivity);
-                dst_pcf_func = dst_pcf_func.truncate_by_ratio(selectivity);
+            match predicate_apply_type {
+                PredicateApplyType::INNER => {
+                    src_pcf_func = src_pcf_func.truncate_by_ratio(selectivity);
+                    dst_pcf_func = dst_pcf_func.truncate_by_ratio(selectivity);
+                }
+                PredicateApplyType::SCALE => {
+                    src_pcf_func = src_pcf_func.scale_by_ratio(selectivity);
+                    dst_pcf_func = dst_pcf_func.scale_by_ratio(selectivity);
+                }
+                PredicateApplyType::IGNORE => {}
             }
         }
 

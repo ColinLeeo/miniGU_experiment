@@ -85,6 +85,7 @@ impl TryFrom<u8> for PredicateApplyType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(PredicateApplyType::INNER),
+            1 => Ok(PredicateApplyType::SCALE),
             2 => Ok(PredicateApplyType::IGNORE),
             _ => Err("invalid PredicateApplyType value"),
         }
@@ -95,6 +96,7 @@ impl fmt::Display for PredicateApplyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PredicateApplyType::INNER => write!(f, "INNER"),
+            PredicateApplyType::SCALE => write!(f, "SCALE"),
             PredicateApplyType::IGNORE => write!(f, "IGNORE"),
         }
     }
@@ -102,6 +104,7 @@ impl fmt::Display for PredicateApplyType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PredicateApplyType {
     INNER,
+    SCALE,
     IGNORE,
 }
 
@@ -270,8 +273,10 @@ pub fn build_procedure() -> Procedure {
                 let mut score_of_min_es: Option<u32> = None;
                 let mut index_of_min_es: Option<usize> = None;
                 let mut max_score: u32 = 0;
-                #[allow(dead_code)]
                 let mut min_es_abstract_graph: Option<AbstractGraph> = None;
+                let print_plan = std::env::var("GCARD_PRINT_PLAN")
+                    .ok()
+                    .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"));
                 for (idx, (mut abs, score)) in abstract_graphs_with_scores.into_iter().enumerate() {
                     if score > max_score {
                         max_score = score;
@@ -311,6 +316,21 @@ pub fn build_procedure() -> Procedure {
                 } else {
                     0.0
                 };
+                if print_plan {
+                    let query_name = std::path::Path::new(&query_json_path)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&query_json_path);
+                    println!(
+                        "[gcard-plan] query={}, selected_index={:?}, selected_score={:?}, estimate={:.6}",
+                        query_name, index_of_min_es, score_of_min_es, cardinality_value
+                    );
+                    if let Some(graph) = &min_es_abstract_graph {
+                        print!("{}", graph.describe_plan());
+                    } else {
+                        println!("  plan: <none>");
+                    }
+                }
                 let estimate_elapsed = estimate_start.elapsed();
                 let is_highest = score_of_min_es.map(|s| s == max_score).unwrap_or(false);
                 let display_index = if is_highest { Some(1) } else { index_of_min_es };

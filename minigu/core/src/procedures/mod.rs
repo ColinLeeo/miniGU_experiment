@@ -11,9 +11,11 @@ mod mutate_graph;
 mod show_graph;
 mod show_procedures;
 
+pub(crate) use gcard_query::create_catalog::add_functional_path_aliases_for_existing_catalog;
 pub(crate) use gcard_query::flat_graph::FlatGraph;
 pub(crate) use gcard_query::load_statistic;
 pub(crate) use gcard_query::update_log::new_log_arc as new_gcard_update_log;
+pub(crate) use gcard_query::utils::{edge_cardinalities_from_schema, get_edges_from_catalog};
 pub(crate) use import_graph::import;
 use minigu_context::procedure::Procedure;
 
