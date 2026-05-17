@@ -13,6 +13,7 @@ mod show_procedures;
 
 pub(crate) use gcard_query::flat_graph::FlatGraph;
 pub(crate) use gcard_query::load_statistic;
+pub(crate) use gcard_query::{set_session_guc, unset_session_guc};
 pub(crate) use gcard_query::update_log::new_log_arc as new_gcard_update_log;
 pub(crate) use import_graph::import;
 use minigu_context::procedure::Procedure;

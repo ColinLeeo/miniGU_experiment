@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::utils::StarStatKey;
+use crate::procedures::gcard_query::{functional_refine_enabled, max_bucket_enabled};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeCardinality {
@@ -147,7 +148,16 @@ impl CompressedDegreeSeq {
             CompressedDegreeSeq::BucketMax {
                 counts,
                 bucket_max_values,
-            } => Self::bucket_values_to_pcf(counts, bucket_max_values),
+            } => {
+                if max_bucket_enabled() {
+                    Self::bucket_values_to_pcf(counts, bucket_max_values)
+                } else {
+                    let fallback_values = (0..counts.len())
+                        .map(|i| 2u64.saturating_pow(i as u32))
+                        .collect::<Vec<_>>();
+                    Self::bucket_values_to_pcf(counts, &fallback_values)
+                }
+            }
         }
     }
 
@@ -275,19 +285,22 @@ impl DegreeSeqGraphCompressed {
         target_node: &str,
     ) -> PiecewiseConstantFunction {
         // 这里会忽略 target_node 大小写，减少上层调用时的大小写耦合。
-        let (path, target_node) = self
-            .path_aliases
-            .get(path)
-            .map(|alias| {
-                let mapped_target = alias
-                    .endpoint_map
-                    .iter()
-                    .find(|(alias_label, _)| alias_label.eq_ignore_ascii_case(target_node))
-                    .map(|(_, source_label)| source_label.as_str())
-                    .unwrap_or(target_node);
-                (&alias.source, mapped_target)
-            })
-            .unwrap_or((path, target_node));
+        let (path, target_node) = if functional_refine_enabled() {
+            self.path_aliases
+                .get(path)
+                .map(|alias| {
+                    let mapped_target = alias
+                        .endpoint_map
+                        .iter()
+                        .find(|(alias_label, _)| alias_label.eq_ignore_ascii_case(target_node))
+                        .map(|(_, source_label)| source_label.as_str())
+                        .unwrap_or(target_node);
+                    (&alias.source, mapped_target)
+                })
+                .unwrap_or((path, target_node))
+        } else {
+            (path, target_node)
+        };
 
         if let Some(endpoints) = self.edge_set_to_endpoints.get(path) {
             endpoints
@@ -303,6 +316,10 @@ impl DegreeSeqGraphCompressed {
     pub fn path_has_endpoint_pair(&self, path: &AltKey, src_label: &str, dst_label: &str) -> bool {
         if Self::endpoint_pair_exists(self.edge_set_to_endpoints.get(path), src_label, dst_label) {
             return true;
+        }
+
+        if !functional_refine_enabled() {
+            return false;
         }
 
         let Some(alias) = self.path_aliases.get(path) else {
@@ -323,6 +340,9 @@ impl DegreeSeqGraphCompressed {
         src_label: &str,
         dst_label: &str,
     ) -> Option<(String, String)> {
+        if !functional_refine_enabled() {
+            return None;
+        }
         let alias = self.path_aliases.get(path)?;
         let src_label = self.map_alias_endpoint(alias, src_label);
         let dst_label = self.map_alias_endpoint(alias, dst_label);

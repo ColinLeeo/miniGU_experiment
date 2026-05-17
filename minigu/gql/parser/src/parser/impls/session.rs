@@ -1,7 +1,9 @@
 use winnow::combinator::{alt, dispatch, fail, opt, peek, preceded};
 use winnow::{ModalResult, Parser};
 
-use super::lexical::{character_string_literal, general_parameter_reference};
+use super::lexical::{
+    boolean_literal, character_string_literal, general_parameter_reference, identifier,
+};
 use super::object_expr::graph_expression;
 use super::object_ref::schema_reference;
 use crate::ast::*;
@@ -16,6 +18,9 @@ pub fn session_set_command(input: &mut TokenStream) -> ModalResult<Spanned<Sessi
         dispatch! {peek(any);
             TokenKind::Schema => session_set_schema_clause.map(SessionSet::Schema),
             TokenKind::Time => session_set_time_zone_clause.map(SessionSet::TimeZone),
+            TokenKind::RegularIdentifier(name) if name.eq_ignore_ascii_case("guc") => {
+                session_set_guc_clause.map(SessionSet::Guc)
+            },
             TokenKind::Binding | TokenKind::Table | TokenKind::Value => session_set_parameter_clause.map(SessionSet::Parameter),
             TokenKind::Property | TokenKind::Graph => alt(
                 (session_set_graph_clause.map(SessionSet::Graph), session_set_parameter_clause.map(SessionSet::Parameter)),
@@ -51,12 +56,54 @@ pub fn session_set_parameter_clause(
     fail(input)
 }
 
+fn guc_keyword(input: &mut TokenStream) -> ModalResult<Spanned<Ident>> {
+    let ident = identifier.parse_next(input)?;
+    if ident.value().eq_ignore_ascii_case("guc") {
+        Ok(ident)
+    } else {
+        fail.parse_next(input)
+    }
+}
+
+fn unset_keyword(input: &mut TokenStream) -> ModalResult<Spanned<Ident>> {
+    let ident = identifier.parse_next(input)?;
+    if ident.value().eq_ignore_ascii_case("unset") {
+        Ok(ident)
+    } else {
+        fail.parse_next(input)
+    }
+}
+
+pub fn session_set_guc_clause(input: &mut TokenStream) -> ModalResult<Spanned<SessionSetGuc>> {
+    preceded(
+        guc_keyword,
+        (identifier, boolean_literal).map(|(name, value)| SessionSetGuc { name, value }),
+    )
+    .spanned()
+    .parse_next(input)
+}
+
 pub fn session_reset_command(input: &mut TokenStream) -> ModalResult<Spanned<SessionReset>> {
     preceded(
         (TokenKind::Session, TokenKind::Reset),
         opt(session_reset_arguments),
     )
     .map(SessionReset)
+    .spanned()
+    .parse_next(input)
+}
+
+pub fn session_unset_command(input: &mut TokenStream) -> ModalResult<Spanned<SessionReset>> {
+    preceded(
+        (TokenKind::Session, unset_keyword),
+        preceded(
+            guc_keyword,
+            identifier.map(|name| {
+                let span = name.span();
+                SessionReset(Some(Spanned(SessionResetArgs::Guc(name), span)))
+            }),
+        ),
+    )
     .spanned()
     .parse_next(input)
 }
@@ -123,6 +170,15 @@ mod tests {
     }
 
     #[test]
+    fn test_session_set_command_guc() {
+        let parsed = parse!(
+            session_set_command,
+            "session set guc functional_refine true"
+        );
+        assert_yaml_snapshot!(parsed);
+    }
+
+    #[test]
     fn test_session_reset_command_1() {
         let parsed = parse!(session_reset_command, "session reset");
         assert_yaml_snapshot!(parsed);
@@ -155,6 +211,12 @@ mod tests {
     #[test]
     fn test_session_reset_command_6() {
         let parsed = parse!(session_reset_command, "session reset parameter $abc");
+        assert_yaml_snapshot!(parsed);
+    }
+
+    #[test]
+    fn test_session_unset_command_guc() {
+        let parsed = parse!(session_unset_command, "session unset guc functional_refine");
         assert_yaml_snapshot!(parsed);
     }
 

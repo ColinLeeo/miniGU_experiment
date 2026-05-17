@@ -2,7 +2,9 @@ use winnow::combinator::{alt, dispatch, empty, fail, opt, peek, repeat};
 use winnow::{ModalResult, Parser};
 
 use super::procedure_spec::procedure_specification;
-use super::session::{session_close_command, session_reset_command, session_set_command};
+use super::session::{
+    session_close_command, session_reset_command, session_set_command, session_unset_command,
+};
 use super::transaction::start_transaction_command;
 use crate::ast::{EndTransaction, Program, ProgramActivity, SessionActivity, TransactionActivity};
 use crate::imports::{Box, Vec};
@@ -48,10 +50,16 @@ pub fn session_activity(input: &mut TokenStream) -> ModalResult<Spanned<SessionA
     dispatch! {peek((any, any));
         (TokenKind::Session, TokenKind::Set) => (
             repeat(1.., session_set_command),
-            repeat(0.., session_reset_command),
+            repeat(0.., alt((session_reset_command, session_unset_command))),
         )
             .map(|(set, reset)| SessionActivity { set, reset }),
         (TokenKind::Session, TokenKind::Reset) => repeat(1.., session_reset_command)
+            .map(|reset| SessionActivity {
+                set: Vec::new(),
+                reset,
+            }),
+        (TokenKind::Session, TokenKind::RegularIdentifier(name))
+            if name.eq_ignore_ascii_case("unset") => repeat(1.., session_unset_command)
             .map(|reset| SessionActivity {
                 set: Vec::new(),
                 reset,

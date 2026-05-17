@@ -1,7 +1,8 @@
 //! AST definitions for *session management*.
 
 use super::{
-    GraphExpr, Ident, SchemaRef, StringLiteral, TypedGraphInitializer, TypedValueInitializer,
+    BooleanLiteral, GraphExpr, Ident, SchemaRef, StringLiteral, TypedGraphInitializer,
+    TypedValueInitializer,
 };
 use crate::macros::base;
 use crate::span::{OptSpanned, Spanned};
@@ -11,7 +12,14 @@ pub enum SessionSet {
     Schema(Spanned<SchemaRef>),
     Graph(Spanned<GraphExpr>),
     TimeZone(Spanned<StringLiteral>),
+    Guc(Spanned<SessionSetGuc>),
     Parameter(Spanned<SessionSetParameter>),
+}
+
+#[apply(base)]
+pub struct SessionSetGuc {
+    pub name: Spanned<Ident>,
+    pub value: Spanned<BooleanLiteral>,
 }
 
 #[apply(base)]
@@ -37,5 +45,6 @@ pub enum SessionResetArgs {
     Schema,
     Graph,
     TimeZone,
+    Guc(Spanned<Ident>),
     Parameter(Spanned<Ident>),
 }

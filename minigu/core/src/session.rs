@@ -21,7 +21,7 @@ use minigu_planner::plan::PlanData;
 
 use crate::error::{Error, Result};
 use crate::metrics::QueryMetrics;
-use crate::procedures::import;
+use crate::procedures::{import, set_session_guc, unset_session_guc};
 use crate::result::QueryResult;
 
 pub struct Session {
@@ -105,6 +105,11 @@ impl Session {
                         return not_implemented("not allowed there", None);
                     }
                 },
+                SessionSet::Guc(sp_guc) => {
+                    let guc = sp_guc.value();
+                    let value = matches!(guc.value.value(), gql_parser::ast::BooleanLiteral::True);
+                    set_session_guc(guc.name.value().as_str(), value)?;
+                }
                 _ => {
                     return not_implemented("not implemented ", None);
                 }
@@ -120,6 +125,9 @@ impl Session {
                     }
                     SessionResetArgs::Graph => {
                         self.context.reset_current_graph();
+                    }
+                    SessionResetArgs::Guc(name) => {
+                        unset_session_guc(name.value().as_str())?;
                     }
                     _ => {
                         return not_implemented("not allowed there", None);

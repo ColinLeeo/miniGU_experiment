@@ -26,6 +26,7 @@ use crate::procedures::gcard_query::{
     BUILD_ABSTRACT_EDGE_NANOS, BUILD_CYCLE_CHECK_NANOS, BUILD_PCF_LOOKUP_NANOS,
     BUILD_PIVOT_PATH_NANOS, BUILD_SCORE_TREE_NANOS, GCARD_MAX_STAR_DEGREE_OVERRIDE,
     GCARD_MAX_STAR_LENGTH_OVERRIDE, GCARD_STAR_CONFIG_UNSET, PredicateApplyType,
+    functional_refine_enabled,
 };
 
 #[derive(Debug, Clone)]
@@ -1749,6 +1750,9 @@ impl QueryGraph {
         cut_edge_idx: usize,
         degree_seq_graph: &DegreeSeqGraphCompressed,
     ) -> bool {
+        if !functional_refine_enabled() {
+            return false;
+        }
         if cut_edge_idx == 0 || cut_edge_idx >= path.edges.len() {
             return false;
         }
@@ -2235,6 +2239,9 @@ impl QueryGraph {
         abstract_edge: &AbstractEdge,
         degree_seq_graph: &DegreeSeqGraphCompressed,
     ) -> FunctionalDirection {
+        if !functional_refine_enabled() {
+            return FunctionalDirection::None;
+        }
         if abstract_edge.original_edge_ids.is_empty()
             || abstract_edge.path_vertices.len() != abstract_edge.original_edge_ids.len() + 1
         {

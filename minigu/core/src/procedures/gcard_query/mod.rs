@@ -50,6 +50,8 @@ use crate::procedures::gcard_query::query_graph::QueryGraph;
 use crate::procedures::gcard_query::types::{DecompositionDef, Query};
 
 static GCARD_VERBOSE: AtomicBool = AtomicBool::new(false);
+static GCARD_FUNCTIONAL_REFINE: AtomicBool = AtomicBool::new(true);
+static GCARD_MAX_BUCKET: AtomicBool = AtomicBool::new(true);
 pub(crate) const GCARD_STAR_CONFIG_UNSET: usize = usize::MAX;
 pub(crate) static GCARD_MAX_STAR_LENGTH_OVERRIDE: AtomicUsize =
     AtomicUsize::new(GCARD_STAR_CONFIG_UNSET);
@@ -110,6 +112,44 @@ pub enum PredicateApplyType {
     INNER,
     SCALE,
     IGNORE,
+}
+
+pub(crate) fn functional_refine_enabled() -> bool {
+    GCARD_FUNCTIONAL_REFINE.load(Ordering::Relaxed)
+}
+
+pub(crate) fn max_bucket_enabled() -> bool {
+    GCARD_MAX_BUCKET.load(Ordering::Relaxed)
+}
+
+pub fn set_session_guc(name: &str, value: bool) -> std::io::Result<()> {
+    if name.eq_ignore_ascii_case("functional_refine") {
+        GCARD_FUNCTIONAL_REFINE.store(value, Ordering::Relaxed);
+        return Ok(());
+    }
+    if name.eq_ignore_ascii_case("max_bucket") {
+        GCARD_MAX_BUCKET.store(value, Ordering::Relaxed);
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("unknown session GUC: {}", name),
+    ))
+}
+
+pub fn unset_session_guc(name: &str) -> std::io::Result<()> {
+    if name.eq_ignore_ascii_case("functional_refine") {
+        GCARD_FUNCTIONAL_REFINE.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+    if name.eq_ignore_ascii_case("max_bucket") {
+        GCARD_MAX_BUCKET.store(true, Ordering::Relaxed);
+        return Ok(());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("unknown session GUC: {}", name),
+    ))
 }
 
 pub fn build_procedure() -> Procedure {
