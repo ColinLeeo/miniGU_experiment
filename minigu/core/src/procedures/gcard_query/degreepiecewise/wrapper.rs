@@ -4,32 +4,105 @@
 //! 供抽象图规约逻辑使用。
 
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::super::error::GCardResult;
 use super::function::{PiecewiseConstantFunction, pointwise_function_min, pointwise_function_mult};
 
 pub type Pcf = PiecewiseConstantFunction;
 
+static ALPHA_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ALPHA_REFS_CALLS: AtomicUsize = AtomicUsize::new(0);
+static BETA_LEFT_CALLS: AtomicUsize = AtomicUsize::new(0);
+static BETA_RIGHT_CALLS: AtomicUsize = AtomicUsize::new(0);
+static BETA_CALLS: AtomicUsize = AtomicUsize::new(0);
+static EFFECTIVE_ALPHA_REFS_CALLS: AtomicUsize = AtomicUsize::new(0);
+static EFFECTIVE_BETA_RIGHT_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AlphaBetaCallCounts {
+    pub alpha: usize,
+    pub alpha_refs: usize,
+    pub beta_left: usize,
+    pub beta_right: usize,
+    pub beta: usize,
+    pub effective_alpha_refs: usize,
+    pub effective_beta_right: usize,
+}
+
+impl AlphaBetaCallCounts {
+    pub fn total_alpha(&self) -> usize {
+        self.alpha + self.alpha_refs
+    }
+
+    pub fn total_beta(&self) -> usize {
+        self.beta_left + self.beta_right + self.beta
+    }
+
+    pub fn total_effective_alpha(&self) -> usize {
+        self.effective_alpha_refs
+    }
+
+    pub fn total_effective_beta(&self) -> usize {
+        self.effective_beta_right
+    }
+}
+
+pub fn reset_alpha_beta_call_counts() {
+    ALPHA_CALLS.store(0, Ordering::Relaxed);
+    ALPHA_REFS_CALLS.store(0, Ordering::Relaxed);
+    BETA_LEFT_CALLS.store(0, Ordering::Relaxed);
+    BETA_RIGHT_CALLS.store(0, Ordering::Relaxed);
+    BETA_CALLS.store(0, Ordering::Relaxed);
+    EFFECTIVE_ALPHA_REFS_CALLS.store(0, Ordering::Relaxed);
+    EFFECTIVE_BETA_RIGHT_CALLS.store(0, Ordering::Relaxed);
+}
+
+pub fn get_alpha_beta_call_counts() -> AlphaBetaCallCounts {
+    AlphaBetaCallCounts {
+        alpha: ALPHA_CALLS.load(Ordering::Relaxed),
+        alpha_refs: ALPHA_REFS_CALLS.load(Ordering::Relaxed),
+        beta_left: BETA_LEFT_CALLS.load(Ordering::Relaxed),
+        beta_right: BETA_RIGHT_CALLS.load(Ordering::Relaxed),
+        beta: BETA_CALLS.load(Ordering::Relaxed),
+        effective_alpha_refs: EFFECTIVE_ALPHA_REFS_CALLS.load(Ordering::Relaxed),
+        effective_beta_right: EFFECTIVE_BETA_RIGHT_CALLS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn record_effective_alpha_refs() {
+    EFFECTIVE_ALPHA_REFS_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_effective_beta_right() {
+    EFFECTIVE_BETA_RIGHT_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn alpha(pieces: &[Pcf]) -> Pcf {
+    ALPHA_CALLS.fetch_add(1, Ordering::Relaxed);
     // 多个独立贡献做逐点乘法。
     pointwise_function_mult(pieces)
 }
 
 pub fn alpha_refs(pieces: &[&Pcf]) -> Pcf {
+    ALPHA_REFS_CALLS.fetch_add(1, Ordering::Relaxed);
     use super::function::pointwise_function_mult_refs;
     pointwise_function_mult_refs(pieces)
 }
 
 pub fn beta_left(rx: &Pcf, ry: &Pcf, sy: &Pcf) -> Pcf {
+    BETA_LEFT_CALLS.fetch_add(1, Ordering::Relaxed);
     // 在一条连接边上，把右侧统计投影回左侧。
     calculate_non_joining_column_frequency(sy, ry, rx)
 }
 
 pub fn beta_right(rx: &Pcf, sx: &Pcf, sy: &Pcf) -> Pcf {
+    BETA_RIGHT_CALLS.fetch_add(1, Ordering::Relaxed);
     calculate_non_joining_column_frequency(rx, sx, sy)
 }
 
 pub fn beta(rx: &Pcf, ry: &Pcf, sy: &Pcf, sz: &Pcf) -> (Pcf, Pcf) {
+    BETA_CALLS.fetch_add(1, Ordering::Relaxed);
     (beta_left(rx, ry, sy), beta_right(ry, sy, sz))
 }
 

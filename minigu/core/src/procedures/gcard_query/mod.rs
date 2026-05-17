@@ -43,6 +43,9 @@ use minigu_execution::error::ExecutionError;
 
 use crate::procedures::gcard_query::abs_graph::AbstractGraph;
 use crate::procedures::gcard_query::catalog::DegreeSeqGraphCompressed;
+use crate::procedures::gcard_query::degreepiecewise::{
+    AlphaBetaCallCounts, get_alpha_beta_call_counts, reset_alpha_beta_call_counts,
+};
 use crate::procedures::gcard_query::query_graph::QueryGraph;
 use crate::procedures::gcard_query::types::{DecompositionDef, Query};
 
@@ -86,6 +89,7 @@ impl TryFrom<u8> for PredicateApplyType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(PredicateApplyType::INNER),
+            1 => Ok(PredicateApplyType::SCALE),
             2 => Ok(PredicateApplyType::IGNORE),
             _ => Err("invalid PredicateApplyType value"),
         }
@@ -96,6 +100,7 @@ impl fmt::Display for PredicateApplyType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PredicateApplyType::INNER => write!(f, "INNER"),
+            PredicateApplyType::SCALE => write!(f, "SCALE"),
             PredicateApplyType::IGNORE => write!(f, "IGNORE"),
         }
     }
@@ -103,6 +108,7 @@ impl fmt::Display for PredicateApplyType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum PredicateApplyType {
     INNER,
+    SCALE,
     IGNORE,
 }
 
@@ -273,6 +279,12 @@ pub fn build_procedure() -> Procedure {
                 let mut max_score: u64 = 0;
                 #[allow(dead_code)]
                 let mut min_es_abstract_graph: Option<AbstractGraph> = None;
+                let plan_trace_log_path = std::env::var_os("GCARD_PLAN_TRACE_LOG");
+                let print_plan =
+                    std::env::var_os("GCARD_PRINT_PLAN").is_some() || plan_trace_log_path.is_some();
+                let print_alpha_beta =
+                    print_plan || std::env::var_os("GCARD_PRINT_ALPHA_BETA").is_some();
+                let mut min_es_alpha_beta_counts: Option<AlphaBetaCallCounts> = None;
                 for (idx, (mut abs, score)) in abstract_graphs_with_scores.into_iter().enumerate() {
                     if score > max_score {
                         max_score = score;
@@ -288,12 +300,20 @@ pub fn build_procedure() -> Procedure {
                             println!("dst : {}", edge.dst_pcf);
                         }
                     }
+                    if print_alpha_beta {
+                        reset_alpha_beta_call_counts();
+                    }
                     let mut es = abs.get_es().map_err(|e| {
                         ExecutionError::Custom(Box::new(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("GCard get_es: {}", e),
                         )))
                     })?;
+                    let alpha_beta_counts = if print_alpha_beta {
+                        Some(get_alpha_beta_call_counts())
+                    } else {
+                        None
+                    };
 
                     if GCARD_VERBOSE.load(Ordering::Relaxed) {
                         println!("es: {}", es);
@@ -304,6 +324,7 @@ pub fn build_procedure() -> Procedure {
                             score_of_min_es = Some(score);
                             index_of_min_es = Some(idx + 1);
                             min_es_abstract_graph = Some(abs_for_debug);
+                            min_es_alpha_beta_counts = alpha_beta_counts;
                         }
                     }
                 }
@@ -312,6 +333,70 @@ pub fn build_procedure() -> Procedure {
                 } else {
                     0.0
                 };
+                if print_plan {
+                    let query_name = Path::new(query_json_path.as_str())
+                        .file_stem()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    eprintln!(
+                        "[gcard-plan] query={}, selected_index={:?}, selected_score={:?}, estimate={}",
+                        query_name, index_of_min_es, score_of_min_es, cardinality_value
+                    );
+                    if let Some(abs) = &min_es_abstract_graph {
+                        eprint!("{}", abs.describe_plan());
+                    }
+                    if let Some(counts) = min_es_alpha_beta_counts {
+                        eprintln!(
+                            "[gcard-alpha-beta] best_plan raw_alpha={}, raw_alpha_refs={}, raw_alpha_total={}, raw_beta_left={}, raw_beta_right={}, raw_beta={}, raw_beta_total={}, effective_alpha_total={}, effective_beta_total={}",
+                            counts.alpha,
+                            counts.alpha_refs,
+                            counts.total_alpha(),
+                            counts.beta_left,
+                            counts.beta_right,
+                            counts.beta,
+                            counts.total_beta(),
+                            counts.total_effective_alpha(),
+                            counts.total_effective_beta()
+                        );
+                    }
+                    if let (Some(abs), Some(log_path)) = (
+                        &min_es_abstract_graph,
+                        plan_trace_log_path.clone(),
+                    ) {
+                        match std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&log_path)
+                        {
+                            Ok(mut file) => {
+                                use std::io::Write;
+                                let _ = writeln!(
+                                    file,
+                                    "==== query={} selected_index={:?} selected_score={:?} estimate={} ====",
+                                    query_name, index_of_min_es, score_of_min_es, cardinality_value
+                                );
+                                let _ = writeln!(file, "{}", abs.describe_reduction_trace());
+                                if let Some(counts) = min_es_alpha_beta_counts {
+                                    let _ = writeln!(
+                                        file,
+                                        "counts raw_alpha_total={} raw_beta_total={} effective_alpha_total={} effective_beta_total={}\n",
+                                        counts.total_alpha(),
+                                        counts.total_beta(),
+                                        counts.total_effective_alpha(),
+                                        counts.total_effective_beta()
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                eprintln!(
+                                    "[gcard-plan-trace] failed to open {}: {}",
+                                    Path::new(&log_path).display(),
+                                    err
+                                );
+                            }
+                        }
+                    }
+                }
                 let estimate_elapsed = estimate_start.elapsed();
                 let is_highest = score_of_min_es.map(|s| s == max_score).unwrap_or(false);
                 let display_index = if is_highest { Some(1) } else { index_of_min_es };

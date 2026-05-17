@@ -220,6 +220,30 @@ impl PiecewiseConstantFunction {
         }
     }
 
+    pub fn scale_by_ratio(&self, ratio: f64) -> Self {
+        // 保留完整横轴区间，只把每段 degree 常数整体乘以 `ratio`。
+        if ratio < 0.0 || ratio > 1.0 || self.constants.is_empty() {
+            return Self::empty();
+        }
+
+        let constants: Vec<f64> = self.constants.iter().map(|c| c * ratio).collect();
+        let right_interval_edges = self.right_interval_edges.clone();
+        let mut cumulative_rows = Vec::with_capacity(constants.len());
+        let mut cur_row = 0.0;
+        let mut cur_left = 0.0;
+        for (constant, cur_right) in constants.iter().zip(right_interval_edges.iter()) {
+            cur_row += constant * (cur_right - cur_left);
+            cumulative_rows.push(cur_row);
+            cur_left = *cur_right;
+        }
+
+        Self {
+            constants,
+            right_interval_edges,
+            cumulative_rows,
+        }
+    }
+
     pub fn calculate_value_at_point(&self, x: f64) -> f64 {
         // 在横轴位置 x 上查该段常数值。
         let segment = bisect_left_double(&self.right_interval_edges, x)

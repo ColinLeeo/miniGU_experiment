@@ -2,10 +2,52 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use minigu_common::types::{EdgeId, VertexId};
 
-use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
+use crate::procedures::gcard_query::degreepiecewise::{
+    Pcf, alpha_refs, beta_right, record_effective_alpha_refs, record_effective_beta_right,
+};
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
-use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
+use crate::procedures::gcard_query::types::{AbstractEdge, FunctionalDirection, QueryVertex};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContributionKind {
+    Empty,
+    FunctionalOnly,
+    NonFunctional,
+}
+
+impl ContributionKind {
+    fn is_non_functional(self) -> bool {
+        matches!(self, Self::NonFunctional)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Empty => "empty",
+            Self::FunctionalOnly => "functional/n-1",
+            Self::NonFunctional => "many-to-many/general",
+        }
+    }
+
+    fn combine<I>(kinds: I) -> Self
+    where
+        I: IntoIterator<Item = Self>,
+    {
+        let mut saw_functional = false;
+        for kind in kinds {
+            match kind {
+                Self::NonFunctional => return Self::NonFunctional,
+                Self::FunctionalOnly => saw_functional = true,
+                Self::Empty => {}
+            }
+        }
+        if saw_functional {
+            Self::FunctionalOnly
+        } else {
+            Self::Empty
+        }
+    }
+}
 
 impl Endpoints for AbstractEdge {
     fn src(&self) -> VertexId {
@@ -103,6 +145,65 @@ impl GraphSkeleton<AbstractEdge> {
         Some(best_root)
     }
 
+    pub fn describe_plan(&self) -> String {
+        let mut out = String::new();
+        let root = self.pick_root();
+        out.push_str(&format!("  root={:?}\n", root));
+
+        let mut edge_ids: Vec<_> = self.edges.keys().copied().collect();
+        edge_ids.sort_unstable();
+        out.push_str("  abstract_edges:\n");
+        for edge_id in edge_ids {
+            if let Some(edge) = self.edges.get(&edge_id) {
+                let src_label = self
+                    .vertices
+                    .get(&edge.src)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                let dst_label = self
+                    .vertices
+                    .get(&edge.dst)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                out.push_str(&format!(
+                    "    ae{}: {}({}) -> {}({}), originals={:?}, path_vertices={:?}, path={}\n",
+                    edge_id,
+                    edge.src,
+                    src_label,
+                    edge.dst,
+                    dst_label,
+                    edge.original_edge_ids,
+                    edge.path_vertices,
+                    edge.path_str,
+                ));
+            }
+        }
+
+        if !self.local_pcfs.is_empty() {
+            let mut vertex_ids: Vec<_> = self.local_pcfs.keys().copied().collect();
+            vertex_ids.sort_unstable();
+            out.push_str("  local_star_pcfs:\n");
+            for vertex_id in vertex_ids {
+                let label = self
+                    .vertices
+                    .get(&vertex_id)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                let count = self
+                    .local_pcfs
+                    .get(&vertex_id)
+                    .map(|v| v.len())
+                    .unwrap_or(0);
+                out.push_str(&format!(
+                    "    {}({}): {} local factors\n",
+                    vertex_id, label, count
+                ));
+            }
+        }
+
+        out
+    }
+
     fn get_parent_edge(
         &self,
         v: VertexId,
@@ -158,6 +259,233 @@ impl GraphSkeleton<AbstractEdge> {
         } else {
             Pcf::empty()
         }
+    }
+
+    fn edge_is_functional_from_to(&self, edge_id: EdgeId, from: VertexId, to: VertexId) -> bool {
+        let Some(edge) = self.edges.get(&edge_id) else {
+            return false;
+        };
+        if edge.src == from && edge.dst == to {
+            edge.functional.is_functional_src_to_dst()
+        } else if edge.dst == from && edge.src == to {
+            edge.functional.is_functional_dst_to_src()
+        } else {
+            false
+        }
+    }
+
+    fn edge_contribution_kind_from_to(
+        &self,
+        edge_id: EdgeId,
+        from: VertexId,
+        to: VertexId,
+    ) -> ContributionKind {
+        let Some(edge) = self.edges.get(&edge_id) else {
+            return ContributionKind::Empty;
+        };
+        if edge.functional != FunctionalDirection::None
+            || self.edge_is_functional_from_to(edge_id, from, to)
+        {
+            ContributionKind::FunctionalOnly
+        } else {
+            ContributionKind::NonFunctional
+        }
+    }
+
+    fn vertex_label(&self, vertex_id: VertexId) -> String {
+        self.vertices
+            .get(&vertex_id)
+            .map(|v| format!("{}({})", vertex_id, v.label))
+            .unwrap_or_else(|| vertex_id.to_string())
+    }
+
+    fn edge_ref(&self, edge_id: EdgeId) -> String {
+        if let Some(edge) = self.edges.get(&edge_id) {
+            format!(
+                "ae{}:{}->{}",
+                edge_id,
+                self.vertex_label(edge.src),
+                self.vertex_label(edge.dst)
+            )
+        } else {
+            format!("ae{}", edge_id)
+        }
+    }
+
+    pub fn describe_reduction_trace(&self) -> String {
+        let mut out = String::new();
+        let Some(root) = self.pick_root() else {
+            out.push_str("root=<none>\n");
+            return out;
+        };
+        out.push_str(&format!("root={}\n", self.vertex_label(root)));
+        out.push_str("abstract_edges:\n");
+        let mut edge_ids: Vec<_> = self.edges.keys().copied().collect();
+        edge_ids.sort_unstable();
+        for edge_id in edge_ids {
+            if let Some(edge) = self.edges.get(&edge_id) {
+                let kind = if edge.functional == FunctionalDirection::None {
+                    "many-to-many/general"
+                } else {
+                    "functional/n-1 contracted"
+                };
+                out.push_str(&format!(
+                    "  {} kind={} functional={:?} originals={:?} path_vertices={:?} path={}\n",
+                    self.edge_ref(edge_id),
+                    kind,
+                    edge.functional,
+                    edge.original_edge_ids,
+                    edge.path_vertices,
+                    edge.path_str
+                ));
+            }
+        }
+
+        let generations = self.get_topological_generations(root);
+        let max_gen = generations.values().copied().max().unwrap_or(0);
+        let mut gen_to_vertices: Vec<Vec<VertexId>> = vec![Vec::new(); max_gen + 1];
+        for (&v, &g) in &generations {
+            gen_to_vertices[g].push(v);
+        }
+
+        let mut parent_map: HashMap<VertexId, (VertexId, EdgeId)> = HashMap::new();
+        let mut children_map: HashMap<VertexId, Vec<(VertexId, EdgeId)>> = HashMap::new();
+        for (&edge_id, edge) in &self.edges {
+            let src_gen = generations.get(&edge.src).copied();
+            let dst_gen = generations.get(&edge.dst).copied();
+            if let (Some(sg), Some(dg)) = (src_gen, dst_gen) {
+                if sg + 1 == dg {
+                    parent_map.insert(edge.dst, (edge.src, edge_id));
+                    children_map.entry(edge.src).or_default().push((edge.dst, edge_id));
+                } else if dg + 1 == sg {
+                    parent_map.insert(edge.src, (edge.dst, edge_id));
+                    children_map.entry(edge.dst).or_default().push((edge.src, edge_id));
+                }
+            }
+        }
+
+        out.push_str("reduction:\n");
+        let mut child_kinds: HashMap<VertexId, ContributionKind> = HashMap::new();
+        let mut child_descs: HashMap<VertexId, String> = HashMap::new();
+        for cur_gen in (0..=max_gen).rev() {
+            for &v in &gen_to_vertices[cur_gen] {
+                let local_kind = if self.local_pcfs.contains_key(&v) {
+                    ContributionKind::NonFunctional
+                } else {
+                    ContributionKind::Empty
+                };
+                let local_desc = if self.local_pcfs.contains_key(&v) {
+                    Some("local-star/predicate".to_string())
+                } else {
+                    None
+                };
+
+                let mut input_kinds = Vec::new();
+                let mut input_descs = Vec::new();
+                if let Some(children) = children_map.get(&v) {
+                    for (child_id, child_edge_id) in children {
+                        let kind = child_kinds
+                            .get(child_id)
+                            .copied()
+                            .unwrap_or_else(|| {
+                                self.edge_contribution_kind_from_to(*child_edge_id, v, *child_id)
+                            });
+                        let desc = child_descs
+                            .get(child_id)
+                            .cloned()
+                            .unwrap_or_else(|| self.edge_ref(*child_edge_id));
+                        input_kinds.push(kind);
+                        input_descs.push(desc);
+                    }
+                }
+                if let Some(desc) = local_desc {
+                    input_kinds.push(local_kind);
+                    input_descs.push(desc);
+                }
+
+                let combined_child_kind = ContributionKind::combine(input_kinds.iter().copied());
+                let non_functional_inputs =
+                    input_kinds.iter().filter(|kind| kind.is_non_functional()).count();
+
+                if !input_descs.is_empty() {
+                    let op = if non_functional_inputs >= 2 {
+                        "REAL alpha"
+                    } else {
+                        "skip-alpha functional/n-1 or unary"
+                    };
+                    out.push_str(&format!(
+                        "  at {} combine_children [{}] => {} ({})\n",
+                        self.vertex_label(v),
+                        input_descs.join(" + "),
+                        op,
+                        combined_child_kind.as_str()
+                    ));
+                }
+
+                if cur_gen == 0 {
+                    continue;
+                }
+
+                let Some(&(parent, parent_edge_id)) = parent_map.get(&v) else {
+                    continue;
+                };
+                let parent_edge_kind =
+                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v);
+
+                let projected_kind = if input_descs.is_empty() {
+                    parent_edge_kind
+                } else {
+                    if combined_child_kind.is_non_functional() {
+                        out.push_str(&format!(
+                            "  at {} project [{}] across {} to {} => REAL beta\n",
+                            self.vertex_label(v),
+                            input_descs.join(" + "),
+                            self.edge_ref(parent_edge_id),
+                            self.vertex_label(parent)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "  at {} project [{}] across {} to {} => skip-beta functional/n-1\n",
+                            self.vertex_label(v),
+                            input_descs.join(" + "),
+                            self.edge_ref(parent_edge_id),
+                            self.vertex_label(parent)
+                        ));
+                    }
+                    combined_child_kind
+                };
+
+                let parent_desc = self.edge_ref(parent_edge_id);
+                let result_kind = if input_descs.is_empty() {
+                    parent_edge_kind
+                } else {
+                    let real_alpha = projected_kind.is_non_functional()
+                        && parent_edge_kind.is_non_functional();
+                    out.push_str(&format!(
+                        "  at {} attach_parent [{}] + [{}] => {} ({})\n",
+                        self.vertex_label(v),
+                        input_descs.join(" + "),
+                        parent_desc,
+                        if real_alpha {
+                            "REAL alpha"
+                        } else {
+                            "skip-alpha functional/n-1"
+                        },
+                        ContributionKind::combine([projected_kind, parent_edge_kind]).as_str()
+                    ));
+                    ContributionKind::combine([projected_kind, parent_edge_kind])
+                };
+
+                child_kinds.insert(v, result_kind);
+                if input_descs.is_empty() {
+                    child_descs.insert(v, parent_desc);
+                } else {
+                    child_descs.insert(v, format!("{} + {}", input_descs.join(" + "), parent_desc));
+                }
+            }
+        }
+
+        out
     }
 
     fn multiply_local_and<'a, I>(&'a self, vertex_id: VertexId, pcfs: I) -> Pcf
@@ -231,6 +559,7 @@ impl GraphSkeleton<AbstractEdge> {
         }
 
         let mut child_vertex_pcf: HashMap<VertexId, Pcf> = HashMap::new();
+        let mut child_vertex_kind: HashMap<VertexId, ContributionKind> = HashMap::new();
 
         for cur_gen in (0..=max_gen).rev() {
             // 逆层序遍历：先把叶子规约完，再把信息逐层往根上传。
@@ -250,14 +579,40 @@ impl GraphSkeleton<AbstractEdge> {
                     Pcf::empty()
                 };
 
-                let result = if let Some(children) = children {
+                let (result, result_kind) = if let Some(children) = children {
                     let child_pcfs: Vec<Pcf> = children
                         .iter()
                         .filter_map(|(child_id, _)| child_vertex_pcf.get(child_id).cloned())
                         .collect();
+                    let child_kinds = children
+                        .iter()
+                        .map(|(child_id, _)| {
+                            child_vertex_kind
+                                .get(child_id)
+                                .copied()
+                                .unwrap_or(ContributionKind::Empty)
+                        })
+                        .collect::<Vec<_>>();
+                    let local_kind = if self.local_pcfs.contains_key(&v) {
+                        ContributionKind::NonFunctional
+                    } else {
+                        ContributionKind::Empty
+                    };
+                    let multiplied_kind = ContributionKind::combine(
+                        child_kinds.iter().copied().chain(std::iter::once(local_kind)),
+                    );
+                    let non_functional_child_count =
+                        child_kinds.iter().filter(|kind| kind.is_non_functional()).count()
+                            + usize::from(local_kind.is_non_functional());
+                    if non_functional_child_count >= 2 {
+                        record_effective_alpha_refs();
+                    }
                     let multiplied_child_pcf = self.multiply_local_and(v, child_pcfs.iter());
                     let projected = if cur_gen > 0 {
                         // 非根节点需要把“孩子方向的统计”投影回父边所处的坐标系。
+                        if multiplied_kind.is_non_functional() {
+                            record_effective_beta_right();
+                        }
                         beta_right(
                             &multiplied_child_pcf,
                             &vertex_to_parent_pcf,
@@ -268,35 +623,67 @@ impl GraphSkeleton<AbstractEdge> {
                     };
                     if cur_gen > 0 {
                         // 然后再把“来自孩子的贡献”和“本节点到父节点的边 PCF”乘起来。
+                        let parent_edge_kind = parent_opt
+                            .map(|&(parent, parent_edge_id)| {
+                                self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                            })
+                            .unwrap_or(ContributionKind::Empty);
+                        if usize::from(multiplied_kind.is_non_functional())
+                            + usize::from(parent_edge_kind.is_non_functional())
+                            >= 2
+                        {
+                            record_effective_alpha_refs();
+                        }
                         let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
-                        alpha_refs(&pcf_refs)
+                        (
+                            alpha_refs(&pcf_refs),
+                            ContributionKind::combine([multiplied_kind, parent_edge_kind]),
+                        )
                     } else {
-                        projected
+                        (projected, multiplied_kind)
                     }
                 } else {
                     if cur_gen > 0 {
                         if self.local_pcfs.contains_key(&v) {
                             let local_pcf = self.multiply_local_and(v, std::iter::empty());
+                            record_effective_beta_right();
                             let projected = beta_right(
                                 &local_pcf,
                                 &vertex_to_parent_pcf,
                                 &parent_to_vertex_pcf,
                             );
+                            let parent_edge_kind = parent_opt
+                                .map(|&(parent, parent_edge_id)| {
+                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                                })
+                                .unwrap_or(ContributionKind::Empty);
+                            if parent_edge_kind.is_non_functional() {
+                                record_effective_alpha_refs();
+                            }
                             let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
-                            alpha_refs(&pcf_refs)
+                            (alpha_refs(&pcf_refs), ContributionKind::NonFunctional)
                         } else {
                             // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边。
-                            parent_to_vertex_pcf
+                            let kind = parent_opt
+                                .map(|&(parent, parent_edge_id)| {
+                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                                })
+                                .unwrap_or(ContributionKind::Empty);
+                            (parent_to_vertex_pcf, kind)
                         }
                     } else if self.local_pcfs.contains_key(&v) {
-                        self.multiply_local_and(v, std::iter::empty())
+                        (
+                            self.multiply_local_and(v, std::iter::empty()),
+                            ContributionKind::NonFunctional,
+                        )
                     } else {
-                        Pcf::empty()
+                        (Pcf::empty(), ContributionKind::Empty)
                     }
                 };
 
                 if cur_gen > 0 {
                     child_vertex_pcf.insert(v, result);
+                    child_vertex_kind.insert(v, result_kind);
                 } else {
                     // 到根时，不再向上返回 PCF，而是直接把最终估算规模取出来。
                     return Ok(result.get_num_rows());
@@ -324,7 +711,7 @@ mod tests {
 
     use super::AbstractGraph;
     use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
-    use crate::procedures::gcard_query::types::{AbstractEdge, QueryVertex};
+    use crate::procedures::gcard_query::types::{AbstractEdge, FunctionalDirection, QueryVertex};
 
     fn vertex(id: u64, label: &str) -> QueryVertex {
         QueryVertex {
@@ -356,6 +743,7 @@ mod tests {
             dst,
             src_pcf: Arc::new(src_pcf),
             dst_pcf: Arc::new(dst_pcf),
+            functional: FunctionalDirection::None,
             predicates: Vec::new(),
             original_edge_ids: Vec::new(),
             path_vertices: vec![src, dst],

@@ -6,7 +6,7 @@ use minigu_common::types::{LabelId, VertexId};
 use minigu_storage::tp::MemTransaction;
 use rayon::prelude::*;
 
-use super::catalog::AltKey;
+use super::catalog::{AltKey, EdgeCardinality};
 use super::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::utils::{
     EdgeEndpoints, PathPattern, StarStatKey, build_undirected_adj,
@@ -972,6 +972,7 @@ mod tests {
                 EdgeEndpoints {
                     src_label: center.clone(),
                     dst_label: leaf_label.to_string(),
+                    cardinality: EdgeCardinality::ManyToMany,
                 },
             );
 

@@ -11,12 +11,22 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
+use crate::procedures::gcard_query::compression::{
+    decode_raw_u64s, decode_rle, decode_zstd, encode_raw_u64s, encode_zstd,
+};
 use crate::procedures::gcard_query::degreepiecewise::fast_compressor::{
     build_bounds, get_bucket_index,
 };
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 
 const BUCKET_BASE: u64 = 2;
+const COMPRESSED_MAGIC: &[u8; 4] = b"BSZ1";
+const COMPRESSED_ZSTD_MAGIC: &[u8; 4] = b"BSZ2";
+
+#[inline]
+fn bucket_upper_bound(bucket_id: u8) -> u64 {
+    BUCKET_BASE.saturating_pow(bucket_id as u32)
+}
 
 /// 前 8 bit 有效值 + 余量；bucket 作为 shift，余量 = value & ((1<<shift)-1)，shift 上限 56。
 #[inline]
@@ -91,9 +101,11 @@ impl BlockStatistic {
 
     pub fn recover_upper_bound_at_rank(&self, rank: usize) -> Option<u64> {
         // 用 bucket + prefix + 该桶共享的最大余量，恢复该位置的“上界值”。
+        // 公共 remainder 可能把某些 rank 推过本桶理论上界；更新逻辑会把这里
+        // 的结果当作当前值继续加减，所以必须截断在 bucket 上界内。
         let (b, p, r) = self.get_by_rank(rank)?;
         let shift = (b as usize).min(56);
-        Some(((p as u64) << shift) | r)
+        Some((((p as u64) << shift) | r).min(bucket_upper_bound(b)))
     }
 
     pub fn update_at_rank(&mut self, rank: usize, new_value: u64) {
@@ -147,27 +159,40 @@ impl BlockStatistic {
     }
 
     pub fn get_compressed_degree_seq(&self) -> GCardResult<Option<CompressedDegreeSeq>> {
-        // 再往上游一层时，不需要逐 rank 信息，只需要知道每个桶里有多少条目，
-        // 因此这里可以进一步退化成 `FastCompressor` 的 histogram 形式。
+        // Path statistics also use the per-bucket recovered maximum instead of
+        // the coarse `2^bucket` representative.  This keeps the histogram shape
+        // but can make each bucket's degree value tighter.
+        self.get_bucket_max_degree_seq()
+    }
+
+    pub fn get_bucket_max_degree_seq(&self) -> GCardResult<Option<CompressedDegreeSeq>> {
         if self.bucket_ids.is_empty() {
             return Ok(None);
         }
         let n_buckets = self.res_vec.len();
         let mut counts = vec![0u64; n_buckets];
-        for &b in &self.bucket_ids {
-            if (b as usize) < n_buckets {
-                counts[b as usize] += 1;
+        let mut bucket_max_values = vec![0u64; n_buckets];
+        for (rank, &b) in self.bucket_ids.iter().enumerate() {
+            let idx = b as usize;
+            if idx >= n_buckets {
+                continue;
             }
+            counts[idx] += 1;
+            let theoretical_upper = bucket_upper_bound(b);
+            let value = self
+                .recover_upper_bound_at_rank(rank)
+                .unwrap_or(0)
+                .min(theoretical_upper);
+            bucket_max_values[idx] = bucket_max_values[idx].max(value);
         }
-        Ok(Some(CompressedDegreeSeq::FastCompressor {
-            len: n_buckets,
-            base: BUCKET_BASE,
+        Ok(Some(CompressedDegreeSeq::BucketMax {
             counts,
+            bucket_max_values,
         }))
     }
 
     pub fn disk_size(&self) -> usize {
-        self.serialize().len()
+        self.serialize_compressed().len()
     }
 
     pub fn serialize(&self) -> Vec<u8> {
@@ -180,6 +205,32 @@ impl BlockStatistic {
         for &v in &self.res_vec {
             out.extend_from_slice(&v.to_le_bytes());
         }
+        out
+    }
+
+    pub fn serialize_compressed(&self) -> Vec<u8> {
+        let bucket_ids = encode_zstd(&self.bucket_ids);
+        let prefix = encode_zstd(&self.prefix);
+        let res_vec = encode_raw_u64s(&self.res_vec);
+
+        let mut out = Vec::with_capacity(
+            COMPRESSED_MAGIC.len()
+                + 8
+                + 8
+                + bucket_ids.len()
+                + 8
+                + prefix.len()
+                + 8
+                + res_vec.len(),
+        );
+        out.extend_from_slice(COMPRESSED_ZSTD_MAGIC);
+        out.extend_from_slice(&(self.bucket_ids.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(bucket_ids.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bucket_ids);
+        out.extend_from_slice(&(prefix.len() as u64).to_le_bytes());
+        out.extend_from_slice(&prefix);
+        out.extend_from_slice(&(res_vec.len() as u64).to_le_bytes());
+        out.extend_from_slice(&res_vec);
         out
     }
 
@@ -221,13 +272,90 @@ impl BlockStatistic {
             res_vec,
         })
     }
+
+    pub fn deserialize_compressed(bytes: &[u8]) -> GCardResult<Self> {
+        let bucket_ids_are_rle = if bytes.starts_with(COMPRESSED_MAGIC) {
+            true
+        } else if bytes.starts_with(COMPRESSED_ZSTD_MAGIC) {
+            false
+        } else {
+            return Err(GCardError::InvalidData(
+                "compressed block magic mismatch".into(),
+            ));
+        };
+        let mut pos = COMPRESSED_MAGIC.len();
+        let entry_count = read_u64(bytes, &mut pos, "entry_count")? as usize;
+
+        let bucket_len = read_u64(bytes, &mut pos, "bucket_ids len")? as usize;
+        let bucket_bytes = take_bytes(bytes, &mut pos, bucket_len, "bucket_ids")?;
+        let bucket_ids = if bucket_ids_are_rle {
+            decode_rle(bucket_bytes)
+                .ok_or_else(|| GCardError::InvalidData("decode bucket_ids rle".into()))?
+        } else {
+            decode_zstd(bucket_bytes)
+                .ok_or_else(|| GCardError::InvalidData("decode bucket_ids zstd".into()))?
+        };
+
+        let prefix_len = read_u64(bytes, &mut pos, "prefix len")? as usize;
+        let prefix_bytes = take_bytes(bytes, &mut pos, prefix_len, "prefix")?;
+        let prefix = decode_zstd(prefix_bytes)
+            .ok_or_else(|| GCardError::InvalidData("decode prefix zstd".into()))?;
+
+        let res_len = read_u64(bytes, &mut pos, "res_vec len")? as usize;
+        let res_bytes = take_bytes(bytes, &mut pos, res_len, "res_vec")?;
+        let res_vec = decode_raw_u64s(res_bytes)
+            .ok_or_else(|| GCardError::InvalidData("decode res_vec".into()))?;
+
+        if bucket_ids.len() != entry_count || prefix.len() != entry_count {
+            return Err(GCardError::InvalidData(
+                "compressed block entry_count mismatch".into(),
+            ));
+        }
+
+        Ok(BlockStatistic {
+            bucket_ids,
+            prefix,
+            res_vec,
+        })
+    }
+}
+
+fn read_u64(bytes: &[u8], pos: &mut usize, field: &str) -> GCardResult<u64> {
+    let end = pos
+        .checked_add(8)
+        .ok_or_else(|| GCardError::InvalidData(format!("{} offset overflow", field)))?;
+    if bytes.len() < end {
+        return Err(GCardError::InvalidData(format!("missing {}", field)));
+    }
+    let value = u64::from_le_bytes(
+        bytes[*pos..end]
+            .try_into()
+            .map_err(|_| GCardError::InvalidData(format!("invalid {}", field)))?,
+    );
+    *pos = end;
+    Ok(value)
+}
+
+fn take_bytes<'a>(
+    bytes: &'a [u8],
+    pos: &mut usize,
+    len: usize,
+    field: &str,
+) -> GCardResult<&'a [u8]> {
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| GCardError::InvalidData(format!("{} offset overflow", field)))?;
+    if bytes.len() < end {
+        return Err(GCardError::InvalidData(format!("missing {}", field)));
+    }
+    let out = &bytes[*pos..end];
+    *pos = end;
+    Ok(out)
 }
 
 impl Serialize for BlockStatistic {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let n = self.bucket_ids.len() as u64;
-        let mut bytes = n.to_le_bytes().to_vec();
-        bytes.extend(self.serialize());
+        let bytes = self.serialize_compressed();
         s.serialize_bytes(&bytes)
     }
 }
@@ -235,6 +363,9 @@ impl Serialize for BlockStatistic {
 impl<'de> Deserialize<'de> for BlockStatistic {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let bytes = Vec::<u8>::deserialize(d)?;
+        if bytes.starts_with(COMPRESSED_MAGIC) || bytes.starts_with(COMPRESSED_ZSTD_MAGIC) {
+            return Self::deserialize_compressed(&bytes).map_err(serde::de::Error::custom);
+        }
         if bytes.len() < 8 {
             return Err(serde::de::Error::custom("block too short for entry_count"));
         }
@@ -293,6 +424,52 @@ mod tests {
         assert_eq!(restored.bucket_ids, bs.bucket_ids);
         assert_eq!(restored.prefix, bs.prefix);
         assert_eq!(restored.res_vec, bs.res_vec);
+    }
+
+    #[test]
+    fn test_recover_upper_bound_clamps_to_bucket_upper() {
+        // Both values are in bucket 12.  The second value raises the shared
+        // remainder, which would otherwise make rank 0 recover above 2^12.
+        let bs = BlockStatistic::from_u64_sequence(&[4096u64, 2049u64]).unwrap();
+        assert_eq!(bs.bucket_ids[0], 12);
+        assert_eq!(bs.bucket_ids[1], 12);
+        assert_eq!(bs.recover_upper_bound_at_rank(0), Some(4096));
+        assert_eq!(bs.recover_upper_bound_at_rank(1), Some(2049));
+    }
+
+    #[test]
+    fn test_bucket_max_can_be_tighter_than_bucket_id_upper() {
+        let bs = BlockStatistic::from_u64_sequence(&[3000u64]).unwrap();
+        let bucket = bs.bucket_ids[0];
+        let bucket_id_upper = bucket_upper_bound(bucket);
+        assert_eq!(bucket, 12);
+        assert_eq!(bucket_id_upper, 4096);
+
+        let Some(CompressedDegreeSeq::BucketMax {
+            bucket_max_values, ..
+        }) = bs.get_bucket_max_degree_seq().unwrap()
+        else {
+            panic!("expected bucket max degree sequence");
+        };
+        assert_eq!(bucket_max_values[bucket as usize], 3000);
+        assert!(bucket_max_values[bucket as usize] < bucket_id_upper);
+    }
+
+    #[test]
+    fn test_path_compressed_degree_seq_uses_bucket_max_values() {
+        let bs = BlockStatistic::from_u64_sequence(&[3000u64]).unwrap();
+        let bucket = bs.bucket_ids[0];
+
+        let Some(CompressedDegreeSeq::BucketMax {
+            counts,
+            bucket_max_values,
+        }) = bs.get_compressed_degree_seq().unwrap()
+        else {
+            panic!("expected path degree sequence to use bucket max values");
+        };
+        assert_eq!(counts[bucket as usize], 1);
+        assert_eq!(bucket_max_values[bucket as usize], 3000);
+        assert!(bucket_max_values[bucket as usize] < bucket_upper_bound(bucket));
     }
 
     // ── upper_limit_ratio 测试 ────────────────────────────────────────────────
