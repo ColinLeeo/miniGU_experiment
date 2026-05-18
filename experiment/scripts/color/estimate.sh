@@ -5,18 +5,11 @@ set -o pipefail
 summary=$(realpath $1)
 pattern=$(realpath $2)
 
-workspace=$(realpath $(dirname $0)/../../)
+workspace=$(realpath "$(dirname "$0")/../../")
 
-pattern_name=$(basename $pattern)
+julia_bin="${JULIA_BIN:-julia}"
+if ! command -v "$julia_bin" >/dev/null 2>&1; then
+  julia_bin="$HOME/.local/bin/julia"
+fi
 
-uuid=$(uuid)
-dir=$workspace/color/color-$pattern_name-$uuid
-mkdir $dir
-
-# Transform pattern format
-$workspace/tools/pattern2gcare.py -p $pattern -o $dir/pattern.txt
-
-julia --project=$workspace/color $workspace/color/scripts/estimate.jl -q $dir/pattern.txt -s $summary
-
-# Clean up
-rm -rf $dir
+"$julia_bin" --project="$workspace/baseline/color" "$workspace/baseline/color/scripts/estimate.jl" -q "$pattern" -s "$summary"

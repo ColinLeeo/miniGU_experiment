@@ -4,12 +4,12 @@ use std::sync::Arc;
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use clap::Args;
 use csv::StringRecord;
+use itertools::Itertools;
 use pathce::common::{EdgeDirection, LabelId, TagId};
 use pathce::counter::PathCounter;
 use pathce::graph::LabeledGraph;
 use pathce::pattern::{PathPattern, PatternEdge, PatternVertex, RawPattern};
 use pathce::schema::Schema;
-use itertools::Itertools;
 use rayon::ThreadPoolBuilder;
 
 #[derive(Debug, Args)]

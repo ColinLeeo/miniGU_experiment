@@ -1,0 +1,5 @@
+*.cpython*
+*cpython-*
+Source/build/*
+Source/.ipynb_checkpoints/*
+

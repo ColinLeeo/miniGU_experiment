@@ -9,4 +9,4 @@ pattern=$(realpath $4)
 
 workspace=$(realpath $(dirname $0)/../../)
 
-$workspace/pathce/target/release/pathce estimate -c $catalog -p $pattern --max-path-length $k --max-star-degree $d
+$workspace/baseline/pathce/target/release/pathce estimate -c $catalog -p $pattern --max-path-length $k --max-star-degree $d

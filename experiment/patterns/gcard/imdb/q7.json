@@ -1,0 +1,61 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "castinfovertex"
+    },
+    {
+      "id": 4,
+      "label": "person"
+    },
+    {
+      "id": 5,
+      "label": "akaname"
+    },
+    {
+      "id": 6,
+      "label": "personinfovertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_linktypeedge_title",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "castinfovertex_castinfoedge_title",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "castinfovertex_castinfoedge_person",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "person_akanameedge_akaname",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "person_personinfoedge_personinfovertex",
+      "src": 4,
+      "dst": 6
+    }
+  ],
+  "predicates": []
+}

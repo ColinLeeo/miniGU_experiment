@@ -3,25 +3,18 @@ set -eu
 set -o pipefail
 
 method=$1
-graph_dir=$(realpath $2)
-pattern=$(realpath $3)
+graph_dir=$(realpath "$2")
+pattern=$(realpath "$3")
+ratio=${4:-0.03}
+repeat=${5:-30}
+seed=${6:-0}
 
-workspace=$(realpath $(dirname $0)/../../)
-
-pattern_name=$(basename $pattern)
-
-uuid=$(uuid)
-dir=$workspace/gcare/gcare-$method-$pattern_name-$uuid
-mkdir $dir
-
-# Transform pattern format
-$workspace/tools/pattern2gcare.py -p $pattern -o $dir/pattern.txt
+workspace=$(realpath "$(dirname "$0")/../../")
 
 if [[ $method == "cs" ]] || [[ $method == "bsk" ]]; then
-    GCARE_BSK_BUDGET=4096 $workspace/gcare/build/gcare_relation -q -m $method -n 1 -i $dir/pattern.txt -d $graph_dir
+  bin="$workspace/baseline/gcare/build/gcare_relation"
 else
-    $workspace/gcare/build/gcare_graph -q -m $method -n 1 -i $dir/pattern.txt -d $graph_dir
+  bin="$workspace/baseline/gcare/build/gcare_graph"
 fi
 
-# Clean up
-rm -rf $dir
+"$bin" -q -m "$method" -i "$pattern" -d "$graph_dir" -p "$ratio" -n "$repeat" -s "$seed"

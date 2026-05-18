@@ -1,0 +1,31 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "infoidxvertex"
+    },
+    {
+      "id": 3,
+      "label": "keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_infoedge_infoidxvertex",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_keywordedge_keyword",
+      "src": 1,
+      "dst": 3
+    }
+  ],
+  "predicates": []
+}

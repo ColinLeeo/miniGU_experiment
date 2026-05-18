@@ -1,0 +1,41 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "person"
+    },
+    {
+      "id": 2,
+      "label": "castinfovertex"
+    },
+    {
+      "id": 3,
+      "label": "title"
+    },
+    {
+      "id": 4,
+      "label": "keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "castinfovertex_castinfoedge_person",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "castinfovertex_castinfoedge_title",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "title_keywordedge_keyword",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": []
+}

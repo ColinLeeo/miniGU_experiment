@@ -1,0 +1,82 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "movie_info"
+    },
+    {
+      "id": 3,
+      "label": "movie_info_idx"
+    },
+    {
+      "id": 4,
+      "label": "cast_info"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_movie_info_movie_id",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_id_movie_info_idx_movie_id",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "title_id_cast_info_movie_id",
+      "src": 1,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 3
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 3,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 101
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 2008
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "lt",
+      "value": {
+        "Int64": 2014
+      }
+    }
+  ]
+}

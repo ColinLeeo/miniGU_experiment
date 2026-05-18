@@ -1,0 +1,71 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "companyname"
+    },
+    {
+      "id": 3,
+      "label": "infovertex"
+    },
+    {
+      "id": 4,
+      "label": "castinfovertex"
+    },
+    {
+      "id": 5,
+      "label": "person"
+    },
+    {
+      "id": 6,
+      "label": "akaname"
+    },
+    {
+      "id": 7,
+      "label": "character"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_moviecompanies_companyname",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_infoedge_infovertex",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "castinfovertex_castinfoedge_title",
+      "src": 4,
+      "dst": 1
+    },
+    {
+      "id": 4,
+      "label": "castinfovertex_castinfoedge_person",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "person_akanameedge_akaname",
+      "src": 5,
+      "dst": 6
+    },
+    {
+      "id": 6,
+      "label": "castinfovertex_castinfoedge_character",
+      "src": 4,
+      "dst": 7
+    }
+  ],
+  "predicates": []
+}

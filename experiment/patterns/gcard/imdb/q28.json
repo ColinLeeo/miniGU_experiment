@@ -1,0 +1,61 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "companyname"
+    },
+    {
+      "id": 3,
+      "label": "keyword"
+    },
+    {
+      "id": 4,
+      "label": "complcastinfovertex"
+    },
+    {
+      "id": 5,
+      "label": "infoidxvertex"
+    },
+    {
+      "id": 6,
+      "label": "infovertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_moviecompanies_companyname",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_keywordedge_keyword",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "complcastinfovertex_complcastinfoedge_title",
+      "src": 4,
+      "dst": 1
+    },
+    {
+      "id": 4,
+      "label": "title_infoedge_infoidxvertex",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "title_infoedge_infovertex",
+      "src": 1,
+      "dst": 6
+    }
+  ],
+  "predicates": []
+}

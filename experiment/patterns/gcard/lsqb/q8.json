@@ -1,0 +1,47 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "tag"
+    },
+    {
+      "id": 2,
+      "label": "comment"
+    },
+    {
+      "id": 3,
+      "label": "post"
+    },
+    {
+      "id": 4,
+      "label": "tag"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comment_hastag_tag",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "comment_replyof_post",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "post_hastag_tag",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "comment_hastag_tag",
+      "src": 2,
+      "dst": 4
+    }
+  ],
+  "predicates": []
+}

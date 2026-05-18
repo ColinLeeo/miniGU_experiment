@@ -1,0 +1,102 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "movie_info"
+    },
+    {
+      "id": 3,
+      "label": "movie_companies"
+    },
+    {
+      "id": 4,
+      "label": "cast_info"
+    },
+    {
+      "id": 5,
+      "label": "movie_keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_movie_info_movie_id",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_id_movie_companies_movie_id",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "title_id_cast_info_movie_id",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "title_id_movie_keyword_movie_id",
+      "src": 1,
+      "dst": 5
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 4,
+      "property": "role_id",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 16
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 2000
+      }
+    },
+    {
+      "predicate_id": 4,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "lt",
+      "value": {
+        "Int64": 2010
+      }
+    },
+    {
+      "predicate_id": 5,
+      "target": "vertex",
+      "id": 5,
+      "property": "keyword_id",
+      "op": "eq",
+      "value": {
+        "Int64": 7084
+      }
+    }
+  ]
+}

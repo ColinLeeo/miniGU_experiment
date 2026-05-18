@@ -1,22 +1,28 @@
 #!/bin/bash
-set -u
+set -eu
 set -o pipefail
 
 sf=$1
-pattern_dir=$(realpath $2)
-mkdir -p $3
-output_dir=$(realpath $3)
+pattern_dir=${2:-}
 
-workspace=$(realpath $(dirname $0)/../../)
+workspace=$(realpath "$(dirname "$0")/../../")
+if [[ -z "$pattern_dir" ]]; then
+  pattern_dir=$workspace/patterns/gcare/lsqb
+fi
+pattern_dir=$(realpath "$pattern_dir")
 
 summary=$workspace/catalogs/ldbc/color/ldbc_sf"$sf"_mix_6_50000.obj
+log_dir=$workspace/results/color/estimate
+log_file=$log_dir/lsqb_sf${sf}.log
+mkdir -p "$log_dir"
+: > "$log_file"
 
-patterns=$(find $pattern_dir -name '*.json' -type f | sort)
+patterns=$(find "$pattern_dir" -name '*.gcare' -type f | sort)
 for pattern in $patterns; do
-    count_time=$($workspace/scripts/color/estimate.sh $summary $pattern)
+    rel="${pattern#$pattern_dir/}"
+    count_time=$("$workspace/scripts/color/estimate.sh" "$summary" "$pattern")
     IFS="," read -r count time <<< "$count_time"
-    echo "$pattern: $count, $time"
-    filename=$(basename $pattern)
-    jq ".count=$count" $pattern > $output_dir/$filename.tmp
-    mv $output_dir/$filename.tmp $output_dir/$filename
+    echo "$rel: $count, $time" | tee -a "$log_file"
 done
+
+echo "Log: $log_file"

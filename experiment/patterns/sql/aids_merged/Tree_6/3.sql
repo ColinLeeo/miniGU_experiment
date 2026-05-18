@@ -1,0 +1,1 @@
+select count(*) from vertex v0, vertex v1, vertex v2, vertex v3, vertex v4, 0 e0, 0 e1, 0 e2, 0 e3 where e0.src = v0.id and e0.dst = v1.id and e1.src = v0.id and e1.dst = v2.id and e2.src = v2.id and e2.dst = v3.id and e3.src = v4.id and e3.dst = v1.id

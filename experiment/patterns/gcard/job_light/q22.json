@@ -1,0 +1,42 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "cast_info"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_cast_info_movie_id",
+      "src": 2,
+      "dst": 1
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 1980
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "lt",
+      "value": {
+        "Int64": 2010
+      }
+    }
+  ]
+}

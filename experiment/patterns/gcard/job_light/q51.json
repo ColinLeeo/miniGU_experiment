@@ -1,0 +1,52 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "cast_info"
+    },
+    {
+      "id": 3,
+      "label": "movie_keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_movie_keyword_movie_id",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "title_id_cast_info_movie_id",
+      "src": 1,
+      "dst": 2
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 1950
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 1,
+      "property": "kind_id",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    }
+  ]
+}

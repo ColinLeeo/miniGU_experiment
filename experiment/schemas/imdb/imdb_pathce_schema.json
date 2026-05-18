@@ -1,0 +1,161 @@
+{
+    "vertex_labels": {
+        "akaName": 0,
+        "akaTitle": 1,
+        "castInfoVertex": 2,
+        "character": 3,
+        "companyName": 4,
+        "complCastInfoVertex": 5,
+        "infoVertex": 6,
+        "infoIdxVertex": 7,
+        "keyword": 8,
+        "person": 9,
+        "personInfoVertex": 10,
+        "title": 11
+    },
+    "edge_labels": {
+        "person_akaNameEdge_akaName": 0,
+        "title_akaTitleEdge_akaTitle": 1,
+        "castInfoVertex_castInfoEdge_person": 2,
+        "castInfoVertex_castInfoEdge_title": 3,
+        "castInfoVertex_castInfoEdge_character": 4,
+        "complCastInfoVertex_complCastInfoEdge_title": 5,
+        "title_episodeOfEdge_title": 6,
+        "title_infoEdge_infoVertex": 7,
+        "title_infoEdge_infoIdxVertex": 8,
+        "title_keywordEdge_keyword": 9,
+        "title_linkTypeEdge_title": 10,
+        "title_movieCompanies_companyName": 11,
+        "person_personInfoEdge_personInfoVertex": 12
+    },
+    "edges": [
+        {
+            "card": "OneToMany",
+            "from": 9,
+            "label": 0,
+            "to": 0
+        },
+        {
+            "card": "OneToMany",
+            "from": 11,
+            "label": 1,
+            "to": 1
+        },
+        {
+            "card": "ManyToOne",
+            "from": 2,
+            "label": 2,
+            "to": 9
+        },
+        {
+            "card": "ManyToOne",
+            "from": 2,
+            "label": 3,
+            "to": 11
+        },
+        {
+            "card": "ManyToOne",
+            "from": 2,
+            "label": 4,
+            "to": 3
+        },
+        {
+            "card": "ManyToOne",
+            "from": 5,
+            "label": 5,
+            "to": 11
+        },
+        {
+            "card": "ManyToOne",
+            "from": 11,
+            "label": 6,
+            "to": 11
+        },
+        {
+            "card": "ManyToMany",
+            "from": 11,
+            "label": 7,
+            "to": 6
+        },
+        {
+            "card": "ManyToMany",
+            "from": 11,
+            "label": 8,
+            "to": 7
+        },
+        {
+            "card": "ManyToMany",
+            "from": 11,
+            "label": 9,
+            "to": 8
+        },
+        {
+            "card": "ManyToMany",
+            "from": 11,
+            "label": 10,
+            "to": 11
+        },
+        {
+            "card": "ManyToMany",
+            "from": 11,
+            "label": 11,
+            "to": 4
+        },
+        {
+            "card": "ManyToMany",
+            "from": 9,
+            "label": 12,
+            "to": 10
+        }
+    ],
+    "vertices": [
+        {
+            "discrete": false,
+            "label": 0
+        },
+        {
+            "discrete": false,
+            "label": 1
+        },
+        {
+            "discrete": false,
+            "label": 2
+        },
+        {
+            "discrete": false,
+            "label": 3
+        },
+        {
+            "discrete": false,
+            "label": 4
+        },
+        {
+            "discrete": false,
+            "label": 5
+        },
+        {
+            "discrete": false,
+            "label": 6
+        },
+        {
+            "discrete": false,
+            "label": 7
+        },
+        {
+            "discrete": false,
+            "label": 8
+        },
+        {
+            "discrete": false,
+            "label": 9
+        },
+        {
+            "discrete": false,
+            "label": 10
+        },
+        {
+            "discrete": false,
+            "label": 11
+        }
+    ]
+}

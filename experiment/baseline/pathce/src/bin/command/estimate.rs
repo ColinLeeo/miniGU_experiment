@@ -3,11 +3,11 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Args;
+use log::info;
 use pathce::catalog::DuckCatalog;
 use pathce::common::TagId;
 use pathce::estimate::CardinalityEstimator;
 use pathce::pattern::RawPattern;
-use log::info;
 
 #[derive(Debug, Args)]
 pub struct EstimateArgs {

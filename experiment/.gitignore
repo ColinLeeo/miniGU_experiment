@@ -1,1 +1,63 @@
 duckdb
+
+# experiment data and generated outputs
+dataset/
+datasets/
+catalogs/
+graphs/
+results/
+result/
+run_tmp/
+tmp_eval/
+logs/
+
+# baseline build/runtime artifacts
+baseline/**/build/
+baseline/**/target/
+baseline/**/logs/
+baseline/**/env/
+baseline/**/repro_*/
+baseline/**/Data/
+baseline/**/StatObjects/
+baseline/**/models/
+baseline/**/Models/*.pkl
+baseline/**/.ipynb_checkpoints/
+baseline/**/__pycache__/
+baseline/**/.git/
+
+# generated caches and notebooks
+**/__pycache__/
+**/.ipynb_checkpoints/
+.DS_Store
+._*
+*.py[cod]
+*.ipynb_checkpoints
+
+# large generated data/model files
+*.csv
+*.tsv
+*.tbl
+*.parquet
+*.duckdb
+*.db
+*.sqlite
+*.hdf
+*.h5
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.pt
+*.pth
+*.onnx
+*.pdf
+
+# build products and logs
+*.o
+*.so
+*.a
+*.dylib
+*.exe
+*.log
+*.out
+*.err

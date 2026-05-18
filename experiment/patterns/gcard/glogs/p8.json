@@ -1,0 +1,63 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "person"
+    },
+    {
+      "id": 2,
+      "label": "person"
+    },
+    {
+      "id": 3,
+      "label": "comment"
+    },
+    {
+      "id": 4,
+      "label": "comment"
+    },
+    {
+      "id": 5,
+      "label": "tag"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "person_knows_person",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "comment_hascreator_person",
+      "src": 3,
+      "dst": 1
+    },
+    {
+      "id": 3,
+      "label": "comment_hastag_tag",
+      "src": 3,
+      "dst": 5
+    },
+    {
+      "id": 4,
+      "label": "comment_hascreator_person",
+      "src": 4,
+      "dst": 2
+    },
+    {
+      "id": 5,
+      "label": "comment_replyof_comment",
+      "src": 4,
+      "dst": 3
+    },
+    {
+      "id": 6,
+      "label": "comment_hastag_tag",
+      "src": 4,
+      "dst": 5
+    }
+  ],
+  "predicates": []
+}

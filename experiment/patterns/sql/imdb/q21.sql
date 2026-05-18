@@ -1,0 +1,1 @@
+select count(*) from title v0, title v1, companyName v2, keyword v3, infoVertex v4, title_linkTypeEdge_title e0, title_movieCompanies_companyName e1, title_keywordEdge_keyword e2, title_infoEdge_infoVertex e3 where e0.src = v0.id and e0.dst = v1.id and e1.src = v0.id and e1.dst = v2.id and e2.src = v0.id and e2.dst = v3.id and e3.src = v0.id and e3.dst = v4.id

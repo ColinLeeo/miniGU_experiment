@@ -1,0 +1,42 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "movie_companies"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "movie_keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_movie_companies_movie_id",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "title_id_movie_keyword_movie_id",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 3,
+      "property": "keyword_id",
+      "op": "eq",
+      "value": {
+        "Int64": 117
+      }
+    }
+  ]
+}

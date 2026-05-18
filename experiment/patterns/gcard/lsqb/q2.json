@@ -1,0 +1,47 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "person"
+    },
+    {
+      "id": 2,
+      "label": "person"
+    },
+    {
+      "id": 3,
+      "label": "post"
+    },
+    {
+      "id": 4,
+      "label": "comment"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "comment_hascreator_person",
+      "src": 4,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "person_knows_person",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "post_hascreator_person",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 4,
+      "label": "comment_replyof_post",
+      "src": 4,
+      "dst": 3
+    }
+  ],
+  "predicates": []
+}

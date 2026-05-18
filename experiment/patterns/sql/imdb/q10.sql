@@ -1,0 +1,1 @@
+select count(*) from companyName v0, title v1, castInfoVertex v2, character v3, title_movieCompanies_companyName e0, castInfoVertex_castInfoEdge_title e1, castInfoVertex_castInfoEdge_character e2 where e0.src = v1.id and e0.dst = v0.id and e1.src = v2.id and e1.dst = v1.id and e2.src = v2.id and e2.dst = v3.id

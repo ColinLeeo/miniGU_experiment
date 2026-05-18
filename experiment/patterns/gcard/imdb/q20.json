@@ -1,0 +1,61 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "keyword"
+    },
+    {
+      "id": 3,
+      "label": "complcastinfovertex"
+    },
+    {
+      "id": 4,
+      "label": "castinfovertex"
+    },
+    {
+      "id": 5,
+      "label": "person"
+    },
+    {
+      "id": 6,
+      "label": "character"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_keywordedge_keyword",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "complcastinfovertex_complcastinfoedge_title",
+      "src": 3,
+      "dst": 1
+    },
+    {
+      "id": 3,
+      "label": "castinfovertex_castinfoedge_title",
+      "src": 4,
+      "dst": 1
+    },
+    {
+      "id": 4,
+      "label": "castinfovertex_castinfoedge_person",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "castinfovertex_castinfoedge_character",
+      "src": 4,
+      "dst": 6
+    }
+  ],
+  "predicates": []
+}

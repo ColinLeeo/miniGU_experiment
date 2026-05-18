@@ -1,0 +1,62 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "movie_info"
+    },
+    {
+      "id": 3,
+      "label": "movie_companies"
+    },
+    {
+      "id": 4,
+      "label": "movie_keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_movie_info_movie_id",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_id_movie_keyword_movie_id",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 3,
+      "label": "title_id_movie_companies_movie_id",
+      "src": 1,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 16
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 1990
+      }
+    }
+  ]
+}

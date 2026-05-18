@@ -1,0 +1,31 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "companyname"
+    },
+    {
+      "id": 3,
+      "label": "infoidxvertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_moviecompanies_companyname",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_infoedge_infoidxvertex",
+      "src": 1,
+      "dst": 3
+    }
+  ],
+  "predicates": []
+}

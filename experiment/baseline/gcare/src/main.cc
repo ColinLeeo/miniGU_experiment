@@ -129,11 +129,9 @@ void query(Estimator *estimator, DataGraph &g, const QueryParams &query_params,
     //   cout << " " << est;
     // fout << endl;
     // cout << endl;
-    cout << fixed;
-    cout.precision(2);
-    cout << avg_est << ",";
-    cout.precision(6);
-    cout << avg_time << "\n";
+    // int precision = std::numeric_limits<double>::max_digits10;
+    // cout.precision(dbl::max_digits10);
+    cout << avg_est << "," << avg_time << "\n";
   } catch (Estimator::ErrCode e) {
     // err_fout << dir_entry.path().string() << " error with code " << e <<
     // "\n";

@@ -1,23 +1,33 @@
 #!/bin/bash
-set -u
+set -eu
 set -o pipefail
 
 method=$1
-sf=$2
-pattern_dir=$(realpath $3)
-mkdir -p $4
-output_dir=$(realpath $4)
+sf=${2:-1}
+ratio=${3:-0.03}
+repeat=${4:-30}
+seed=${5:-0}
 
-workspace=$(realpath $(dirname $0)/../../)
-
+workspace=$(realpath "$(dirname "$0")/../../")
 graph_dir=$workspace/datasets/ldbc/sf$sf
+pattern_dir=$workspace/patterns/gcare/lsqb
+log_file=$workspace/results/gcare/estimate/lsqb_sf${sf}_${method}.log
+mkdir -p "$(dirname "$log_file")"
+: > "$log_file"
 
-patterns=$(find $pattern_dir -name '*.json' -type f | sort)
-for pattern in $patterns; do
-    count_time=$(timeout -v 5m $workspace/scripts/gcare/estimate.sh $method $graph_dir $pattern)
-    IFS="," read -r count time <<< "$count_time"
-    echo "$pattern: $count, $time"
-    filename=$(basename $pattern)
-    jq ".count=$count" $pattern > $output_dir/$filename.tmp
-    mv $output_dir/$filename.tmp $output_dir/$filename
+mapfile -t patterns < <(python3 - "$pattern_dir" <<'PY'
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+for p in sorted(root.rglob("*.gcare")):
+    print(str(p.resolve()))
+PY
+)
+
+for pattern in "${patterns[@]}"; do
+  rel="${pattern#$pattern_dir/}"
+  result=$(timeout -v 5m "$workspace/scripts/gcare/estimate.sh" "$method" "$graph_dir" "$pattern" "$ratio" "$repeat" "$seed" 2>&1 | tail -n 1 || true)
+  echo "$rel: $result" | tee -a "$log_file"
 done
+
+echo "Log: $log_file"

@@ -3,9 +3,9 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
+use itertools::Itertools;
 use pathce::pattern::GeneralPattern;
 use pathce::schema::Schema;
-use itertools::Itertools;
 use rand::rngs::StdRng;
 use rand::seq::IteratorRandom;
 use rand::SeedableRng;

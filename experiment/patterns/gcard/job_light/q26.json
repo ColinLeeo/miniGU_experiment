@@ -1,0 +1,62 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "cast_info"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "movie_companies"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_id_cast_info_movie_id",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "title_id_movie_companies_movie_id",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 2005
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "lt",
+      "value": {
+        "Int64": 2015
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 1,
+      "property": "role_id",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    }
+  ]
+}

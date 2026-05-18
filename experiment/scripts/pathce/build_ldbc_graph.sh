@@ -11,4 +11,4 @@ output_dir=$workspace/graphs/ldbc/pathce
 mkdir -p $output_dir
 output=$output_dir/ldbc_sf$sf.bincode
 
-$workspace/pathce/target/release/pathce serialize -i $dataset -s $schema -o $output
+$workspace/baseline/pathce/target/release/pathce serialize -i $dataset -s $schema -o $output

@@ -1,0 +1,1 @@
+select count(*) from Person v0, Comment v1, Post v2, Forum v3, Person v4, Comment_hasCreator_Person e0, Comment_replyOf_Post e1, Forum_containerOf_Post e2, Forum_hasMember_Person e3 where e0.src = v1.id and e0.dst = v0.id and e1.src = v1.id and e1.dst = v2.id and e2.src = v3.id and e2.dst = v2.id and e3.src = v3.id and e3.dst = v4.id

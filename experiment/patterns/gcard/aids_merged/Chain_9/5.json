@@ -1,0 +1,91 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "vertex"
+    },
+    {
+      "id": 2,
+      "label": "vertex"
+    },
+    {
+      "id": 3,
+      "label": "vertex"
+    },
+    {
+      "id": 4,
+      "label": "vertex"
+    },
+    {
+      "id": 5,
+      "label": "vertex"
+    },
+    {
+      "id": 6,
+      "label": "vertex"
+    },
+    {
+      "id": 7,
+      "label": "vertex"
+    },
+    {
+      "id": 8,
+      "label": "vertex"
+    },
+    {
+      "id": 9,
+      "label": "vertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "0",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "0",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "0",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "0",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "0",
+      "src": 6,
+      "dst": 5
+    },
+    {
+      "id": 6,
+      "label": "0",
+      "src": 7,
+      "dst": 6
+    },
+    {
+      "id": 7,
+      "label": "0",
+      "src": 7,
+      "dst": 8
+    },
+    {
+      "id": 8,
+      "label": "0",
+      "src": 9,
+      "dst": 8
+    }
+  ],
+  "predicates": []
+}

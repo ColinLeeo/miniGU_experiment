@@ -24,7 +24,9 @@ import logging
 import numpy as np
 import pandas as pd
 
-BAYESCARD_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../baseline/bayescard"))
+BAYESCARD_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../baseline/SafeBound/bayescard")
+)
 sys.path.insert(0, BAYESCARD_DIR)
 os.chdir(BAYESCARD_DIR)
 

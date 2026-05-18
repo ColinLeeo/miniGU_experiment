@@ -1,0 +1,30 @@
+{
+    "vertices": [
+        {
+            "tag_id": 0,
+            "label_id": 11
+        },
+        {
+            "tag_id": 1,
+            "label_id": 6
+        },
+        {
+            "tag_id": 2,
+            "label_id": 8
+        }
+    ],
+    "edges": [
+        {
+            "tag_id": 0,
+            "src": 0,
+            "dst": 1,
+            "label_id": 7
+        },
+        {
+            "tag_id": 1,
+            "src": 0,
+            "dst": 2,
+            "label_id": 9
+        }
+    ]
+}
