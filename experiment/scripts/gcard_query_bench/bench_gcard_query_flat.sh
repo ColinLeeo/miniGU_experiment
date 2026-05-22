@@ -96,7 +96,7 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 for SF in "${SCALE_FACTORS[@]}"; do
-    CSV_DIR="$PROJECT_DIR/experiment/dataset/ldbc/$SF"
+    CSV_DIR="$PROJECT_DIR/experiment/datasets/ldbc/$SF"
     MANIFEST="$CSV_DIR/manifest.json"
 
     if [[ ! -f "$MANIFEST" ]]; then

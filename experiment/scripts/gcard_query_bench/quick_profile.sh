@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MINIGU="$PROJECT_DIR/target/release/minigu"
 PATTERN_DIR="$PROJECT_DIR/experiment/pattern/LDBC"
-DB_PATH="$PROJECT_DIR/experiment/dataset/ldbc/sf1/minigu_db"
+DB_PATH="$PROJECT_DIR/experiment/datasets/ldbc/sf1/minigu_db"
 
 SAMPLE_SIZE=500
 MAX_K=2

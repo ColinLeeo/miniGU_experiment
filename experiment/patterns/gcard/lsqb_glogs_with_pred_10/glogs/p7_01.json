@@ -1,0 +1,94 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "person"
+    },
+    {
+      "id": 2,
+      "label": "person"
+    },
+    {
+      "id": 3,
+      "label": "comment"
+    },
+    {
+      "id": 4,
+      "label": "comment"
+    },
+    {
+      "id": 5,
+      "label": "forum"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "person_knows_person",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "comment_hascreator_person",
+      "src": 3,
+      "dst": 1
+    },
+    {
+      "id": 3,
+      "label": "comment_replyof_comment",
+      "src": 4,
+      "dst": 3
+    },
+    {
+      "id": 4,
+      "label": "comment_hascreator_person",
+      "src": 4,
+      "dst": 2
+    },
+    {
+      "id": 5,
+      "label": "forum_hasmember_person",
+      "src": 5,
+      "dst": 1
+    },
+    {
+      "id": 6,
+      "label": "forum_hasmember_person",
+      "src": 5,
+      "dst": 2
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "birthday",
+      "op": "ge",
+      "value": {
+        "Int64": 520905600000
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 3,
+      "property": "explicitlydeleted",
+      "op": "eq",
+      "value": {
+        "Boolean": false
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "edge",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1262304000000
+      }
+    }
+  ]
+}

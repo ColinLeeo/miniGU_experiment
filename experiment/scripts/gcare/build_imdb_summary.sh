@@ -10,7 +10,7 @@ graph=$workspace/datasets/imdb/imdb/imdb_gcare.txt
 graph_dir=$workspace/datasets/imdb/imdb
 method=$1
 threads=1
-log=$workspace/results/gcare/build-logs/imdb_"$method".log
+log=$workspace/result/gcare/build-logs/imdb_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

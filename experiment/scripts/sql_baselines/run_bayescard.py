@@ -4,7 +4,7 @@ BayesCard wrapper for LDBC cardinality estimation.
 
 Usage:
     # Build model
-    python run_bayescard.py build --data-dir experiment/dataset/ldbc/sf1 \
+    python run_bayescard.py build --data-dir experiment/datasets/ldbc/sf1 \
                                   --model-dir experiment/catalogs/ldbc/bayescard/sf1
 
     # Estimate cardinality

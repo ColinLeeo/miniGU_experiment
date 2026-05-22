@@ -1,0 +1,110 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "person"
+    },
+    {
+      "id": 2,
+      "label": "person"
+    },
+    {
+      "id": 3,
+      "label": "person"
+    },
+    {
+      "id": 4,
+      "label": "city"
+    },
+    {
+      "id": 5,
+      "label": "city"
+    },
+    {
+      "id": 6,
+      "label": "city"
+    },
+    {
+      "id": 7,
+      "label": "country"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "person_knows_person",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "person_knows_person",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "person_knows_person",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 4,
+      "label": "person_islocatedin_city",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 5,
+      "label": "person_islocatedin_city",
+      "src": 2,
+      "dst": 5
+    },
+    {
+      "id": 6,
+      "label": "person_islocatedin_city",
+      "src": 3,
+      "dst": 6
+    },
+    {
+      "id": 7,
+      "label": "city_ispartof_country",
+      "src": 4,
+      "dst": 7
+    },
+    {
+      "id": 8,
+      "label": "city_ispartof_country",
+      "src": 5,
+      "dst": 7
+    },
+    {
+      "id": 9,
+      "label": "city_ispartof_country",
+      "src": 6,
+      "dst": 7
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "birthday",
+      "op": "ge",
+      "value": {
+        "Int64": 315532800000
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "edge",
+      "id": 1,
+      "property": "creationdate",
+      "op": "ge",
+      "value": {
+        "Int64": 1262304000000
+      }
+    }
+  ]
+}

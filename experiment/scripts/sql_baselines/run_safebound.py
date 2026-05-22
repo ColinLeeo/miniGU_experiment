@@ -4,7 +4,7 @@ SafeBound wrapper for LDBC cardinality estimation.
 
 Usage:
     # Build statistics (one-time)
-    python run_safebound.py build --data-dir experiment/dataset/ldbc/sf1 \
+    python run_safebound.py build --data-dir experiment/datasets/ldbc/sf1 \
                                   --schema experiment/schemas/ldbc/ldbc_pathce_schema.json \
                                   --model-dir experiment/catalogs/ldbc/safebound/sf1
 

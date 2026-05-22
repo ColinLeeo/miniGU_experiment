@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 BENCH="$SCRIPT_DIR/bench_gcard_query.sh"
 
-DB_BASE="$PROJECT_DIR/experiment/dataset/ldbc"
+DB_BASE="$PROJECT_DIR/experiment/datasets/ldbc"
 
 MAX_K_VALUES=(1 2 3)
 MAX_GRAPH_VALUES=(5 10)

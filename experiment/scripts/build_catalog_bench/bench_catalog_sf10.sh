@@ -17,7 +17,7 @@
 #   ./bench_catalog_sf10.sh --dataset /path/to/sf10 [--threads "1 2 4 8"] [--repeats 3] [--max-k 2]
 #
 # Before running:
-#   1. Prepare LDBC CSV dataset with manifest.json (e.g. experiment/dataset/ldbc/sf10/)
+#   1. Prepare LDBC CSV dataset with manifest.json (e.g. experiment/datasets/ldbc/sf10/)
 #   2. Build minigu: cargo build -r --features std,serde,miette
 #
 

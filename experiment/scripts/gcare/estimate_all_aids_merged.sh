@@ -10,7 +10,7 @@ seed=${4:-0}
 workspace=$(realpath "$(dirname "$0")/../../")
 graph_dir=$workspace/datasets/aids_merged
 pattern_dir=$workspace/patterns/gcare/aids_merged
-log_file=$workspace/results/gcare/estimate/aids_merged_${method}.log
+log_file=$workspace/result/gcare/estimate/aids_merged_${method}.log
 mkdir -p "$(dirname "$log_file")"
 : > "$log_file"
 

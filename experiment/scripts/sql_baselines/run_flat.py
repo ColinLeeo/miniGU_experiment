@@ -3,7 +3,7 @@
 FLAT (FSPN) wrapper for LDBC cardinality estimation.
 
 Usage:
-    python run_flat.py build --data-dir experiment/dataset/ldbc/sf1 \
+    python run_flat.py build --data-dir experiment/datasets/ldbc/sf1 \
                              --model-dir experiment/catalogs/ldbc/flat/sf1
 
     python run_flat.py estimate --model-dir experiment/catalogs/ldbc/flat/sf1 \

@@ -64,7 +64,7 @@ if [[ -z "$SF" ]]; then
     exit 1
 fi
 
-CSV_DIR="$PROJECT_DIR/experiment/dataset/ldbc/$SF"
+CSV_DIR="$PROJECT_DIR/experiment/datasets/ldbc/$SF"
 if [[ ! -f "$CSV_DIR/manifest.json" ]]; then
     echo "ERROR: manifest.json not found at $CSV_DIR/manifest.json"
     exit 1

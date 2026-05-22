@@ -12,7 +12,7 @@
 #   ./bench_catalog.sh [--threads "1 2 4 8"] [--sfs "sf0.1 sf0.3 sf1"] [--repeats 3] [--max-k 2]
 #
 # Before running:
-#   1. Prepare database directories: experiment/dataset/ldbc/<sf>/minigu_db/
+#   1. Prepare database directories: experiment/datasets/ldbc/<sf>/minigu_db/
 #   2. Each should contain an already-imported LDBC graph named "ldbc".
 #   3. Build minigu: cargo build -r --features std,serde,miette
 #
@@ -26,7 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 MINIGU="$PROJECT_DIR/target/release/minigu"
-DB_BASE_DIR="$PROJECT_DIR/experiment/dataset/ldbc"
+DB_BASE_DIR="$PROJECT_DIR/experiment/datasets/ldbc"
 GRAPH_NAME="ldbc"
 MAX_K=2
 SCALE_FACTORS="sf3"

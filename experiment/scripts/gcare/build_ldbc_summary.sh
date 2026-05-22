@@ -11,7 +11,7 @@ sf=${2:-1}
 graph=$workspace/datasets/ldbc/sf$sf/ldbc_sf${sf}_gcare.txt
 graph_dir=$workspace/datasets/ldbc/sf$sf
 threads=1
-log=$workspace/results/gcare/build-logs/ldbc_sf"$sf"_"$method".log
+log=$workspace/result/gcare/build-logs/ldbc_sf"$sf"_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

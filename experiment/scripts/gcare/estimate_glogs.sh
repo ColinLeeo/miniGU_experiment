@@ -11,7 +11,7 @@ seed=${5:-0}
 workspace=$(realpath "$(dirname "$0")/../../")
 graph_dir=${GLOGS_GCARE_GRAPH_DIR:-$workspace/datasets/ldbc/sf$sf}
 pattern_dir=${GLOGS_GCARE_PATTERN_DIR:-$workspace/patterns/gcare/glogs}
-log_file=$workspace/results/gcare/estimate/glogs_sf${sf}_${method}.log
+log_file=$workspace/result/gcare/estimate/glogs_sf${sf}_${method}.log
 mkdir -p "$(dirname "$log_file")"
 : > "$log_file"
 

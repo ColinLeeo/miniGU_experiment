@@ -92,7 +92,7 @@ TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 for SF in "${SCALE_FACTORS[@]}"; do
-    DB_PATH="$PROJECT_DIR/experiment/dataset/ldbc/$SF/minigu_db"
+    DB_PATH="$PROJECT_DIR/experiment/datasets/ldbc/$SF/minigu_db"
 
     if [[ ! -d "$DB_PATH" ]]; then
         log "SKIP $SF: database not found at $DB_PATH"

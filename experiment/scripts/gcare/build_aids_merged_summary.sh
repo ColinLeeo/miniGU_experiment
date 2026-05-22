@@ -10,7 +10,7 @@ graph=$workspace/datasets/aids_merged/aids_merged.txt
 graph_dir=$workspace/datasets/aids_merged
 method=$1
 threads=1
-log=$workspace/results/gcare/build-logs/aids_merged_"$method".log
+log=$workspace/result/gcare/build-logs/aids_merged_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

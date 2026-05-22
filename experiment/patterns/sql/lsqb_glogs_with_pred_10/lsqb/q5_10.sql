@@ -1,0 +1,6 @@
+SELECT COUNT(*)
+FROM comment_hastag_tag e1
+JOIN (SELECT * FROM comment_replyof_post e2 WHERE e2.creationdate <= 1285917807738) e2 ON e2.src = e1.src
+JOIN post_hastag_tag e3 ON e3.src = e2.dst
+JOIN (SELECT * FROM tag v1 WHERE v1.name = 'Rumi') v1 ON v1.id = e1.dst
+JOIN (SELECT * FROM comment v2 WHERE v2.explicitlydeleted = false) v2 ON v2.id = e1.src
