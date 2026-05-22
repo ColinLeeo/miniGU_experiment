@@ -1032,21 +1032,15 @@ impl QueryGraph {
                 let edge = self.inner.edges.get(&edge_id).ok_or_else(|| {
                     GCardError::EdgeNotFound(format!("Edge {} not found", edge_id))
                 })?;
-                let edge_parts: Vec<&str> = edge.label.split('_').collect();
-                let direction = if !edge_parts.is_empty() {
-                    // 这里通过 edge label 里的命名约定推断方向。
-                    // 如果 label 格式不完全符合预期，会回退到 Outgoing。
-                    let src_label = edge_parts[0];
-                    let dst_label = edge_parts.last().copied().unwrap_or("");
-                    if src_label == vertex.label {
-                        EdgeDirection::Outgoing
-                    } else if dst_label == vertex.label {
-                        EdgeDirection::Incoming
-                    } else {
-                        EdgeDirection::Outgoing
-                    }
-                } else {
+                let direction = if edge.src_vertex_id == vertex_id {
                     EdgeDirection::Outgoing
+                } else if edge.dst_vertex_id == vertex_id {
+                    EdgeDirection::Incoming
+                } else {
+                    return Err(GCardError::InvalidState(format!(
+                        "edge {} is not incident to vertex {} in abstract path",
+                        edge_id, vertex_id
+                    )));
                 };
 
                 path_elements.push(PathElement::Edge {
@@ -3101,9 +3095,11 @@ impl QueryGraph {
                 .map(|&start_vid| {
                     use rand::Rng;
                     let mut rng = rand::thread_rng();
-                    // Cache: (vid, edge_label, outgoing) → neighbors with edge IDs.
-                    let mut nbr_cache: HashMap<(VertexId, String, bool), Vec<(VertexId, EdgeId)>> =
-                        HashMap::new();
+                    // Cache: (expected_label, vid, edge_label, outgoing) → neighbors with edge IDs.
+                    let mut nbr_cache: HashMap<
+                        (String, VertexId, String, bool),
+                        Vec<(VertexId, EdgeId)>,
+                    > = HashMap::new();
                     let mut prof = WalkProf::default();
                     let mut local_cache: HashMap<(u32, u64), bool> = HashMap::new();
 
@@ -3283,7 +3279,7 @@ impl QueryGraph {
         compiled: &FlatCompiledPathQuery,
         start_vertex: VertexId,
         rng: &mut impl rand::Rng,
-        nbr_cache: &mut HashMap<(VertexId, String, bool), Vec<(VertexId, EdgeId)>>,
+        nbr_cache: &mut HashMap<(String, VertexId, String, bool), Vec<(VertexId, EdgeId)>>,
         prof: &mut WalkProf,
         local_pred_cache: &mut HashMap<(u32, u64), bool>,
     ) -> GCardResult<(f64, f64)> {
@@ -3292,15 +3288,14 @@ impl QueryGraph {
         }
 
         let mut current_vid = start_vertex;
+        let mut current_label = compiled.src_label.as_str();
         let mut weight: f64 = 1.0;
         let mut pred_ok = true;
 
         for step in &compiled.steps {
             match step {
-                FlatCompiledStep::Vertex {
-                    label: _,
-                    predicates,
-                } => {
+                FlatCompiledStep::Vertex { label, predicates } => {
+                    current_label = label.as_str();
                     if pred_ok && !predicates.is_empty() {
                         let t0 = std::time::Instant::now();
                         let props = flat_graph.vertex_props(current_vid);
@@ -3357,13 +3352,22 @@ impl QueryGraph {
                     predicates,
                 } => {
                     let outgoing = matches!(direction, EdgeDirection::Outgoing);
-                    let cache_key = (current_vid, edge_label.clone(), outgoing);
+                    let cache_key = (
+                        current_label.to_string(),
+                        current_vid,
+                        edge_label.clone(),
+                        outgoing,
+                    );
 
                     // Fetch and cache neighbors (with edge IDs).
                     if !nbr_cache.contains_key(&cache_key) {
                         let t0 = std::time::Instant::now();
-                        let slice =
-                            flat_graph.neighbors_with_eid(current_vid, edge_label, outgoing);
+                        let slice = flat_graph.neighbors_with_eid_for_label(
+                            current_label,
+                            current_vid,
+                            edge_label,
+                            outgoing,
+                        );
                         prof.nbr_nanos += t0.elapsed().as_nanos() as u64;
                         nbr_cache.insert(cache_key.clone(), slice.to_vec());
                     }
@@ -3371,6 +3375,19 @@ impl QueryGraph {
 
                     let degree = nbrs.len();
                     if degree == 0 {
+                        if crate::procedures::gcard_query::GCARD_VERBOSE
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            let bucket_edges = flat_graph.hop_bucket_edge_count(
+                                current_label,
+                                edge_label,
+                                outgoing,
+                            );
+                            eprintln!(
+                                "[walk-deadend] vid={}, expected_label={}, edge_label={}, outgoing={}, bucket_edges={:?}",
+                                current_vid, current_label, edge_label, outgoing, bucket_edges
+                            );
+                        }
                         return Ok((0.0, 0.0));
                     }
                     let idx = rng.gen_range(0..degree);

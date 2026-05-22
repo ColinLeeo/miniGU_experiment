@@ -12,7 +12,7 @@ Usage:
 Example:
     python generate_sql_schema.py \
         -s experiment/schemas/ldbc/ldbc_pathce_schema.json \
-        -d experiment/dataset/ldbc/sf1 \
+        -d experiment/datasets/ldbc/sf1 \
         -o experiment/schemas/ldbc/sql/
 """
 import json

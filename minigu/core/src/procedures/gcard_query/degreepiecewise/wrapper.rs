@@ -3,8 +3,9 @@
 //! 这里把论文/算法里的 `alpha`、`beta` 等组合操作收敛成更直接的 Rust 接口，
 //! 供抽象图规约逻辑使用。
 
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use serde::{Deserialize, Serialize};
 
 use super::super::error::GCardResult;
 use super::function::{PiecewiseConstantFunction, pointwise_function_min, pointwise_function_mult};

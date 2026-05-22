@@ -399,10 +399,9 @@ pub fn build_procedure() -> Procedure {
                             counts.total_effective_beta()
                         );
                     }
-                    if let (Some(abs), Some(log_path)) = (
-                        &min_es_abstract_graph,
-                        plan_trace_log_path.clone(),
-                    ) {
+                    if let (Some(abs), Some(log_path)) =
+                        (&min_es_abstract_graph, plan_trace_log_path.clone())
+                    {
                         match std::fs::OpenOptions::new()
                             .create(true)
                             .append(true)

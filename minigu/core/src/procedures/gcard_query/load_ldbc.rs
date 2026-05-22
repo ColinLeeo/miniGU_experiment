@@ -572,7 +572,7 @@ pub fn build_procedure() -> Procedure {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_owned();
-        // Parent of the SF directory (e.g. ".../dataset/ldbc/").  All cache files
+        // Parent of the SF directory (e.g. ".../datasets/ldbc/").  All cache files
         // and the statistic are placed here with an SF-tagged filename so that
         // different scale factors share the same directory and never collide.
         let cache_dir = dataset_path.parent().unwrap_or(dataset_path).to_path_buf();
@@ -744,6 +744,12 @@ pub fn build_procedure() -> Procedure {
 
         if !schema.add_graph(graph_name.clone(), Arc::new(container)) {
             return Err(anyhow::anyhow!("graph '{}' already exists in schema", graph_name).into());
+        }
+
+        if let Some(ref db_path) = context.database().config().db_path {
+            if let Err(e) = crate::catalog_persistence::save_catalog(db_path, schema) {
+                eprintln!("load_ldbc: warning: could not save catalog: {}", e);
+            }
         }
 
         eprintln!(

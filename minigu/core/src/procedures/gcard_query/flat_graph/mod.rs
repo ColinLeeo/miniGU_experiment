@@ -331,6 +331,30 @@ impl FlatGraph {
             .unwrap_or(&[])
     }
 
+    pub fn neighbors_with_eid_for_label(
+        &self,
+        vertex_label: &str,
+        vid: VertexId,
+        edge_label: &str,
+        outgoing: bool,
+    ) -> &[(VertexId, EdgeId)] {
+        self.hop_csrs
+            .get(&(vertex_label.to_string(), edge_label.to_string(), outgoing))
+            .map(|csr| csr.neighbors_slice(vid))
+            .unwrap_or(&[])
+    }
+
+    pub fn hop_bucket_edge_count(
+        &self,
+        vertex_label: &str,
+        edge_label: &str,
+        outgoing: bool,
+    ) -> Option<usize> {
+        self.hop_csrs
+            .get(&(vertex_label.to_string(), edge_label.to_string(), outgoing))
+            .map(CsrAdjWithEid::edge_count)
+    }
+
     /// Neighbor vertex IDs for update-log compaction traversal.
     ///
     /// Merges base CSR neighbors with pending inserts and respects pending

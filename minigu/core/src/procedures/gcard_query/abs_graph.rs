@@ -356,10 +356,16 @@ impl GraphSkeleton<AbstractEdge> {
             if let (Some(sg), Some(dg)) = (src_gen, dst_gen) {
                 if sg + 1 == dg {
                     parent_map.insert(edge.dst, (edge.src, edge_id));
-                    children_map.entry(edge.src).or_default().push((edge.dst, edge_id));
+                    children_map
+                        .entry(edge.src)
+                        .or_default()
+                        .push((edge.dst, edge_id));
                 } else if dg + 1 == sg {
                     parent_map.insert(edge.src, (edge.dst, edge_id));
-                    children_map.entry(edge.dst).or_default().push((edge.src, edge_id));
+                    children_map
+                        .entry(edge.dst)
+                        .or_default()
+                        .push((edge.src, edge_id));
                 }
             }
         }
@@ -384,12 +390,9 @@ impl GraphSkeleton<AbstractEdge> {
                 let mut input_descs = Vec::new();
                 if let Some(children) = children_map.get(&v) {
                     for (child_id, child_edge_id) in children {
-                        let kind = child_kinds
-                            .get(child_id)
-                            .copied()
-                            .unwrap_or_else(|| {
-                                self.edge_contribution_kind_from_to(*child_edge_id, v, *child_id)
-                            });
+                        let kind = child_kinds.get(child_id).copied().unwrap_or_else(|| {
+                            self.edge_contribution_kind_from_to(*child_edge_id, v, *child_id)
+                        });
                         let desc = child_descs
                             .get(child_id)
                             .cloned()
@@ -404,8 +407,10 @@ impl GraphSkeleton<AbstractEdge> {
                 }
 
                 let combined_child_kind = ContributionKind::combine(input_kinds.iter().copied());
-                let non_functional_inputs =
-                    input_kinds.iter().filter(|kind| kind.is_non_functional()).count();
+                let non_functional_inputs = input_kinds
+                    .iter()
+                    .filter(|kind| kind.is_non_functional())
+                    .count();
 
                 if !input_descs.is_empty() {
                     let op = if non_functional_inputs >= 2 {
@@ -459,8 +464,8 @@ impl GraphSkeleton<AbstractEdge> {
                 let result_kind = if input_descs.is_empty() {
                     parent_edge_kind
                 } else {
-                    let real_alpha = projected_kind.is_non_functional()
-                        && parent_edge_kind.is_non_functional();
+                    let real_alpha =
+                        projected_kind.is_non_functional() && parent_edge_kind.is_non_functional();
                     out.push_str(&format!(
                         "  at {} attach_parent [{}] + [{}] => {} ({})\n",
                         self.vertex_label(v),
@@ -599,11 +604,16 @@ impl GraphSkeleton<AbstractEdge> {
                         ContributionKind::Empty
                     };
                     let multiplied_kind = ContributionKind::combine(
-                        child_kinds.iter().copied().chain(std::iter::once(local_kind)),
+                        child_kinds
+                            .iter()
+                            .copied()
+                            .chain(std::iter::once(local_kind)),
                     );
-                    let non_functional_child_count =
-                        child_kinds.iter().filter(|kind| kind.is_non_functional()).count()
-                            + usize::from(local_kind.is_non_functional());
+                    let non_functional_child_count = child_kinds
+                        .iter()
+                        .filter(|kind| kind.is_non_functional())
+                        .count()
+                        + usize::from(local_kind.is_non_functional());
                     if non_functional_child_count >= 2 {
                         record_effective_alpha_refs();
                     }
