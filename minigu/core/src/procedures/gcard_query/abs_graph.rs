@@ -166,7 +166,7 @@ impl GraphSkeleton<AbstractEdge> {
                     .map(|v| v.label.as_str())
                     .unwrap_or("?");
                 out.push_str(&format!(
-                    "    ae{}: {}({}) -> {}({}), originals={:?}, path_vertices={:?}, path={}\n",
+                    "    ae{}: {}({}) -> {}({}), originals={:?}, path_vertices={:?}, selectivity={}, path={}\n",
                     edge_id,
                     edge.src,
                     src_label,
@@ -174,6 +174,7 @@ impl GraphSkeleton<AbstractEdge> {
                     dst_label,
                     edge.original_edge_ids,
                     edge.path_vertices,
+                    edge.selectivity,
                     edge.path_str,
                 ));
             }
@@ -330,12 +331,13 @@ impl GraphSkeleton<AbstractEdge> {
                     "functional/n-1 contracted"
                 };
                 out.push_str(&format!(
-                    "  {} kind={} functional={:?} originals={:?} path_vertices={:?} path={}\n",
+                    "  {} kind={} functional={:?} originals={:?} path_vertices={:?} selectivity={} path={}\n",
                     self.edge_ref(edge_id),
                     kind,
                     edge.functional,
                     edge.original_edge_ids,
                     edge.path_vertices,
+                    edge.selectivity,
                     edge.path_str
                 ));
             }

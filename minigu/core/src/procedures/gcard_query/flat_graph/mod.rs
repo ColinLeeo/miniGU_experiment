@@ -289,9 +289,8 @@ impl FlatGraph {
             return vids.to_vec();
         }
         let mut buf = vids.to_vec();
-        buf.partial_shuffle(rng, n);
-        buf.truncate(n);
-        buf
+        let (sampled, _) = buf.partial_shuffle(rng, n);
+        sampled.to_vec()
     }
 
     /// Label name for a vertex, or `None` if the vertex is unknown.
