@@ -1988,6 +1988,7 @@ impl QueryGraph {
 
         let mut paths = Vec::new();
         let mut visited_edges = HashSet::new();
+        let mut visited_paths: HashSet<Vec<EdgeId>> = HashSet::new();
 
         for &pivot in pivot_nodes {
             let neighbors = self.get_neighbors(pivot);
@@ -2013,7 +2014,16 @@ impl QueryGraph {
                     visited_edges.insert(edge_key);
 
                     if let Some(path) = self.traverse_path(pivot, neighbor, edge.id, pivot_nodes) {
-                        paths.push(path);
+                        let mut reverse_edges = path.edges.clone();
+                        reverse_edges.reverse();
+                        let path_key = if path.edges <= reverse_edges {
+                            path.edges.clone()
+                        } else {
+                            reverse_edges
+                        };
+                        if visited_paths.insert(path_key) {
+                            paths.push(path);
+                        }
                     }
                 }
             }
@@ -3363,7 +3373,28 @@ impl QueryGraph {
             }
             let mut next = Vec::new();
             for existing in &edge_sets {
+                let used_original_edges: HashSet<EdgeId> = existing
+                    .iter()
+                    .flat_map(|edge| edge.original_edge_ids.iter().copied())
+                    .collect();
                 for candidate in &path_candidates {
+                    let overlaps_existing = candidate.iter().any(|edge| {
+                        edge.original_edge_ids
+                            .iter()
+                            .any(|edge_id| used_original_edges.contains(edge_id))
+                    });
+                    if overlaps_existing {
+                        continue;
+                    }
+                    let mut candidate_original_edges = HashSet::new();
+                    let overlaps_within_candidate = candidate.iter().any(|edge| {
+                        edge.original_edge_ids
+                            .iter()
+                            .any(|edge_id| !candidate_original_edges.insert(*edge_id))
+                    });
+                    if overlaps_within_candidate {
+                        continue;
+                    }
                     let mut combined = existing.clone();
                     combined.extend(candidate.clone());
                     next.push(combined);
@@ -3594,8 +3625,17 @@ impl QueryGraph {
                 abstract_graph.add_local_pcf(center, pcf.clone());
             }
         }
+        let mut seen_original_edges = HashSet::new();
         for result in results {
             let abstract_edge = result?;
+            for edge_id in &abstract_edge.original_edge_ids {
+                if !seen_original_edges.insert(*edge_id) {
+                    return Err(GCardError::InvalidState(format!(
+                        "duplicate original edge {} in abstract graph decomposition",
+                        edge_id
+                    )));
+                }
+            }
             let src_vertex = self.get_vertex(abstract_edge.src).unwrap();
             let dst_vertex = self.get_vertex(abstract_edge.dst).unwrap();
             if abstract_graph.get_vertex(abstract_edge.src).is_none() {
