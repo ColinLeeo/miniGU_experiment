@@ -18,6 +18,19 @@ use rayon::prelude::*;
 
 use crate::procedures::gcard_query::catalog::AltKey;
 use crate::procedures::gcard_query::statistic::Statistic;
+use crate::procedures::gcard_query::utils::StarStatKey;
+
+/// Output of `GCardUpdateLog::compact_and_apply_flat`.
+///
+/// `path_keys` are the `(arm/path AltKey, center_label)` pairs whose
+/// `path_statistic` block changed. `star_keys` are the `StarStatKey`s
+/// whose `star_statistic` block was recomputed because at least one of
+/// their arms appeared in `path_keys`.
+#[derive(Debug, Default, Clone)]
+pub struct CompactDirty {
+    pub path_keys: HashSet<(AltKey, String)>,
+    pub star_keys: HashSet<StarStatKey>,
+}
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
@@ -230,7 +243,7 @@ impl GCardUpdateLog {
         &mut self,
         flat_graph: &crate::procedures::gcard_query::flat_graph::FlatGraph,
         statistic: &mut Statistic,
-    ) -> anyhow::Result<HashSet<(AltKey, String)>> {
+    ) -> anyhow::Result<CompactDirty> {
         let t_total = std::time::Instant::now();
         // 返回 dirty_keys，供上层只增量刷新受影响的 compressed catalog 项。
         use crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid;
@@ -469,9 +482,18 @@ impl GCardUpdateLog {
         // ── Phase 2: apply net deltas to statistic ─────────────────────────
         let t_apply = std::time::Instant::now();
         let mut dirty_keys: HashSet<(AltKey, String)> = HashSet::new();
+        // Keep a copy of the per-(arm, center_label) dirty vertex sets so we
+        // can drive star recompute after path deltas have been applied. Star
+        // recompute only needs vertex IDs, not the i64 deltas.
+        let mut path_dirty_for_star: HashMap<(AltKey, String), HashMap<VertexId, i64>> =
+            HashMap::with_capacity(acc.len());
         let mut grouped_by_label: HashMap<String, Vec<(AltKey, HashMap<VertexId, i64>)>> =
             HashMap::new();
         for ((altkey, label), nodes) in acc {
+            // `nodes` is cheap to share here: keys are vertex ids, values
+            // are i64 deltas. We clone once into `path_dirty_for_star` so
+            // the apply pass can consume the original via `grouped_by_label`.
+            path_dirty_for_star.insert((altkey.clone(), label.clone()), nodes.clone());
             grouped_by_label
                 .entry(label.clone())
                 .or_default()
@@ -484,6 +506,17 @@ impl GCardUpdateLog {
             t_apply.elapsed().as_secs_f64(),
             apply_delta_ops,
             dirty_keys.len()
+        );
+
+        // ── Phase 2b: recompute star blocks whose arms are dirty ───────────
+        // Must run AFTER `apply_grouped_deltas` so the product re-reads each
+        // arm's updated degree from `path_statistic`.
+        let t_star = std::time::Instant::now();
+        let dirty_star_keys = statistic.apply_star_updates_from_path_dirty(&path_dirty_for_star);
+        eprintln!(
+            "[compact] star_recompute: {:.2}s ({} dirty star keys)",
+            t_star.elapsed().as_secs_f64(),
+            dirty_star_keys.len()
         );
 
         // ── Phase 3: remove deleted vertices from statistic ────────────────
@@ -509,7 +542,10 @@ impl GCardUpdateLog {
             t_total.elapsed().as_secs_f64()
         );
 
-        Ok(dirty_keys)
+        Ok(CompactDirty {
+            path_keys: dirty_keys,
+            star_keys: dirty_star_keys,
+        })
     }
 }
 

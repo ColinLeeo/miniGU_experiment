@@ -402,6 +402,21 @@ impl DegreeSeqGraphCompressed {
         statistic: &super::Statistic,
         dirty_keys: &std::collections::HashSet<(AltKey, String)>,
     ) {
+        self.update_dirty_with_stars(
+            statistic,
+            dirty_keys,
+            &std::collections::HashSet::<StarStatKey>::new(),
+        );
+    }
+
+    /// Same as `update_dirty` but also refreshes the listed star entries
+    /// in `self.star_stats` from `statistic.label_path_statistic[*].star_statistic`.
+    pub fn update_dirty_with_stars(
+        &mut self,
+        statistic: &super::Statistic,
+        dirty_keys: &std::collections::HashSet<(AltKey, String)>,
+        dirty_star_keys: &std::collections::HashSet<StarStatKey>,
+    ) {
         // 增量更新时，只刷新受影响的 key，避免每次 compact 后全量重建 catalog。
         #[derive(Debug)]
         enum DirtyAction {
@@ -414,6 +429,12 @@ impl DegreeSeqGraphCompressed {
                 altkey: AltKey,
                 label: String,
             },
+        }
+
+        #[derive(Debug)]
+        enum StarAction {
+            Upsert(StarStatKey, CompressedDegreeSeq),
+            Remove(StarStatKey),
         }
 
         let t_total = std::time::Instant::now();
@@ -440,10 +461,26 @@ impl DegreeSeqGraphCompressed {
                 }
             })
             .collect();
+
+        let star_actions: Vec<StarAction> = dirty_star_keys
+            .par_iter()
+            .map(|star_key| {
+                let new_seq = statistic
+                    .label_path_statistic
+                    .get(&star_key.center_label)
+                    .and_then(|ls| ls.star_statistic.get(star_key))
+                    .and_then(|block| block.get_bucket_max_degree_seq().ok().flatten());
+                match new_seq {
+                    Some(seq) => StarAction::Upsert(star_key.clone(), seq),
+                    None => StarAction::Remove(star_key.clone()),
+                }
+            })
+            .collect();
         eprintln!(
-            "[dsgc] encode_dirty: {:.2}s ({} dirty keys)",
+            "[dsgc] encode_dirty: {:.2}s ({} path keys, {} star keys)",
             t_encode.elapsed().as_secs_f64(),
-            dirty_keys.len()
+            dirty_keys.len(),
+            dirty_star_keys.len()
         );
 
         let t_apply = std::time::Instant::now();
@@ -466,15 +503,27 @@ impl DegreeSeqGraphCompressed {
                 }
             }
         }
+        for action in star_actions {
+            match action {
+                StarAction::Upsert(star_key, seq) => {
+                    self.star_stats.insert(star_key, seq);
+                }
+                StarAction::Remove(star_key) => {
+                    self.star_stats.remove(&star_key);
+                }
+            }
+        }
         eprintln!(
-            "[dsgc] apply_dirty: {:.2}s ({} dirty keys)",
+            "[dsgc] apply_dirty: {:.2}s ({} path keys, {} star keys)",
             t_apply.elapsed().as_secs_f64(),
-            dirty_keys.len()
+            dirty_keys.len(),
+            dirty_star_keys.len()
         );
         eprintln!(
-            "[dsgc] update_dirty total: {:.2}s ({} dirty keys)",
+            "[dsgc] update_dirty total: {:.2}s ({} path keys, {} star keys)",
             t_total.elapsed().as_secs_f64(),
-            dirty_keys.len()
+            dirty_keys.len(),
+            dirty_star_keys.len()
         );
     }
 

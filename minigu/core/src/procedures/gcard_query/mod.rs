@@ -11,6 +11,7 @@ pub mod error;
 pub mod export_edge_csv;
 pub mod export_flatgraph_snapshot;
 pub mod flat_graph;
+pub mod gcard_snapshot;
 pub mod stat_quality;
 mod statistic;
 pub mod update_log;
@@ -28,6 +29,7 @@ pub mod random_update;
 pub mod types;
 mod union_find;
 pub mod utils;
+pub mod wander_join;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -161,6 +163,7 @@ pub fn build_procedure() -> Procedure {
         LogicalType::Boolean, // verbose
         LogicalType::Int32,   // max_subgraphs (optional, default 50)
         LogicalType::String,  // decomposition_json_path (optional, null = auto decompose)
+        LogicalType::Boolean, // unit_selectivity_walks (optional, default false)
     ];
 
     let schema = Arc::new(DataSchema::new(vec![DataField::new(
@@ -246,6 +249,7 @@ pub fn build_procedure() -> Procedure {
             .get(6)
             .and_then(|a| a.try_as_string())
             .and_then(|opt| opt.clone());
+        let unit_selectivity_walks = args.get(7).and_then(|a| a.to_bool().ok()).unwrap_or(false);
         let decomposition: Option<DecompositionDef> = decomposition_path
             .map(|path| {
                 let json = fs::read_to_string(&path).map_err(|e| {
@@ -258,11 +262,19 @@ pub fn build_procedure() -> Procedure {
             .transpose()?;
 
         #[cfg(feature = "profiling")]
-        let guard = pprof::ProfilerGuardBuilder::default()
-            .frequency(1000)
-            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-            .build()
-            .expect("failed to start pprof profiler");
+        let guard = {
+            let freq = std::env::var("GCARD_PROFILE_FREQ")
+                .ok()
+                .and_then(|s| s.parse::<i32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1000);
+            eprintln!("[profiling] pprof started at {} Hz", freq);
+            pprof::ProfilerGuardBuilder::default()
+                .frequency(freq)
+                .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+                .build()
+                .expect("failed to start pprof profiler")
+        };
 
         SAMPLING_NANOS.store(0, Ordering::Relaxed);
         SAMPLING_CALLS.store(0, Ordering::Relaxed);
@@ -296,6 +308,7 @@ pub fn build_procedure() -> Procedure {
                 Some(flat_graph_ref),
                 simple_size,
                 &predicate_apply_type,
+                unit_selectivity_walks,
             )
         } else {
             query_graph.build_abstract_graph_flat(
@@ -305,6 +318,7 @@ pub fn build_procedure() -> Procedure {
                 Some(flat_graph_ref),
                 simple_size,
                 &predicate_apply_type,
+                unit_selectivity_walks,
             )
         };
         let cardinality = match build_result {
@@ -325,6 +339,11 @@ pub fn build_procedure() -> Procedure {
                 let print_alpha_beta =
                     print_plan || std::env::var_os("GCARD_PRINT_ALPHA_BETA").is_some();
                 let mut min_es_alpha_beta_counts: Option<AlphaBetaCallCounts> = None;
+                let cand_query_stem = Path::new(query_json_path.as_str())
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 for (idx, (mut abs, score)) in abstract_graphs_with_scores.into_iter().enumerate() {
                     if score > max_score {
                         max_score = score;
@@ -358,6 +377,93 @@ pub fn build_procedure() -> Procedure {
                     if GCARD_VERBOSE.load(Ordering::Relaxed) {
                         println!("es: {}", es);
                     }
+                    // Per-candidate abstract graph dump so the experiment can see what
+                    // each spanning tree contributes (including ones pruned by the min).
+                    let total_ae = abs.edges.len();
+                    let n1_ae = abs
+                        .edges
+                        .values()
+                        .filter(|e| {
+                            e.functional
+                                != crate::procedures::gcard_query::types::FunctionalDirection::None
+                        })
+                        .count();
+                    println!(
+                        "[gcard-cand] query={} idx={}/{} score={} card={} n1_edges={}/{}",
+                        cand_query_stem,
+                        idx + 1,
+                        total_count,
+                        score,
+                        es.ceil(),
+                        n1_ae,
+                        total_ae
+                    );
+                    let mut ae_ids: Vec<_> = abs.edges.keys().copied().collect();
+                    ae_ids.sort_unstable();
+                    for ae_id in ae_ids {
+                        let edge = &abs.edges[&ae_id];
+                        let src_label = abs
+                            .vertices
+                            .get(&edge.src)
+                            .map(|v| v.label.as_str())
+                            .unwrap_or("?");
+                        let dst_label = abs
+                            .vertices
+                            .get(&edge.dst)
+                            .map(|v| v.label.as_str())
+                            .unwrap_or("?");
+                        let functional_tag = match edge.functional {
+                            crate::procedures::gcard_query::types::FunctionalDirection::None => {
+                                "none"
+                            }
+                            crate::procedures::gcard_query::types::FunctionalDirection::SrcToDst => {
+                                "src->dst"
+                            }
+                            crate::procedures::gcard_query::types::FunctionalDirection::DstToSrc => {
+                                "dst->src"
+                            }
+                            crate::procedures::gcard_query::types::FunctionalDirection::Both => {
+                                "both"
+                            }
+                        };
+                        let n1 = edge.functional
+                            != crate::procedures::gcard_query::types::FunctionalDirection::None;
+                        // Interleave path_vertices and original_edge_ids so intermediate
+                        // hops are visible, resolving each id to its query-graph label.
+                        let mut chain = String::new();
+                        for (i, vid) in edge.path_vertices.iter().enumerate() {
+                            if i > 0 {
+                                let edge_label = edge
+                                    .original_edge_ids
+                                    .get(i - 1)
+                                    .and_then(|eid| query_graph.inner.edges.get(eid))
+                                    .map(|e| e.label.as_str())
+                                    .unwrap_or("?");
+                                chain.push_str(&format!(" -[{}]-> ", edge_label));
+                            }
+                            let vlabel = query_graph
+                                .inner
+                                .vertices
+                                .get(vid)
+                                .map(|v| v.label.as_str())
+                                .unwrap_or("?");
+                            chain.push_str(vlabel);
+                        }
+                        println!(
+                            "  ae{}: {}({}) -> {}({}) chain={} sel={:.4} src_rows={:.0} dst_rows={:.0} n1={} functional={}",
+                            ae_id,
+                            edge.src,
+                            src_label,
+                            edge.dst,
+                            dst_label,
+                            chain,
+                            edge.selectivity,
+                            edge.src_pcf.get_num_rows(),
+                            edge.dst_pcf.get_num_rows(),
+                            n1,
+                            functional_tag,
+                        );
+                    }
                     if es > 1.0 {
                         if es < min_nonzero_es {
                             min_nonzero_es = es;
@@ -373,6 +479,37 @@ pub fn build_procedure() -> Procedure {
                 } else {
                     0.0
                 };
+                let (sel_n1, sel_total) = match &min_es_abstract_graph {
+                    Some(abs) => {
+                        let total = abs.edges.len();
+                        let n1 = abs
+                            .edges
+                            .values()
+                            .filter(|e| {
+                                e.functional
+                                    != crate::procedures::gcard_query::types::FunctionalDirection::None
+                            })
+                            .count();
+                        (n1, total)
+                    }
+                    None => (0, 0),
+                };
+                println!(
+                    "[gcard-cand-min] query={} selected={} score={} card={} total_candidates={} \
+                     selected_n1_edges={}/{} n1_fast_path={}",
+                    cand_query_stem,
+                    index_of_min_es
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    score_of_min_es
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "0".to_string()),
+                    cardinality_value.ceil(),
+                    total_count,
+                    sel_n1,
+                    sel_total,
+                    sel_n1 > 0,
+                );
                 if print_plan {
                     let query_name = Path::new(query_json_path.as_str())
                         .file_stem()
@@ -490,18 +627,43 @@ pub fn build_procedure() -> Procedure {
 
         #[cfg(feature = "profiling")]
         {
-            if let Ok(report) = guard.report().build() {
-                let svg_path = format!(
-                    "gcard_flamegraph_{}.svg",
-                    Path::new(query_json_path.as_str())
+            match guard.report().build() {
+                Ok(report) => {
+                    let dir =
+                        std::env::var("GCARD_FLAMEGRAPH_DIR").unwrap_or_else(|_| ".".to_string());
+                    if let Err(err) = std::fs::create_dir_all(&dir) {
+                        eprintln!("[profiling] failed to create {}: {}", dir, err);
+                    }
+                    let stem = Path::new(query_json_path.as_str())
                         .file_stem()
                         .and_then(|n| n.to_str())
-                        .unwrap_or("unknown")
-                );
-                if let Ok(file) = std::fs::File::create(&svg_path) {
-                    let _ = report.flamegraph(file);
-                    println!("[profiling] flamegraph saved to: {}", svg_path);
+                        .unwrap_or("unknown");
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let svg_path = format!(
+                        "{}/gcard_flamegraph_{}_{}_{}.svg",
+                        dir.trim_end_matches('/'),
+                        stem,
+                        ts,
+                        std::process::id()
+                    );
+                    match std::fs::File::create(&svg_path) {
+                        Ok(file) => match report.flamegraph(file) {
+                            Ok(_) => {
+                                eprintln!("[profiling] flamegraph saved: {}", svg_path)
+                            }
+                            Err(err) => {
+                                eprintln!("[profiling] flamegraph write failed: {}", err)
+                            }
+                        },
+                        Err(err) => {
+                            eprintln!("[profiling] cannot create {}: {}", svg_path, err)
+                        }
+                    }
                 }
+                Err(err) => eprintln!("[profiling] report build failed: {}", err),
             }
         }
         let stem = Path::new(query_json_path.as_str())

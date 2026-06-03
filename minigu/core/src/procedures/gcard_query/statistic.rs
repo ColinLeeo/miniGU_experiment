@@ -11,7 +11,7 @@
 //! 同一个 `label` 下，`vertex_ids` 定义了 rank -> 顶点 id 的映射；
 //! 该 label 下所有 `path_statistic` 都必须和它保持同样长度。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use minigu_common::types::{LabelId, VertexId};
@@ -96,6 +96,13 @@ fn star_key_serialized_size(star_key: &StarStatKey) -> usize {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Statistic {
     pub label_path_statistic: HashMap<String, LabelStatistic>,
+    /// (center_label, single-arm AltKey) -> star keys that mention this arm.
+    /// Used by incremental star updates to find which star blocks need a
+    /// product recompute after a path arm degree changes. Skipped during
+    /// serialization; rebuilt via `rebuild_indexes()` and incrementally on
+    /// `insert_or_update_star()`.
+    #[serde(skip, default)]
+    pub(crate) arm_to_star_keys: HashMap<(String, AltKey), Vec<StarStatKey>>,
 }
 
 impl Statistic {
@@ -103,6 +110,22 @@ impl Statistic {
         for ls in self.label_path_statistic.values_mut() {
             ls.rebuild_rank_index();
         }
+        self.rebuild_arm_to_star_keys();
+    }
+
+    pub(crate) fn rebuild_arm_to_star_keys(&mut self) {
+        let mut idx: HashMap<(String, AltKey), Vec<StarStatKey>> = HashMap::new();
+        for ls in self.label_path_statistic.values() {
+            for star_key in ls.star_statistic.keys() {
+                for arm in &star_key.arms {
+                    let entry = idx
+                        .entry((star_key.center_label.clone(), arm.to_alt_key()))
+                        .or_default();
+                    entry.push(star_key.clone());
+                }
+            }
+        }
+        self.arm_to_star_keys = idx;
     }
 
     pub fn insert_or_update(
@@ -124,9 +147,20 @@ impl Statistic {
         star_key: StarStatKey,
         frequencies: &[u64],
     ) -> GCardResult<()> {
+        let center = star_key.center_label.clone();
+        let arm_keys: Vec<AltKey> = star_key.arms.iter().map(|arm| arm.to_alt_key()).collect();
+        let star_key_for_index = star_key.clone();
         self.insert_or_update_with(label, vertex_ids, frequencies, |entry, block| {
             entry.star_statistic.insert(star_key, block);
-        })
+        })?;
+        // Keep the reverse index consistent without a full rebuild.
+        for arm_key in arm_keys {
+            self.arm_to_star_keys
+                .entry((center.clone(), arm_key))
+                .or_default()
+                .push(star_key_for_index.clone());
+        }
+        Ok(())
     }
 
     fn insert_or_update_with<F>(
@@ -292,11 +326,9 @@ impl Statistic {
         let Some(bs) = ls.path_statistic.get_mut(altkey) else {
             return;
         };
-        // 这里恢复出来的是当前保存的“上界值”，不是原始精确值。
-        // 更新后仍然会被重新压回 BlockStatistic 的近似表示。
         let current = bs.recover_upper_bound_at_rank(rank).unwrap_or(0);
         let new_val = (current as i64 + delta).max(0) as u64;
-        bs.update_at_rank(rank, new_val);
+        bs.apply_value_updates(&[(rank, new_val)]);
     }
 
     pub fn apply_deltas(
@@ -314,7 +346,7 @@ impl Statistic {
             return 0;
         };
 
-        let mut applied = 0usize;
+        let mut updates: Vec<(usize, u64)> = Vec::with_capacity(deltas.len());
         for (&vertex_id, &delta) in deltas {
             if delta == 0 {
                 continue;
@@ -324,9 +356,10 @@ impl Statistic {
             };
             let current = bs.recover_upper_bound_at_rank(rank).unwrap_or(0);
             let new_val = (current as i64 + delta).max(0) as u64;
-            bs.update_at_rank(rank, new_val);
-            applied += 1;
+            updates.push((rank, new_val));
         }
+        let applied = updates.len();
+        bs.apply_value_updates(&updates);
         applied
     }
 
@@ -357,16 +390,106 @@ impl Statistic {
                     let Some(bs) = ls.path_statistic.get_mut(altkey) else {
                         continue;
                     };
+                    let mut updates: Vec<(usize, u64)> = Vec::with_capacity(rank_deltas.len());
                     for (rank, delta) in rank_deltas {
                         let current = bs.recover_upper_bound_at_rank(rank).unwrap_or(0);
                         let new_val = (current as i64 + delta).max(0) as u64;
-                        bs.update_at_rank(rank, new_val);
-                        applied += 1;
+                        updates.push((rank, new_val));
                     }
+                    applied += updates.len();
+                    bs.apply_value_updates(&updates);
                 }
                 applied
             })
             .sum()
+    }
+
+    /// Recompute star block entries that depend on any path arm whose degree
+    /// just changed.
+    ///
+    /// `path_dirty` maps `(arm_altkey, center_label) -> vertex set` and is
+    /// the same shape produced by `compact_and_apply_flat` for path deltas.
+    /// Must be called **after** path deltas have been applied via
+    /// `apply_grouped_deltas`, because the product re-reads each arm's
+    /// current degree from `path_statistic`.
+    ///
+    /// Returns the set of `StarStatKey`s whose block was touched so callers
+    /// can incrementally refresh `DegreeSeqGraphCompressed::star_stats`.
+    pub fn apply_star_updates_from_path_dirty(
+        &mut self,
+        path_dirty: &HashMap<(AltKey, String), HashMap<VertexId, i64>>,
+    ) -> HashSet<StarStatKey> {
+        // 1. Collect (star_key, center_label) -> set of dirty center vertices.
+        let mut star_dirty: HashMap<(StarStatKey, String), HashSet<VertexId>> = HashMap::new();
+        for ((arm_key, center_label), vertex_deltas) in path_dirty {
+            let lookup = (center_label.clone(), arm_key.clone());
+            let Some(star_keys) = self.arm_to_star_keys.get(&lookup) else {
+                continue;
+            };
+            for star_key in star_keys {
+                let slot = star_dirty
+                    .entry((star_key.clone(), center_label.clone()))
+                    .or_default();
+                for vid in vertex_deltas.keys() {
+                    slot.insert(*vid);
+                }
+            }
+        }
+
+        let mut dirty_star_keys: HashSet<StarStatKey> = HashSet::new();
+        if star_dirty.is_empty() {
+            return dirty_star_keys;
+        }
+
+        // 2. For each (star_key, center_label), recompute the product over arms for every dirty
+        //    center vertex and write back into the star block.
+        for ((star_key, center_label), dirty_vertices) in star_dirty {
+            let Some(ls) = self.label_path_statistic.get_mut(&center_label) else {
+                continue;
+            };
+            // Pre-resolve each arm's block via index into `path_statistic`.
+            // Bail out for this star key if any required arm block is missing
+            // (would yield a zero product otherwise, which would be wrong).
+            let arm_keys: Vec<AltKey> = star_key.arms.iter().map(|arm| arm.to_alt_key()).collect();
+            let arms_ok = arm_keys
+                .iter()
+                .all(|alt| ls.path_statistic.contains_key(alt));
+            if !arms_ok {
+                continue;
+            }
+
+            let mut updates: Vec<(usize, u64)> = Vec::with_capacity(dirty_vertices.len());
+            for vid in dirty_vertices {
+                let Some(rank) = ls.rank_of(vid) else {
+                    continue;
+                };
+                let mut product: u64 = 1;
+                for alt in &arm_keys {
+                    let bs = ls
+                        .path_statistic
+                        .get(alt)
+                        .expect("arm block presence checked above");
+                    let d = bs.recover_upper_bound_at_rank(rank).unwrap_or(0);
+                    product = product.saturating_mul(d);
+                    if product == 0 {
+                        // Once any factor is zero the star degree is zero;
+                        // no point in multiplying further.
+                        break;
+                    }
+                }
+                updates.push((rank, product));
+            }
+
+            if updates.is_empty() {
+                continue;
+            }
+            if let Some(star_bs) = ls.star_statistic.get_mut(&star_key) {
+                star_bs.apply_value_updates(&updates);
+                dirty_star_keys.insert(star_key);
+            }
+        }
+
+        dirty_star_keys
     }
 
     /// Remove `vertex_id` from every label's `vertex_ids` list and the corresponding rank
@@ -482,5 +605,132 @@ mod tests {
             compressed.edge_set_to_endpoints.is_empty(),
             "star statistics should not be expanded into path-style endpoint maps"
         );
+    }
+
+    #[test]
+    fn star_update_recomputes_product_from_current_path_degrees() {
+        // Build a tiny statistic with center=person and two single-edge arms.
+        // After bumping arm A's degree for one vertex, the star block at that
+        // rank must equal `deg(arm_A) * deg(arm_B)` read from path_statistic.
+        let arm_a = PathPattern::new(
+            vec!["person".to_string(), "person".to_string()],
+            vec!["knows".to_string()],
+        );
+        let arm_b = PathPattern::new(
+            vec!["person".to_string(), "city".to_string()],
+            vec!["livesin".to_string()],
+        );
+        let star_key = StarStatKey::new("person".to_string(), vec![arm_a.clone(), arm_b.clone()]);
+
+        let mut statistic = Statistic::default();
+        let vids = [10u64, 20, 30, 40];
+
+        // Initial path degrees for each arm.
+        let arm_a_seq: [u64; 4] = [2, 1, 0, 0];
+        let arm_b_seq: [u64; 4] = [1, 1, 1, 0];
+        statistic
+            .insert_or_update("person", &vids, arm_a.to_alt_key(), &arm_a_seq)
+            .unwrap();
+        statistic
+            .insert_or_update("person", &vids, arm_b.to_alt_key(), &arm_b_seq)
+            .unwrap();
+
+        // Initial star degree = elementwise product of arm_a_seq * arm_b_seq.
+        let star_seq: [u64; 4] = [
+            arm_a_seq[0] * arm_b_seq[0],
+            arm_a_seq[1] * arm_b_seq[1],
+            arm_a_seq[2] * arm_b_seq[2],
+            arm_a_seq[3] * arm_b_seq[3],
+        ];
+        statistic
+            .insert_or_update_star("person", &vids, star_key.clone(), &star_seq)
+            .unwrap();
+
+        // The reverse index must contain both arms for this star key.
+        let arm_a_alt = arm_a.to_alt_key();
+        let arm_b_alt = arm_b.to_alt_key();
+        assert!(
+            statistic
+                .arm_to_star_keys
+                .get(&("person".to_string(), arm_a_alt.clone()))
+                .map(|v| v.contains(&star_key))
+                .unwrap_or(false),
+            "arm A should map to the star key"
+        );
+        assert!(
+            statistic
+                .arm_to_star_keys
+                .get(&("person".to_string(), arm_b_alt.clone()))
+                .map(|v| v.contains(&star_key))
+                .unwrap_or(false),
+            "arm B should map to the star key"
+        );
+
+        // Bump arm A for vertex 30 by +1, the way `compact_and_apply_flat`
+        // would after observing a new edge that touches that vertex.
+        let mut deltas: HashMap<VertexId, i64> = HashMap::new();
+        deltas.insert(30, 1);
+        let mut grouped: HashMap<String, Vec<(AltKey, HashMap<VertexId, i64>)>> = HashMap::new();
+        grouped
+            .entry("person".to_string())
+            .or_default()
+            .push((arm_a_alt.clone(), deltas.clone()));
+        statistic.apply_grouped_deltas(grouped);
+
+        // Now drive the star recompute via the same shape compact_and_apply_flat uses.
+        let mut path_dirty: HashMap<(AltKey, String), HashMap<VertexId, i64>> = HashMap::new();
+        path_dirty.insert((arm_a_alt.clone(), "person".to_string()), deltas);
+        let dirty_star_keys = statistic.apply_star_updates_from_path_dirty(&path_dirty);
+        assert!(
+            dirty_star_keys.contains(&star_key),
+            "star key must be marked dirty"
+        );
+
+        // Verify the star block at vertex 30's rank equals new product
+        // (arm_a after +1 * arm_b unchanged) = 1 * 1 = 1.
+        let ls = statistic.label_path_statistic.get("person").unwrap();
+        let rank_30 = ls.rank_of(30).unwrap();
+        let star_bs = ls.star_statistic.get(&star_key).unwrap();
+        let arm_a_bs = ls.path_statistic.get(&arm_a_alt).unwrap();
+        let arm_b_bs = ls.path_statistic.get(&arm_b_alt).unwrap();
+        let d_a = arm_a_bs.recover_upper_bound_at_rank(rank_30).unwrap();
+        let d_b = arm_b_bs.recover_upper_bound_at_rank(rank_30).unwrap();
+        let star_val = star_bs.recover_upper_bound_at_rank(rank_30).unwrap();
+        assert_eq!(d_a, 1, "arm A degree at v=30 should be 1 after +1");
+        assert_eq!(d_b, 1, "arm B degree at v=30 should remain 1");
+        assert_eq!(
+            star_val,
+            d_a * d_b,
+            "star block must equal product of current arm degrees"
+        );
+    }
+
+    #[test]
+    fn rebuild_indexes_restores_arm_to_star_index() {
+        // Simulate deserialize → rebuild_indexes by clearing the reverse
+        // index and rebuilding from `label_path_statistic.*.star_statistic`.
+        let arm = PathPattern::new(
+            vec!["person".to_string(), "post".to_string()],
+            vec!["created".to_string()],
+        );
+        let star_key = StarStatKey::new("person".to_string(), vec![arm.clone()]);
+        let mut statistic = Statistic::default();
+        statistic
+            .insert_or_update("person", &[1, 2, 3], arm.to_alt_key(), &[1, 1, 1])
+            .unwrap();
+        statistic
+            .insert_or_update_star("person", &[1, 2, 3], star_key.clone(), &[1, 1, 1])
+            .unwrap();
+
+        // Wipe the reverse index to mimic a freshly deserialized Statistic.
+        statistic.arm_to_star_keys.clear();
+        statistic.rebuild_indexes();
+
+        let key = ("person".to_string(), arm.to_alt_key());
+        let star_keys = statistic
+            .arm_to_star_keys
+            .get(&key)
+            .expect("reverse index entry should exist after rebuild");
+        assert!(star_keys.contains(&star_key));
     }
 }

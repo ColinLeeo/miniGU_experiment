@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use dashmap::DashMap;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
+use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
 use crate::procedures::gcard_query::PredicateApplyType::INNER;
@@ -129,6 +130,7 @@ mod tests {
                 None,
                 0,
                 &PredicateApplyType::IGNORE,
+                false,
             )
             .unwrap();
 
@@ -273,6 +275,7 @@ mod tests {
                 None,
                 0,
                 &PredicateApplyType::IGNORE,
+                false,
             )
             .unwrap();
 
@@ -285,6 +288,80 @@ mod tests {
         );
         assert_eq!(local_pcfs[0].get_num_rows(), 42.0);
         assert_eq!(abstract_graph.edges.len(), 1);
+    }
+
+    #[test]
+    fn unit_path_queries_split_abstract_edge_into_length_one_hops() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "a"), vertex(2, "b"), vertex(3, "c")],
+            edges: vec![edge(10, "ab", 1, 2), edge(11, "bc", 2, 3)],
+            predicates: vec![
+                PredicateDef {
+                    predicate_id: Some(1),
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "p".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int32(Some(1)),
+                },
+                PredicateDef {
+                    predicate_id: Some(2),
+                    target: "vertex".to_string(),
+                    id: 2,
+                    property: "p".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int32(Some(2)),
+                },
+                PredicateDef {
+                    predicate_id: Some(3),
+                    target: "vertex".to_string(),
+                    id: 3,
+                    property: "p".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int32(Some(3)),
+                },
+                PredicateDef {
+                    predicate_id: Some(4),
+                    target: "edge".to_string(),
+                    id: 10,
+                    property: "q".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int32(Some(10)),
+                },
+                PredicateDef {
+                    predicate_id: Some(5),
+                    target: "edge".to_string(),
+                    id: 11,
+                    property: "q".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int32(Some(11)),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let abstract_edge = query_graph
+            .build_abstract_edge_from_def(&AbstractEdgeDef {
+                path_vertices: vec![1, 2, 3],
+                original_edge_ids: vec![10, 11],
+            })
+            .unwrap();
+
+        let unit_queries = query_graph.build_unit_path_queries(&abstract_edge).unwrap();
+
+        assert_eq!(unit_queries.len(), 2);
+        assert_eq!(unit_queries[0].path_elements.len(), 3);
+        assert_eq!(unit_queries[1].path_elements.len(), 3);
+
+        let mut hop0_vertex_positions: Vec<_> =
+            unit_queries[0].vertex_predicates.keys().copied().collect();
+        let mut hop1_vertex_positions: Vec<_> =
+            unit_queries[1].vertex_predicates.keys().copied().collect();
+        hop0_vertex_positions.sort_unstable();
+        hop1_vertex_positions.sort_unstable();
+        assert_eq!(hop0_vertex_positions, vec![0]);
+        assert_eq!(hop1_vertex_positions, vec![0, 2]);
+        assert_eq!(unit_queries[0].edge_predicates.get(&1).unwrap().len(), 1);
+        assert_eq!(unit_queries[1].edge_predicates.get(&1).unwrap().len(), 1);
     }
 
     #[test]
@@ -1003,13 +1080,26 @@ impl QueryGraph {
     }
 
     fn build_path_query(&self, abstract_edge: &AbstractEdge) -> GCardResult<PathQuery> {
+        self.build_path_query_from_parts(
+            &abstract_edge.path_vertices,
+            &abstract_edge.original_edge_ids,
+            &abstract_edge.predicates,
+        )
+    }
+
+    fn build_path_query_from_parts(
+        &self,
+        path_vertices: &[VertexId],
+        original_edge_ids: &[EdgeId],
+        predicates: &[PredicateDef],
+    ) -> GCardResult<PathQuery> {
         // 把抽象边重新展开成“路径查询”对象。
         // catalog / 采样模块更容易消费这种“顶点-边-顶点-边...”的线性表示。
         let mut path_elements = Vec::new();
         let mut vertex_predicates: HashMap<usize, Vec<PredicateDef>> = HashMap::new();
         let mut edge_predicates: HashMap<usize, Vec<PredicateDef>> = HashMap::new();
 
-        for (idx, &vertex_id) in abstract_edge.path_vertices.iter().enumerate() {
+        for (idx, &vertex_id) in path_vertices.iter().enumerate() {
             let vertex = self.inner.vertices.get(&vertex_id).ok_or_else(|| {
                 GCardError::VertexNotFound(format!("Vertex {} not found", vertex_id))
             })?;
@@ -1018,7 +1108,7 @@ impl QueryGraph {
                 position: idx * 2,
             });
             let mut v_preds = Vec::new();
-            for pred in &abstract_edge.predicates {
+            for pred in predicates {
                 if pred.target == "vertex" && pred.id == vertex_id as u32 {
                     v_preds.push(pred.clone());
                 }
@@ -1027,8 +1117,8 @@ impl QueryGraph {
                 vertex_predicates.insert(idx * 2, v_preds);
             }
 
-            if idx < abstract_edge.original_edge_ids.len() {
-                let edge_id = abstract_edge.original_edge_ids[idx];
+            if idx < original_edge_ids.len() {
+                let edge_id = original_edge_ids[idx];
                 let edge = self.inner.edges.get(&edge_id).ok_or_else(|| {
                     GCardError::EdgeNotFound(format!("Edge {} not found", edge_id))
                 })?;
@@ -1050,7 +1140,7 @@ impl QueryGraph {
                 });
 
                 let mut e_preds = Vec::new();
-                for pred in &abstract_edge.predicates {
+                for pred in predicates {
                     if pred.target == "edge" && pred.id == edge_id as u32 {
                         e_preds.push(pred.clone());
                     }
@@ -1066,6 +1156,50 @@ impl QueryGraph {
             vertex_predicates,
             edge_predicates,
         })
+    }
+
+    fn build_unit_path_queries(&self, abstract_edge: &AbstractEdge) -> GCardResult<Vec<PathQuery>> {
+        if abstract_edge.path_vertices.len() != abstract_edge.original_edge_ids.len() + 1 {
+            return Err(GCardError::InvalidData(format!(
+                "abstract edge path is inconsistent: vertices={}, edges={}",
+                abstract_edge.path_vertices.len(),
+                abstract_edge.original_edge_ids.len()
+            )));
+        }
+
+        let last_hop_idx = abstract_edge.original_edge_ids.len().saturating_sub(1);
+        let mut queries = Vec::with_capacity(abstract_edge.original_edge_ids.len());
+
+        for hop_idx in 0..abstract_edge.original_edge_ids.len() {
+            let src_vertex_id = abstract_edge.path_vertices[hop_idx];
+            let dst_vertex_id = abstract_edge.path_vertices[hop_idx + 1];
+            let edge_id = abstract_edge.original_edge_ids[hop_idx];
+
+            // Simple baseline: each predicate is attached to exactly one length-1 hop.
+            // Internal vertex predicates are assigned to the outgoing hop; the sink
+            // vertex predicate is assigned to the final hop.
+            let hop_predicates = abstract_edge
+                .predicates
+                .iter()
+                .filter(|pred| match pred.target.as_str() {
+                    "edge" => pred.id == edge_id as u32,
+                    "vertex" => {
+                        pred.id == src_vertex_id as u32
+                            || (hop_idx == last_hop_idx && pred.id == dst_vertex_id as u32)
+                    }
+                    _ => false,
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+
+            queries.push(self.build_path_query_from_parts(
+                &[src_vertex_id, dst_vertex_id],
+                &[edge_id],
+                &hop_predicates,
+            )?);
+        }
+
+        Ok(queries)
     }
 
     fn flush_local_cache(local: &HashMap<(u32, u64), bool>, shared: &DashMap<(u32, u64), bool>) {
@@ -2038,6 +2172,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
     ) -> GCardResult<Vec<(AbstractGraph, u64)>> {
         let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
         // String-keyed vertex sample cache (label → sampled vertex IDs).
@@ -2056,6 +2191,7 @@ impl QueryGraph {
                 flat_graph,
                 sample_size,
                 predicate_apply_type,
+                unit_selectivity_walks,
                 &selectivity_cache,
                 &flat_vertex_cache,
                 &pred_cache,
@@ -2082,6 +2218,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     &selectivity_cache,
                     &flat_vertex_cache,
                     &pred_cache,
@@ -2120,6 +2257,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
     ) -> GCardResult<Vec<(AbstractGraph, u64)>> {
         let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
@@ -2140,6 +2278,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     &selectivity_cache,
                     &flat_vertex_cache,
                     &pred_cache,
@@ -2296,6 +2435,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
@@ -2322,6 +2462,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
@@ -2369,6 +2510,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
@@ -2412,6 +2554,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
@@ -2454,6 +2597,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
@@ -2483,6 +2627,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
@@ -2496,6 +2641,7 @@ impl QueryGraph {
                     flat_graph,
                     sample_size,
                     predicate_apply_type,
+                    unit_selectivity_walks,
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
@@ -2917,6 +3063,7 @@ impl QueryGraph {
         flat_graph: Option<&FlatGraph>,
         sample_size: usize,
         predicate_apply_type: &PredicateApplyType,
+        unit_selectivity_walks: bool,
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
@@ -3000,13 +3147,23 @@ impl QueryGraph {
                     crate::procedures::gcard_query::SAMPLING_CALLS
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let t0 = std::time::Instant::now();
-                    let sel = self.compute_selectivity_flat(
-                        fg,
-                        abstract_edge,
-                        sample_size,
-                        flat_vertex_cache,
-                        pred_cache,
-                    )?;
+                    let sel = if unit_selectivity_walks {
+                        self.compute_selectivity_flat_unit_paths(
+                            fg,
+                            abstract_edge,
+                            sample_size,
+                            flat_vertex_cache,
+                            pred_cache,
+                        )?
+                    } else {
+                        self.compute_selectivity_flat(
+                            fg,
+                            abstract_edge,
+                            sample_size,
+                            flat_vertex_cache,
+                            pred_cache,
+                        )?
+                    };
                     crate::procedures::gcard_query::SAMPLING_NANOS.fetch_add(
                         t0.elapsed().as_nanos() as u64,
                         std::sync::atomic::Ordering::Relaxed,
@@ -3049,6 +3206,52 @@ impl QueryGraph {
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
     ) -> GCardResult<f64> {
         let path_query = self.build_path_query(abstract_edge)?;
+        self.compute_selectivity_flat_for_path_query(
+            flat_graph,
+            &path_query,
+            &abstract_edge.path_str,
+            sample_size,
+            flat_vertex_cache,
+            pred_cache,
+        )
+    }
+
+    fn compute_selectivity_flat_unit_paths(
+        &self,
+        flat_graph: &FlatGraph,
+        abstract_edge: &AbstractEdge,
+        sample_size: usize,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+    ) -> GCardResult<f64> {
+        let unit_queries = self.build_unit_path_queries(abstract_edge)?;
+        let mut selectivity = 1.0f64;
+
+        for (hop_idx, path_query) in unit_queries.iter().enumerate() {
+            let hop_desc = format!("{} [unit-hop={}]", abstract_edge.path_str, hop_idx);
+            let hop_selectivity = self.compute_selectivity_flat_for_path_query(
+                flat_graph,
+                path_query,
+                &hop_desc,
+                sample_size,
+                flat_vertex_cache,
+                pred_cache,
+            )?;
+            selectivity *= hop_selectivity;
+        }
+
+        Ok(selectivity)
+    }
+
+    fn compute_selectivity_flat_for_path_query(
+        &self,
+        flat_graph: &FlatGraph,
+        path_query: &PathQuery,
+        path_desc: &str,
+        sample_size: usize,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+    ) -> GCardResult<f64> {
         let compiled = FlatCompiledPathQuery::compile_flat(&path_query, flat_graph)?;
 
         // Sample start vertices from FlatGraph using the source label.
@@ -3256,7 +3459,7 @@ impl QueryGraph {
 
         eprintln!(
             "[selectivity-debug] path={}, src_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, sel={:.6}",
-            abstract_edge.path_str,
+            path_desc,
             compiled.src_label,
             sampled_starts.len(),
             struct_success_sample_count,
@@ -3433,7 +3636,6 @@ impl QueryGraph {
                 }
             }
         }
-
         let struct_weight = weight;
         let pred_weight = if pred_ok { weight } else { 0.0 };
         Ok((struct_weight, pred_weight))

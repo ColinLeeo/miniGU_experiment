@@ -384,7 +384,7 @@ fn do_random_update(
     let stat_arc = Arc::downcast::<super::Statistic>(stat_arc)
         .map_err(|_| anyhow::anyhow!("statistic type mismatch"))?;
     let mut statistic = Arc::try_unwrap(stat_arc).unwrap_or_else(|arc| (*arc).clone());
-    let dirty_keys = {
+    let dirty = {
         let mut guard = log_arc
             .lock()
             .map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
@@ -392,9 +392,10 @@ fn do_random_update(
     };
 
     eprintln!(
-        "[random_update] phase3 compact_log: {:.2}s ({} dirty keys)",
+        "[random_update] phase3 compact_log: {:.2}s ({} path keys, {} star keys)",
         t_phase.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
 
     // ── Phase 4: apply pending + rebuild DegreeSeqGraphCompressed ─────────
@@ -412,7 +413,7 @@ fn do_random_update(
     let dsgc_arc = Arc::downcast::<super::catalog::DegreeSeqGraphCompressed>(dsgc_arc)
         .map_err(|_| anyhow::anyhow!("dsgc type mismatch"))?;
     let mut new_dsgc = Arc::try_unwrap(dsgc_arc).unwrap_or_else(|arc| (*arc).clone());
-    new_dsgc.update_dirty(&statistic, &dirty_keys);
+    new_dsgc.update_dirty_with_stars(&statistic, &dirty.path_keys, &dirty.star_keys);
 
     if !export_bincode_path.is_empty() && export_bincode_path != "unused" {
         fg.export_bincode(export_bincode_path)?;
@@ -426,14 +427,16 @@ fn do_random_update(
     container.set_degree_seq_graph_compressed(Arc::new(new_dsgc));
     container.set_gcard_flat_graph(Arc::new(fg));
     eprintln!(
-        "[random_update] phase4b rebuild_dsgc: {:.2}s ({} dirty keys)",
+        "[random_update] phase4b rebuild_dsgc: {:.2}s ({} path keys, {} star keys)",
         t_phase_b.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
     eprintln!(
-        "[random_update] phase4 total: {:.2}s ({} dirty keys)",
+        "[random_update] phase4 total: {:.2}s ({} path keys, {} star keys)",
         t_phase.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
 
     eprintln!(

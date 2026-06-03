@@ -84,6 +84,14 @@ impl GraphIndexCatalog for MemoryGraphIndexCatalog {
     }
 }
 
+/// GCard: in-memory snapshot of the three mutable GCard structures
+/// `(FlatGraph, Statistic, DegreeSeqGraphCompressed)`, all type-erased.
+type GCardSnapshot = (
+    Arc<dyn Any + Send + Sync>,
+    Arc<dyn Any + Send + Sync>,
+    Arc<dyn Any + Send + Sync>,
+);
+
 pub struct GraphContainer {
     graph_type: Arc<MemoryGraphTypeCatalog>,
     graph_storage: GraphStorage,
@@ -103,6 +111,10 @@ pub struct GraphContainer {
     /// downcast in minigu core).  Built by `load_ldbc` when full property data is
     /// available; used to replace `MemoryGraph + MemTransaction` in Wander Join.
     gcard_flat_graph: RwLock<Option<Arc<dyn Any + Send + Sync>>>,
+    /// GCard: in-memory snapshot of `(FlatGraph, Statistic, DegreeSeqGraphCompressed)`
+    /// captured by `gcard_snapshot` and restored by `gcard_restore`.  Lets update
+    /// experiments reset to the original graph without reloading it from disk.
+    gcard_snapshot: RwLock<Option<GCardSnapshot>>,
 }
 
 impl GraphContainer {
@@ -117,6 +129,7 @@ impl GraphContainer {
             gcard_update_log: RwLock::new(None),
             gcard_scanned_hops: RwLock::new(None),
             gcard_flat_graph: RwLock::new(None),
+            gcard_snapshot: RwLock::new(None),
         }
     }
 
@@ -275,6 +288,22 @@ impl GraphContainer {
             .write()
             .expect("RwLock write")
             .take()
+    }
+
+    /// GCard: capture an in-memory snapshot of the three mutable GCard structures.
+    pub fn set_gcard_snapshot(
+        &self,
+        flat_graph: Arc<dyn Any + Send + Sync>,
+        statistic: Arc<dyn Any + Send + Sync>,
+        degree_seq_graph_compressed: Arc<dyn Any + Send + Sync>,
+    ) {
+        *self.gcard_snapshot.write().expect("RwLock write") =
+            Some((flat_graph, statistic, degree_seq_graph_compressed));
+    }
+
+    /// GCard: get the in-memory snapshot, if one was captured.
+    pub fn gcard_snapshot(&self) -> Option<GCardSnapshot> {
+        self.gcard_snapshot.read().expect("RwLock read").clone()
     }
 
     /// GCard: clear all cached GCard data (statistic, compressed degree sequence, update log).

@@ -24,5 +24,8 @@ insta = { workspace = true }
 insta-cmd = { workspace = true }
 tempfile = { workspace = true }
 
+[features]
+profiling = ["minigu/profiling"]
+
 [lints]
 workspace = true

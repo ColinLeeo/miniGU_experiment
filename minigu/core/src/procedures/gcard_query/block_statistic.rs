@@ -22,6 +22,10 @@ use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 const BUCKET_BASE: u64 = 2;
 const COMPRESSED_MAGIC: &[u8; 4] = b"BSZ1";
 const COMPRESSED_ZSTD_MAGIC: &[u8; 4] = b"BSZ2";
+/// Same as `BSZ2` but additionally persists `bucket_max_values` after
+/// `res_vec`. Loaders for older magics back-fill `bucket_max_values`
+/// from the existing layout via `rebuild_bucket_max_from_layout`.
+const COMPRESSED_ZSTD_MAGIC_V3: &[u8; 4] = b"BSZ3";
 
 #[inline]
 fn bucket_upper_bound(bucket_id: u8) -> u64 {
@@ -49,6 +53,12 @@ pub struct BlockStatistic {
     /// 每个桶共享的余量上界。
     /// 同桶的任意条目恢复时都用这里的最大值，所以恢复出来通常是上界。
     pub res_vec: Vec<u64>,
+    /// 每个桶内 value 自身的最大值。`bucket_max_values.len() == res_vec.len()`。
+    /// 与 res_vec 一同持久化，是 BlockStatistic 唯一不丢失精度的"业务真值"
+    /// 来源。`apply_value_updates` 只刷新被触及的桶号，保留未触及桶的精确值。
+    /// 反序列化加载老格式（BSZ1/BSZ2）时通过 `rebuild_bucket_max_from_layout`
+    /// 回填一次（这种情况下会退化为 layout 上界）。
+    pub bucket_max_values: Vec<u64>,
 }
 
 impl BlockStatistic {
@@ -57,35 +67,9 @@ impl BlockStatistic {
     }
 
     pub fn from_u64_sequence(values: &[u64]) -> GCardResult<Self> {
-        // 从完整频数列压缩成 block 表示。
-        if values.is_empty() {
-            return Ok(BlockStatistic::default());
-        }
-        let max_val = values.iter().copied().max().unwrap_or(0);
-        let bounds = build_bounds(BUCKET_BASE, max_val);
-        let mut bucket_ids: Vec<u8> = Vec::with_capacity(values.len());
-        let mut prefix: Vec<u8> = Vec::with_capacity(values.len());
-        // res_max[b] = bucket b 中见过的最大 remainder
-        let mut res_max: Vec<u64> = Vec::new();
-        for &v in values {
-            let b = get_bucket_index(&bounds, v);
-            let b_u8 = b.min(u8::MAX as usize) as u8;
-            let (p, r) = prefix_and_remainder(v, b_u8);
-            bucket_ids.push(b_u8);
-            prefix.push(p);
-            let idx = b.min(u8::MAX as usize);
-            if res_max.len() <= idx {
-                res_max.resize(idx + 1, 0);
-            }
-            res_max[idx] = res_max[idx].max(r);
-        }
-        let max_b = bucket_ids.iter().copied().max().unwrap_or(0) as usize;
-        res_max.truncate(max_b + 1);
-        Ok(BlockStatistic {
-            bucket_ids,
-            prefix,
-            res_vec: res_max,
-        })
+        let mut block = BlockStatistic::default();
+        block.rebuild_layout_from(values);
+        Ok(block)
     }
 
     pub fn get_by_rank(&self, rank: usize) -> Option<(u8, u8, u64)> {
@@ -109,37 +93,59 @@ impl BlockStatistic {
     }
 
     pub fn update_at_rank(&mut self, rank: usize, new_value: u64) {
-        // 增量更新时，不会回头重算整个桶，只就地更新这个 rank 的 bucket/prefix，
-        // 并扩大对应桶的 remainder 上界。
-        if rank >= self.bucket_ids.len() {
+        self.apply_value_updates(&[(rank, new_value)]);
+    }
+
+    pub fn apply_value_updates(&mut self, updates: &[(usize, u64)]) {
+        if updates.is_empty() {
             return;
         }
-        // Fast bucket index for BUCKET_BASE=2: use bit operations instead of
-        // build_bounds (Vec alloc) + get_bucket_index (binary search).
-        let new_b = if new_value <= 1 {
-            0usize
-        } else {
-            (u64::BITS - (new_value - 1).leading_zeros()) as usize
-        }
-        .min(u8::MAX as usize);
-        let new_b_u8 = new_b as u8;
-        let (new_p, new_r) = prefix_and_remainder(new_value, new_b_u8);
 
-        self.bucket_ids[rank] = new_b_u8;
-        self.prefix[rank] = new_p;
+        // In-place monotonic update. Caller guarantees values only grow,
+        // so a rank that leaves an old bucket does so by jumping into a
+        // higher one. We only ever compare `new_value` against the **new**
+        // bucket's max — the old bucket's max is left alone (it stays
+        // monotonic / conservative).
+        //
+        // We may need to extend `bounds` if a `new_value` exceeds whatever
+        // the current layout was sized for. Bounds are `1, 2, 4, ..., 2^k`
+        // with `2^k ≥ max`, so extending only appends; existing rank → bucket
+        // assignments are stable under that extension.
+        let updates_max = updates.iter().map(|&(_, v)| v).max().unwrap_or(0);
+        let current_max = self.bucket_max_values.iter().copied().max().unwrap_or(0);
+        let new_max_val = updates_max.max(current_max);
+        let new_bounds = build_bounds(BUCKET_BASE, new_max_val);
+        let new_n_buckets = new_bounds.len();
 
-        if self.res_vec.len() <= new_b {
-            self.res_vec.resize(new_b + 1, 0);
+        if new_n_buckets > self.res_vec.len() {
+            self.res_vec.resize(new_n_buckets, 0);
+            self.bucket_max_values.resize(new_n_buckets, 0);
         }
-        self.res_vec[new_b] = self.res_vec[new_b].max(new_r);
+
+        for &(rank, new_value) in updates {
+            if rank >= self.bucket_ids.len() {
+                continue;
+            }
+            let b = get_bucket_index(&new_bounds, new_value);
+            let b_u8 = b.min(u8::MAX as usize) as u8;
+            let (p, r) = prefix_and_remainder(new_value, b_u8);
+            self.bucket_ids[rank] = b_u8;
+            self.prefix[rank] = p;
+            let idx = b.min(self.res_vec.len().saturating_sub(1));
+            self.res_vec[idx] = self.res_vec[idx].max(r);
+            self.bucket_max_values[idx] = self.bucket_max_values[idx].max(new_value);
+        }
     }
 
     pub fn remove_at_rank(&mut self, rank: usize) {
         // 删除顶点时，对应 rank 要从压缩列中删掉。
-        if rank < self.bucket_ids.len() {
-            self.bucket_ids.remove(rank);
-            self.prefix.remove(rank);
+        // monotonic 策略下不重算 res_vec / bucket_max_values：移除一个
+        // rank 只可能让真实桶 max 降低，但我们保留原值作为保守上界。
+        if rank >= self.bucket_ids.len() {
+            return;
         }
+        self.bucket_ids.remove(rank);
+        self.prefix.remove(rank);
     }
 
     pub fn upper_limit_ratio(&self) -> f64 {
@@ -171,24 +177,87 @@ impl BlockStatistic {
         }
         let n_buckets = self.res_vec.len();
         let mut counts = vec![0u64; n_buckets];
-        let mut bucket_max_values = vec![0u64; n_buckets];
-        for (rank, &b) in self.bucket_ids.iter().enumerate() {
+        for &b in &self.bucket_ids {
             let idx = b as usize;
-            if idx >= n_buckets {
-                continue;
+            if idx < n_buckets {
+                counts[idx] += 1;
             }
-            counts[idx] += 1;
-            let theoretical_upper = bucket_upper_bound(b);
-            let value = self
-                .recover_upper_bound_at_rank(rank)
-                .unwrap_or(0)
-                .min(theoretical_upper);
-            bucket_max_values[idx] = bucket_max_values[idx].max(value);
+        }
+        // Read the persisted per-bucket value max directly. Built/updated by
+        // `rebuild_layout_from_values`, and backfilled by
+        // `rebuild_bucket_max_from_layout` for legacy (BSZ1/BSZ2) loads.
+        let mut bucket_max_values = self.bucket_max_values.clone();
+        if bucket_max_values.len() < n_buckets {
+            bucket_max_values.resize(n_buckets, 0);
+        } else if bucket_max_values.len() > n_buckets {
+            bucket_max_values.truncate(n_buckets);
         }
         Ok(Some(CompressedDegreeSeq::BucketMax {
             counts,
             bucket_max_values,
         }))
+    }
+
+    /// Rebuild all of bucket_ids / prefix / res_vec / bucket_max_values
+    /// from a transient list of per-rank values. Callers (build, update,
+    /// remove) own this list and discard it once the rebuild is done —
+    /// the BlockStatistic never stores it.
+    fn rebuild_layout_from(&mut self, values: &[u64]) {
+        if values.is_empty() {
+            self.bucket_ids.clear();
+            self.prefix.clear();
+            self.res_vec.clear();
+            self.bucket_max_values.clear();
+            return;
+        }
+        let max_val = values.iter().copied().max().unwrap_or(0);
+        let bounds = build_bounds(BUCKET_BASE, max_val);
+        self.bucket_ids.clear();
+        self.prefix.clear();
+        self.bucket_ids.reserve(values.len());
+        self.prefix.reserve(values.len());
+        let mut res_max: Vec<u64> = Vec::new();
+        let mut bucket_max: Vec<u64> = Vec::new();
+        for &v in values {
+            let b = get_bucket_index(&bounds, v);
+            let b_u8 = b.min(u8::MAX as usize) as u8;
+            let (p, r) = prefix_and_remainder(v, b_u8);
+            self.bucket_ids.push(b_u8);
+            self.prefix.push(p);
+            let idx = b.min(u8::MAX as usize);
+            if res_max.len() <= idx {
+                res_max.resize(idx + 1, 0);
+                bucket_max.resize(idx + 1, 0);
+            }
+            res_max[idx] = res_max[idx].max(r);
+            bucket_max[idx] = bucket_max[idx].max(v);
+        }
+        let max_b = self.bucket_ids.iter().copied().max().unwrap_or(0) as usize;
+        res_max.truncate(max_b + 1);
+        bucket_max.truncate(max_b + 1);
+        self.res_vec = res_max;
+        self.bucket_max_values = bucket_max;
+    }
+
+    /// Recompute `bucket_max_values` from the compressed layout
+    /// (bucket_ids, prefix, res_vec). Used by deserialization of legacy
+    /// formats BSZ1 / BSZ2 that did not persist `bucket_max_values`.
+    fn rebuild_bucket_max_from_layout(&mut self) {
+        let n_buckets = self.res_vec.len();
+        let mut bucket_max = vec![0u64; n_buckets];
+        for rank in 0..self.bucket_ids.len() {
+            let b = self.bucket_ids[rank];
+            let idx = b as usize;
+            if idx >= n_buckets {
+                continue;
+            }
+            let p = self.prefix[rank];
+            let r = self.res_vec[idx];
+            let shift = (b as usize).min(56);
+            let value = (((p as u64) << shift) | r).min(bucket_upper_bound(b));
+            bucket_max[idx] = bucket_max[idx].max(value);
+        }
+        self.bucket_max_values = bucket_max;
     }
 
     pub fn disk_size(&self) -> usize {
@@ -198,11 +267,18 @@ impl BlockStatistic {
     pub fn serialize(&self) -> Vec<u8> {
         let n = self.bucket_ids.len();
         let rlen = self.res_vec.len();
-        let mut out = Vec::with_capacity(n + n + 8 + rlen * 8);
+        let mlen = self.bucket_max_values.len();
+        let mut out = Vec::with_capacity(n + n + 8 + rlen * 8 + 8 + mlen * 8);
         out.extend_from_slice(&self.bucket_ids);
         out.extend_from_slice(&self.prefix);
         out.extend_from_slice(&(rlen as u64).to_le_bytes());
         for &v in &self.res_vec {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        // Trailing block: bucket_max_values. Length-prefixed so old readers
+        // that stop after res_vec stay valid (they just won't see this).
+        out.extend_from_slice(&(mlen as u64).to_le_bytes());
+        for &v in &self.bucket_max_values {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out
@@ -212,18 +288,21 @@ impl BlockStatistic {
         let bucket_ids = encode_zstd(&self.bucket_ids);
         let prefix = encode_zstd(&self.prefix);
         let res_vec = encode_raw_u64s(&self.res_vec);
+        let bucket_max = encode_raw_u64s(&self.bucket_max_values);
 
         let mut out = Vec::with_capacity(
-            COMPRESSED_MAGIC.len()
+            COMPRESSED_ZSTD_MAGIC_V3.len()
                 + 8
                 + 8
                 + bucket_ids.len()
                 + 8
                 + prefix.len()
                 + 8
-                + res_vec.len(),
+                + res_vec.len()
+                + 8
+                + bucket_max.len(),
         );
-        out.extend_from_slice(COMPRESSED_ZSTD_MAGIC);
+        out.extend_from_slice(COMPRESSED_ZSTD_MAGIC_V3);
         out.extend_from_slice(&(self.bucket_ids.len() as u64).to_le_bytes());
         out.extend_from_slice(&(bucket_ids.len() as u64).to_le_bytes());
         out.extend_from_slice(&bucket_ids);
@@ -231,6 +310,8 @@ impl BlockStatistic {
         out.extend_from_slice(&prefix);
         out.extend_from_slice(&(res_vec.len() as u64).to_le_bytes());
         out.extend_from_slice(&res_vec);
+        out.extend_from_slice(&(bucket_max.len() as u64).to_le_bytes());
+        out.extend_from_slice(&bucket_max);
         out
     }
 
@@ -266,18 +347,53 @@ impl BlockStatistic {
             );
             res_vec.push(v);
         }
-        Ok(BlockStatistic {
+        // Optional trailing block: bucket_max_values. Old payloads stop here.
+        let trailer_start = res_start + rlen * 8;
+        let bucket_max_values = if bytes.len() >= trailer_start + 8 {
+            let mlen = u64::from_le_bytes(
+                bytes[trailer_start..trailer_start + 8]
+                    .try_into()
+                    .map_err(|_| GCardError::InvalidData("bucket_max len".into()))?,
+            ) as usize;
+            let mstart = trailer_start + 8;
+            if bytes.len() < mstart + mlen * 8 {
+                return Err(GCardError::InvalidData(
+                    "block too short for bucket_max_values".into(),
+                ));
+            }
+            let mut v = Vec::with_capacity(mlen);
+            for i in 0..mlen {
+                let start = mstart + i * 8;
+                v.push(u64::from_le_bytes(
+                    bytes[start..start + 8]
+                        .try_into()
+                        .map_err(|_| GCardError::InvalidData("bucket_max u64".into()))?,
+                ));
+            }
+            v
+        } else {
+            Vec::new()
+        };
+        let mut block = BlockStatistic {
             bucket_ids,
             prefix,
             res_vec,
-        })
+            bucket_max_values,
+        };
+        if block.bucket_max_values.is_empty() && !block.res_vec.is_empty() {
+            // Legacy payload without bucket_max_values — back-fill once.
+            block.rebuild_bucket_max_from_layout();
+        }
+        Ok(block)
     }
 
     pub fn deserialize_compressed(bytes: &[u8]) -> GCardResult<Self> {
-        let bucket_ids_are_rle = if bytes.starts_with(COMPRESSED_MAGIC) {
-            true
+        let (bucket_ids_are_rle, has_bucket_max) = if bytes.starts_with(COMPRESSED_MAGIC) {
+            (true, false)
         } else if bytes.starts_with(COMPRESSED_ZSTD_MAGIC) {
-            false
+            (false, false)
+        } else if bytes.starts_with(COMPRESSED_ZSTD_MAGIC_V3) {
+            (false, true)
         } else {
             return Err(GCardError::InvalidData(
                 "compressed block magic mismatch".into(),
@@ -306,17 +422,32 @@ impl BlockStatistic {
         let res_vec = decode_raw_u64s(res_bytes)
             .ok_or_else(|| GCardError::InvalidData("decode res_vec".into()))?;
 
+        let bucket_max_values = if has_bucket_max {
+            let mlen = read_u64(bytes, &mut pos, "bucket_max len")? as usize;
+            let mbytes = take_bytes(bytes, &mut pos, mlen, "bucket_max")?;
+            decode_raw_u64s(mbytes)
+                .ok_or_else(|| GCardError::InvalidData("decode bucket_max".into()))?
+        } else {
+            Vec::new()
+        };
+
         if bucket_ids.len() != entry_count || prefix.len() != entry_count {
             return Err(GCardError::InvalidData(
                 "compressed block entry_count mismatch".into(),
             ));
         }
 
-        Ok(BlockStatistic {
+        let mut block = BlockStatistic {
             bucket_ids,
             prefix,
             res_vec,
-        })
+            bucket_max_values,
+        };
+        if !has_bucket_max && !block.res_vec.is_empty() {
+            // Legacy BSZ1/BSZ2 payload — back-fill once from the layout.
+            block.rebuild_bucket_max_from_layout();
+        }
+        Ok(block)
     }
 }
 
@@ -363,7 +494,10 @@ impl Serialize for BlockStatistic {
 impl<'de> Deserialize<'de> for BlockStatistic {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let bytes = Vec::<u8>::deserialize(d)?;
-        if bytes.starts_with(COMPRESSED_MAGIC) || bytes.starts_with(COMPRESSED_ZSTD_MAGIC) {
+        if bytes.starts_with(COMPRESSED_MAGIC)
+            || bytes.starts_with(COMPRESSED_ZSTD_MAGIC)
+            || bytes.starts_with(COMPRESSED_ZSTD_MAGIC_V3)
+        {
             return Self::deserialize_compressed(&bytes).map_err(serde::de::Error::custom);
         }
         if bytes.len() < 8 {
@@ -424,6 +558,192 @@ mod tests {
         assert_eq!(restored.bucket_ids, bs.bucket_ids);
         assert_eq!(restored.prefix, bs.prefix);
         assert_eq!(restored.res_vec, bs.res_vec);
+        assert_eq!(restored.bucket_max_values, bs.bucket_max_values);
+    }
+
+    #[test]
+    fn fresh_build_bucket_max_values_are_exact_per_bucket_max() {
+        // Two values in bucket 12, one in bucket 0. The bucket-12 max must be
+        // exactly the larger of the two, not the bucket's theoretical 2^12.
+        let bs = BlockStatistic::from_u64_sequence(&[1u64, 4096, 2049]).unwrap();
+        // Each value's bucket assignment.
+        let b0 = bs.bucket_ids[0] as usize;
+        let b1 = bs.bucket_ids[1] as usize;
+        let b2 = bs.bucket_ids[2] as usize;
+        assert_eq!(b1, 12);
+        assert_eq!(b2, 12);
+        assert_eq!(bs.bucket_max_values.len(), bs.res_vec.len());
+        assert_eq!(bs.bucket_max_values[b1], 4096);
+        // The smaller-bucket entry's max is just its own value.
+        assert_eq!(bs.bucket_max_values[b0], 1);
+    }
+
+    #[test]
+    fn apply_value_updates_maintains_bucket_max_values() {
+        let mut bs = BlockStatistic::from_u64_sequence(&[1u64, 4096]).unwrap();
+        // Bump rank 1 from 4096 → 5000 (still bucket 12); bucket_max should grow.
+        bs.apply_value_updates(&[(1, 5000)]);
+        let b1 = bs.bucket_ids[1] as usize;
+        assert_eq!(bs.bucket_max_values[b1], 5000);
+
+        // Push rank 1 to a much larger value (bucket 20); new bucket appears.
+        bs.apply_value_updates(&[(1, 1u64 << 20)]);
+        let new_b1 = bs.bucket_ids[1] as usize;
+        assert_eq!(new_b1, 20);
+        assert_eq!(bs.bucket_max_values[new_b1], 1u64 << 20);
+    }
+
+    #[test]
+    fn untouched_bucket_keeps_exact_max_after_reload_and_update() {
+        // Three values landing in three different buckets. After reload,
+        // updating only the middle rank in-bucket must leave the other two
+        // buckets' max at their exact loaded value — not inflated by the
+        // layout-derived upper bound.
+        let bs = BlockStatistic::from_u64_sequence(&[1u64, 33, 4096, 2049]).unwrap();
+        let on_disk = bs.bucket_max_values.clone();
+        let b_rank0 = bs.bucket_ids[0] as usize; // 1
+        let b_rank1 = bs.bucket_ids[1] as usize; // 33
+        let b_rank2 = bs.bucket_ids[2] as usize; // 4096
+        assert_ne!(b_rank1, b_rank0);
+        assert_ne!(b_rank1, b_rank2);
+        assert_eq!(on_disk[b_rank2], 4096, "fresh-build is exact");
+
+        let bytes = bs.serialize_compressed();
+        let mut restored = BlockStatistic::deserialize_compressed(&bytes).unwrap();
+        assert_eq!(restored.bucket_max_values, on_disk);
+
+        // 33 → 34: both fall in the same bucket (32 < v ≤ 64), max_val
+        // unchanged so bounds stay the same. Only b_rank1 is touched.
+        restored.apply_value_updates(&[(1, 34)]);
+        assert_eq!(bs.bucket_ids[1], restored.bucket_ids[1]);
+
+        // The untouched buckets keep their exact disk-loaded max.
+        assert_eq!(
+            restored.bucket_max_values[b_rank0], on_disk[b_rank0],
+            "untouched bucket {} should retain exact loaded max",
+            b_rank0
+        );
+        assert_eq!(
+            restored.bucket_max_values[b_rank2], on_disk[b_rank2],
+            "untouched bucket {} should retain exact loaded max (4096) — \
+             not inflated to the prefix+res_vec upper bound",
+            b_rank2
+        );
+        // Touched bucket reflects the update.
+        assert!(restored.bucket_max_values[b_rank1] >= 34);
+    }
+
+    #[test]
+    fn touched_bucket_uses_layout_upper_after_reload() {
+        // Two values share the same bucket (1100 and 1500 both fall in
+        // (1024, 2048] = bucket 11). After reload + in-bucket update,
+        // the touched bucket's max must cover the new value.
+        let bs = BlockStatistic::from_u64_sequence(&[1100u64, 1500]).unwrap();
+        let b = bs.bucket_ids[0] as usize;
+        assert_eq!(b, bs.bucket_ids[1] as usize, "both in same bucket");
+        assert_eq!(bs.bucket_max_values[b], 1500, "fresh-build is exact");
+
+        let bytes = bs.serialize_compressed();
+        let mut restored = BlockStatistic::deserialize_compressed(&bytes).unwrap();
+        assert_eq!(restored.bucket_max_values[b], 1500, "loaded from disk");
+
+        // 1500 → 1600: still in bucket 11 (1024 < 1600 ≤ 2048).
+        restored.apply_value_updates(&[(1, 1600)]);
+        let b_new = restored.bucket_ids[1] as usize;
+        assert!(
+            restored.bucket_max_values[b_new] >= 1600,
+            "touched bucket {} max ({}) must cover new value 1600",
+            b_new,
+            restored.bucket_max_values[b_new]
+        );
+    }
+
+    #[test]
+    fn cross_bucket_update_marks_both_old_and_new_bucket_touched() {
+        // A rank moving from one bucket to another must mark both buckets
+        // as touched, so the old bucket's max (which may now be smaller
+        // because the moving rank left) is recomputed from layout, not
+        // frozen at its pre-update value.
+        let bs = BlockStatistic::from_u64_sequence(&[100u64, 5000]).unwrap();
+        let b_old_rank1 = bs.bucket_ids[1] as usize; // 5000 → some bucket
+        assert!(bs.bucket_max_values[b_old_rank1] >= 5000);
+
+        // Push rank 1 into a much bigger bucket. Old bucket should no
+        // longer carry the stale 5000.
+        let mut bs2 = bs.clone();
+        bs2.apply_value_updates(&[(1, 1u64 << 20)]);
+        let b_new_rank1 = bs2.bucket_ids[1] as usize;
+        assert_ne!(b_new_rank1, b_old_rank1, "rank 1 must change bucket");
+        // Both buckets were marked touched and rebuilt — old bucket no
+        // longer reflects rank 1's old value (it left).
+        assert!(bs2.bucket_max_values[b_new_rank1] >= (1u64 << 20));
+    }
+
+    #[test]
+    fn bsz3_compressed_roundtrip_preserves_bucket_max_values() {
+        let bs = BlockStatistic::from_u64_sequence(&[1u64, 4096, 2049, 8, 100]).unwrap();
+        let bytes = bs.serialize_compressed();
+        assert!(bytes.starts_with(b"BSZ3"));
+        let restored = BlockStatistic::deserialize_compressed(&bytes).unwrap();
+        assert_eq!(restored.bucket_ids, bs.bucket_ids);
+        assert_eq!(restored.prefix, bs.prefix);
+        assert_eq!(restored.res_vec, bs.res_vec);
+        assert_eq!(restored.bucket_max_values, bs.bucket_max_values);
+    }
+
+    #[test]
+    fn legacy_bsz2_payload_backfills_bucket_max_values() {
+        // Craft a BSZ2-shaped payload (no bucket_max trailer) and confirm that
+        // deserialize_compressed back-fills `bucket_max_values` via the layout.
+        let bs = BlockStatistic::from_u64_sequence(&[1u64, 4096, 2049]).unwrap();
+        let mut legacy: Vec<u8> = Vec::new();
+        legacy.extend_from_slice(b"BSZ2");
+        legacy.extend_from_slice(&(bs.bucket_ids.len() as u64).to_le_bytes());
+        let zb = encode_zstd(&bs.bucket_ids);
+        legacy.extend_from_slice(&(zb.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&zb);
+        let zp = encode_zstd(&bs.prefix);
+        legacy.extend_from_slice(&(zp.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&zp);
+        let rv = encode_raw_u64s(&bs.res_vec);
+        legacy.extend_from_slice(&(rv.len() as u64).to_le_bytes());
+        legacy.extend_from_slice(&rv);
+        // Intentionally NO bucket_max trailer.
+
+        let restored = BlockStatistic::deserialize_compressed(&legacy).unwrap();
+        // Layout fields must match exactly.
+        assert_eq!(restored.bucket_ids, bs.bucket_ids);
+        assert_eq!(restored.prefix, bs.prefix);
+        assert_eq!(restored.res_vec, bs.res_vec);
+        // bucket_max was not on disk, so it gets back-filled. The back-fill
+        // uses layout-derived upper bounds, so it may be >= the exact value
+        // but must still capture each bucket's actual max as a lower bound.
+        assert_eq!(restored.bucket_max_values.len(), restored.res_vec.len());
+        for (b, &m) in restored.bucket_max_values.iter().enumerate() {
+            assert!(
+                m >= bs.bucket_max_values[b],
+                "bucket {b}: backfilled {m} should be ≥ original {orig}",
+                orig = bs.bucket_max_values[b],
+            );
+        }
+    }
+
+    #[test]
+    fn get_bucket_max_degree_seq_reads_persisted_field() {
+        // After fresh build, bucket_max_values is exact and the consumer
+        // path returns it directly (no on-the-fly recover scan).
+        let bs = BlockStatistic::from_u64_sequence(&[3000u64]).unwrap();
+        let b = bs.bucket_ids[0] as usize;
+        assert_eq!(bs.bucket_max_values[b], 3000);
+
+        let Some(crate::procedures::gcard_query::catalog::CompressedDegreeSeq::BucketMax {
+            bucket_max_values,
+            ..
+        }) = bs.get_bucket_max_degree_seq().unwrap()
+        else {
+            panic!("expected BucketMax variant");
+        };
+        assert_eq!(bucket_max_values[b], 3000);
     }
 
     #[test]

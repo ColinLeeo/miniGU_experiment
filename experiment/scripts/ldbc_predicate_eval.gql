@@ -1,0 +1,25 @@
+session set graph ldbc;
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L1_chain/L1_PB.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L1_chain/L1_PB.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L1_chain/L1_PB.json", 3, 1000, 0, false, 10, null, true);
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L2_cycle/L2_PA.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L2_cycle/L2_PA.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L2_cycle/L2_PA.json", 3, 1000, 0, false, 10, null, true);
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L3_triangle/L3_PB.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L3_triangle/L3_PB.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L3_triangle/L3_PB.json", 3, 1000, 0, false, 10, null, true);
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L4_star/L4_PB.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L4_star/L4_PB.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L4_star/L4_PB.json", 3, 1000, 0, false, 10, null, true);
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L5_path/L5_PA.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L5_path/L5_PA.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L5_path/L5_PA.json", 3, 1000, 0, false, 10, null, true);
+
+call wander_join_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L6_cycle_branch/L6_PA.json", 0.03, 30, 0);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L6_cycle_branch/L6_PA.json", 3, 1000, 0, false, 10, null, false);
+call gcard_query("/Users/colin/dev/miniGU/experiment/pattern/LDBC/L6_cycle_branch/L6_PA.json", 3, 1000, 0, false, 10, null, true);

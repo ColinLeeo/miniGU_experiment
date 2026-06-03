@@ -779,6 +779,30 @@ impl FlatGraph {
         self.edge_info.keys().copied()
     }
 
+    /// All edge IDs for a specific edge label.
+    pub fn all_edge_ids_by_label(&self, edge_label: &str) -> Vec<EdgeId> {
+        let Some((src_label, _)) = self.edge_type_schema.get(edge_label) else {
+            return Vec::new();
+        };
+        let key = (src_label.clone(), edge_label.to_string(), true);
+        let Some(csr) = self.hop_csrs.get(&key) else {
+            return Vec::new();
+        };
+        csr.neighbors.iter().map(|&(_, eid)| eid).collect()
+    }
+
+    /// Uniformly sample one edge ID for a specific edge label from the outgoing CSR bucket.
+    pub fn sample_edge_id_by_label<R: Rng>(&self, edge_label: &str, rng: &mut R) -> Option<EdgeId> {
+        let (src_label, _) = self.edge_type_schema.get(edge_label)?;
+        let key = (src_label.clone(), edge_label.to_string(), true);
+        let csr = self.hop_csrs.get(&key)?;
+        if csr.neighbors.is_empty() {
+            return None;
+        }
+        let idx = rng.gen_range(0..csr.neighbors.len());
+        Some(csr.neighbors[idx].1)
+    }
+
     /// Endpoint and label info for an edge, or `None` if not present.
     pub fn edge_endpoints(&self, eid: EdgeId) -> Option<(VertexId, &str, VertexId, &str, &str)> {
         self.edge_info.get(&eid).map(|info| {

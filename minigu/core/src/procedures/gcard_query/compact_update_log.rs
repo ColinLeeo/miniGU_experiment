@@ -62,7 +62,7 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         .clone();
 
     // ── Run compact_and_apply_flat ────────────────────────────────────────
-    let dirty_keys = {
+    let dirty = {
         let mut guard = log_arc
             .lock()
             .map_err(|_| anyhow::anyhow!("gcard_update_log mutex poisoned"))?;
@@ -77,7 +77,7 @@ pub fn compact_gcard_update_log(container: &GraphContainer) -> anyhow::Result<()
         .downcast_ref::<super::catalog::DegreeSeqGraphCompressed>()
         .ok_or_else(|| anyhow::anyhow!("dsgc type mismatch"))?
         .clone();
-    new_dsgc.update_dirty(&statistic, &dirty_keys);
+    new_dsgc.update_dirty_with_stars(&statistic, &dirty.path_keys, &dirty.star_keys);
     container.set_statistic(Arc::new(statistic));
     container.set_degree_seq_graph_compressed(Arc::new(new_dsgc));
 

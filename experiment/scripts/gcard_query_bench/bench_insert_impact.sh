@@ -23,6 +23,7 @@
 #   --max-graph N       Max spanning trees (default: 5)
 #   --ratios R1,R2,...  Comma-separated insert ratios (default: 0.01,0.01,0.01,0.01,0.01)
 #   --seed S            Base random seed (default: 42)
+#   --no-predicate-only Only benchmark base patterns without *_PA/*_PB variants
 #
 # Example:
 #   ./bench_insert_impact.sh sf1
@@ -43,6 +44,7 @@ SAMPLE_SIZE=500
 MAX_GRAPH=5
 RATIOS="0.01,0.01,0.01,0.01,0.01"
 BASE_SEED=42
+NO_PREDICATE_ONLY=0
 SF=""
 
 # Parse arguments
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --max-graph)   MAX_GRAPH="$2"; shift 2 ;;
         --ratios)      RATIOS="$2"; shift 2 ;;
         --seed)        BASE_SEED="$2"; shift 2 ;;
+        --no-predicate-only) NO_PREDICATE_ONLY=1; shift ;;
         --*)           echo "ERROR: Unknown option $1"; exit 1 ;;
         *)             SF="$1"; shift ;;
     esac
@@ -81,6 +84,9 @@ IFS=',' read -ra RATIO_ARR <<< "$RATIOS"
 NUM_ROUNDS=${#RATIO_ARR[@]}
 
 RESULT_DIR="$PROJECT_DIR/experiment/result/insert_impact/${SF}"
+if [[ "$NO_PREDICATE_ONLY" -eq 1 ]]; then
+    RESULT_DIR="${RESULT_DIR}_no_pred"
+fi
 mkdir -p "$RESULT_DIR"
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -88,11 +94,18 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 # Collect pattern files
 PATTERNS=()
 while IFS= read -r f; do
+    if [[ "$NO_PREDICATE_ONLY" -eq 1 ]]; then
+        base="$(basename "$f" .json)"
+        if [[ "$base" == *_PA || "$base" == *_PB ]]; then
+            continue
+        fi
+    fi
     PATTERNS+=("$f")
 done < <(find "$PATTERN_DIR" -name '*.json' -type f | sort)
 
 log "=== Insert Impact Benchmark ==="
 log "SF=$SF  max_k=$MAX_K  sample_size=$SAMPLE_SIZE  max_graph=$MAX_GRAPH"
+log "No-predicate only: $NO_PREDICATE_ONLY"
 log "Ratios: ${RATIOS}  (${NUM_ROUNDS} rounds)"
 log "Patterns: ${#PATTERNS[@]}"
 log "Result dir: $RESULT_DIR"

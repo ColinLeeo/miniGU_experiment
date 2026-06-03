@@ -90,5 +90,17 @@ pub fn build_predefined_procedures() -> Vec<(String, Procedure)> {
             "export_edge_csv".to_string(),
             gcard_query::export_edge_csv::build_procedure(),
         ),
+        (
+            "gcard_snapshot".to_string(),
+            gcard_query::gcard_snapshot::build_snapshot_procedure(),
+        ),
+        (
+            "gcard_restore".to_string(),
+            gcard_query::gcard_snapshot::build_restore_procedure(),
+        ),
+        (
+            "wander_join_query".to_string(),
+            gcard_query::wander_join::build_procedure(),
+        ),
     ]
 }

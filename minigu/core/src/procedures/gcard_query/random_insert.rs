@@ -208,22 +208,31 @@ fn do_random_insert(
             .unwrap_or_default();
         let empty_props: Vec<ScalarValue> = prop_names.iter().map(|_| ScalarValue::Null).collect();
 
+        // Donor pool: existing edges of this label.  New edges copy their
+        // properties from a uniformly-sampled donor so predicates on this edge
+        // (creationdate, deletiondate, ...) stay consistent with the original
+        // distribution.  Without this the new edges would carry NULL props and
+        // never satisfy time-window predicates, biasing the true cardinality.
+        let donor_eids: Vec<EdgeId> = fg.all_edge_ids_by_label(edge_label);
+        let can_sample_props = !prop_names.is_empty() && !donor_eids.is_empty();
+
         for _ in 0..n_insert {
             let src = src_vids[rng.gen_range(0..src_vids.len())];
             let dst = dst_vids[rng.gen_range(0..dst_vids.len())];
             let eid = next_eid;
             next_eid += 1;
 
-            fg.observe_edge_stats(edge_label, &empty_props);
-            fg.record_insert_edge(
-                eid,
-                src,
-                src_label,
-                dst,
-                dst_label,
-                edge_label,
-                empty_props.clone(),
-            );
+            let props = if can_sample_props {
+                let donor = donor_eids[rng.gen_range(0..donor_eids.len())];
+                fg.edge_props(donor)
+                    .map(|p| p.to_vec())
+                    .unwrap_or_else(|| empty_props.clone())
+            } else {
+                empty_props.clone()
+            };
+
+            fg.observe_edge_stats(edge_label, &props);
+            fg.record_insert_edge(eid, src, src_label, dst, dst_label, edge_label, props);
             log_guard.record_insert_edge(src, src_label, dst, dst_label, edge_label);
             inserted_edge_count += 1;
         }
@@ -243,16 +252,17 @@ fn do_random_insert(
     let stat_arc = Arc::downcast::<super::Statistic>(stat_arc)
         .map_err(|_| anyhow::anyhow!("statistic type mismatch"))?;
     let mut statistic = Arc::try_unwrap(stat_arc).unwrap_or_else(|arc| (*arc).clone());
-    let dirty_keys = {
+    let dirty = {
         let mut guard = log_arc
             .lock()
             .map_err(|_| anyhow::anyhow!("mutex poisoned"))?;
         guard.compact_and_apply_flat(&fg, &mut statistic)?
     };
     eprintln!(
-        "[random_insert] phase3 compact_log: {:.2}s ({} dirty keys)",
+        "[random_insert] phase3 compact_log: {:.2}s ({} path keys, {} star keys)",
         t_phase.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
 
     // ── Phase 4: apply pending + rebuild DegreeSeqGraphCompressed ────────
@@ -270,7 +280,7 @@ fn do_random_insert(
     let dsgc_arc = Arc::downcast::<super::catalog::DegreeSeqGraphCompressed>(dsgc_arc)
         .map_err(|_| anyhow::anyhow!("dsgc type mismatch"))?;
     let mut new_dsgc = Arc::try_unwrap(dsgc_arc).unwrap_or_else(|arc| (*arc).clone());
-    new_dsgc.update_dirty(&statistic, &dirty_keys);
+    new_dsgc.update_dirty_with_stars(&statistic, &dirty.path_keys, &dirty.star_keys);
 
     if !export_bincode_path.is_empty() && export_bincode_path != "unused" {
         fg.export_bincode(export_bincode_path)?;
@@ -284,14 +294,16 @@ fn do_random_insert(
     container.set_degree_seq_graph_compressed(Arc::new(new_dsgc));
     container.set_gcard_flat_graph(Arc::new(fg));
     eprintln!(
-        "[random_insert] phase4b rebuild_dsgc: {:.2}s ({} dirty keys)",
+        "[random_insert] phase4b rebuild_dsgc: {:.2}s ({} path keys, {} star keys)",
         t_phase_b.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
     eprintln!(
-        "[random_insert] phase4 total: {:.2}s ({} dirty keys)",
+        "[random_insert] phase4 total: {:.2}s ({} path keys, {} star keys)",
         t_phase.elapsed().as_secs_f64(),
-        dirty_keys.len()
+        dirty.path_keys.len(),
+        dirty.star_keys.len()
     );
 
     eprintln!(
