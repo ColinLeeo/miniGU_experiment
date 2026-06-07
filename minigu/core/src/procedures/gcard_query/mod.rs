@@ -83,6 +83,21 @@ pub(crate) static BUILD_ABSTRACT_EDGE_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static BUILD_PCF_LOOKUP_NANOS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+
+// Filter-pool cache + stage-2 / failure counters
+pub(crate) static FILTER_POOL_CACHE_HITS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FILTER_POOL_CACHE_MISSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static FILTER_POOL_EMPTY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static STAGE2_TRIGGERED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static STAGE2_RESULT_ZERO: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static SELECTIVITY_ZERO: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 use std::convert::TryFrom;
 
 use serde::{Deserialize, Serialize};
@@ -614,6 +629,16 @@ pub fn build_procedure() -> Procedure {
                         },
                     );
                 }
+                let cache_hits = FILTER_POOL_CACHE_HITS.load(Ordering::Relaxed);
+                let cache_misses = FILTER_POOL_CACHE_MISSES.load(Ordering::Relaxed);
+                let pool_empty = FILTER_POOL_EMPTY.load(Ordering::Relaxed);
+                let stage2_count = STAGE2_TRIGGERED.load(Ordering::Relaxed);
+                let stage2_zero = STAGE2_RESULT_ZERO.load(Ordering::Relaxed);
+                let sel_zero = SELECTIVITY_ZERO.load(Ordering::Relaxed);
+                eprintln!(
+                    "[cache-prof] filter_pool_hits={}, filter_pool_misses={}, filter_pool_empty={}, stage2_triggered={}, stage2_result_zero={}, selectivity_zero={}",
+                    cache_hits, cache_misses, pool_empty, stage2_count, stage2_zero, sel_zero,
+                );
                 cardinality_value
             }
             Err(e) => {

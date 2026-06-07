@@ -10,10 +10,10 @@ K="${1:-2}"
 SAMPLE_SIZE="${2:-500}"
 MAX_GRAPH="${3:-5}"
 OUT_DIR="${GCARD_OUT_DIR:-${PROJECT_ROOT}/experiment/result/gcard_query}"
-PATTERN_ROOT="${PROJECT_ROOT}/experiment/patterns/gcard"
+PATTERN_DIR="${PROJECT_ROOT}/experiment/patterns/gcard/lsqb_glogs_with_pred_10"
 
 mkdir -p "$OUT_DIR"
-out="$OUT_DIR/lsqb_glogs_k${K}_ss${SAMPLE_SIZE}.csv"
+out="$OUT_DIR/lsqb_glogs_with_pred_k${K}_ss${SAMPLE_SIZE}.csv"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -22,11 +22,11 @@ session set graph ${GRAPH}
 call load_catalog("${GRAPH}")
 EOF
 
-find "$PATTERN_ROOT/lsqb" "$PATTERN_ROOT/glogs" -name '*.json' -type f | sort -V |
+find "$PATTERN_DIR" -name '*.json' -type f | sort -V |
 while IFS= read -r pattern; do
   echo ":time call gcard_query(\"${pattern}\", ${K}, ${SAMPLE_SIZE}, 0, false, ${MAX_GRAPH})" >>"$tmp"
 done
 echo ":quit" >>"$tmp"
 
-"$MINIGU" execute "$tmp" --path "$DB_PATH" | tee "$out"
+"$MINIGU" execute "$tmp" --path "$DB_PATH" 2>&1 | tee "$out"
 echo "Log: $out"

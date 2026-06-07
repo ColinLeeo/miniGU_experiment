@@ -52,7 +52,7 @@ impl FunctionalDirection {
 
 pub type PredicateId = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComparisonOp {
     Eq,
