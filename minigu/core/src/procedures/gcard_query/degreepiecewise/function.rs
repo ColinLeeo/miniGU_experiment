@@ -160,6 +160,27 @@ impl PiecewiseConstantFunction {
         self.cumulative_rows.last().copied().unwrap_or(0.0)
     }
 
+    /// `true` if this PCF is the [`empty`](Self::empty) placeholder rather than
+    /// a real degree sequence.  `empty()` stores a single near-zero constant
+    /// (`1e-11`); real degree sequences only contain vertices with degree
+    /// `>= 1`, so a lone sub-unit constant unambiguously marks the placeholder.
+    pub fn is_empty_placeholder(&self) -> bool {
+        self.constants.len() == 1 && self.constants[0] < 0.5
+    }
+
+    /// Number of distinct vertices captured by this degree sequence — i.e. the
+    /// PCF's domain width on the x-axis (`right_interval_edges.last()`).  Since
+    /// degree-0 vertices are never materialised into the sequence, this is the
+    /// *support*: the count of vertices that have at least one embedding of the
+    /// underlying path pattern.  The [`empty`](Self::empty) placeholder reports
+    /// `0`.
+    pub fn support(&self) -> f64 {
+        if self.is_empty_placeholder() {
+            return 0.0;
+        }
+        self.right_interval_edges.last().copied().unwrap_or(0.0)
+    }
+
     pub fn truncate_by_ratio(&self, ratio: f64) -> Self {
         // 只保留前 `ratio` 比例的累计质量，常用于做截断近似。
         if ratio < 0.0 || ratio > 1.0 || self.constants.is_empty() {

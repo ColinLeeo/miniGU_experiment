@@ -3266,6 +3266,7 @@ impl QueryGraph {
                     let sel = if unit_selectivity_walks {
                         self.compute_selectivity_flat_unit_paths(
                             fg,
+                            degree_seq_graph,
                             abstract_edge,
                             sample_size,
                             flat_vertex_cache,
@@ -3275,6 +3276,7 @@ impl QueryGraph {
                     } else {
                         self.compute_selectivity_flat(
                             fg,
+                            degree_seq_graph,
                             abstract_edge,
                             sample_size,
                             flat_vertex_cache,
@@ -3315,9 +3317,11 @@ impl QueryGraph {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_selectivity_flat(
         &self,
         flat_graph: &FlatGraph,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
         abstract_edge: &AbstractEdge,
         sample_size: usize,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
@@ -3329,6 +3333,7 @@ impl QueryGraph {
         let path_query = self.build_path_query(abstract_edge)?;
         self.compute_selectivity_flat_for_path_query(
             flat_graph,
+            degree_seq_graph,
             &path_query,
             &abstract_edge.path_str,
             sample_size,
@@ -3338,9 +3343,11 @@ impl QueryGraph {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_selectivity_flat_unit_paths(
         &self,
         flat_graph: &FlatGraph,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
         abstract_edge: &AbstractEdge,
         sample_size: usize,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
@@ -3356,6 +3363,7 @@ impl QueryGraph {
             let hop_desc = format!("{} [unit-hop={}]", abstract_edge.path_str, hop_idx);
             let hop_selectivity = self.compute_selectivity_flat_for_path_query(
                 flat_graph,
+                degree_seq_graph,
                 path_query,
                 &hop_desc,
                 sample_size,
@@ -3369,9 +3377,11 @@ impl QueryGraph {
         Ok(selectivity)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn compute_selectivity_flat_for_path_query(
         &self,
         flat_graph: &FlatGraph,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
         path_query: &PathQuery,
         path_desc: &str,
         sample_size: usize,
@@ -3386,14 +3396,53 @@ impl QueryGraph {
             return Ok(1.0);
         }
 
-        // Stats-based plan picker (Alley §5 ChooseSamplingOrder, but driven by
-        // FlatGraph ColumnStats — no pilot, no scan).
-        let chosen_plan_idx = if plans.len() == 1 {
-            0
-        } else {
-            self.select_best_walk_plan(flat_graph, &plans, pred_cache, filtered_pool_cache)
-        };
+        // Ordered label sequences for the path (forward order), used to look up
+        // per-anchor structural participation from the catalog.
+        let mut node_labels: Vec<String> = Vec::new();
+        let mut edge_labels: Vec<String> = Vec::new();
+        for element in &path_query.path_elements {
+            match element {
+                PathElement::Vertex { label, .. } => node_labels.push(label.clone()),
+                PathElement::Edge { label, .. } => edge_labels.push(label.clone()),
+            }
+        }
+
+        // Stats-based plan picker (Alley §5 ChooseSamplingOrder): driven by
+        // FlatGraph ColumnStats (predicate selectivity) *and* catalog PCF
+        // support (structural participation) — no pilot, no scan.
+        let (chosen_plan_idx, chosen_participation) = self.select_best_walk_plan(
+            flat_graph,
+            degree_seq_graph,
+            &plans,
+            &node_labels,
+            &edge_labels,
+            sample_size,
+            pred_cache,
+            filtered_pool_cache,
+        );
         let compiled = &plans[chosen_plan_idx];
+
+        // Pre-walk guard: if even the best anchor is expected to land on fewer
+        // than one participating start vertex, uniform sampling would almost
+        // certainly dead-end on every walk.  Skip the doomed walk entirely and
+        // return the static fallback, keeping the PCF's structural cardinality
+        // intact while supplying the predicate multiplier analytically.
+        if let Some(p) = chosen_participation {
+            if (sample_size as f64) * p < 1.0 {
+                crate::procedures::gcard_query::WALK_GUARD_SKIPPED
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let fallback = Self::static_fallback_selectivity(flat_graph, compiled);
+                if crate::procedures::gcard_query::GCARD_VERBOSE
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    eprintln!(
+                        "[selectivity-debug] path={}, GUARD-SKIP participation={:.3e}, fallback_sel={:.6}",
+                        path_desc, p, fallback,
+                    );
+                }
+                return Ok(fallback);
+            }
+        }
 
         // Walk-fail-then-calculate (Alley §6 "walk-fail-then-calculate"):
         //
@@ -3450,6 +3499,7 @@ impl QueryGraph {
             start_filter_ratio,
             final_starts_len,
             stage2_used,
+            pool_empty,
         ) = if trigger_stage2 {
             // Stage 2: materialise the tangled domain for this (label,
             // predicates) pair and re-sample from it.  The pool is cached in
@@ -3464,8 +3514,9 @@ impl QueryGraph {
             );
             if pool.is_empty() {
                 // No vertex matches the start predicate — truly zero, no
-                // amount of sampling can recover an embedding.
-                (0.0, 0, 0.0, 0.0, 0.0, 0, true)
+                // amount of sampling can recover an embedding.  This is the
+                // *only* path to a genuine zero selectivity.
+                (0.0, 0, 0.0, 0.0, 0.0, 0, true, true)
             } else {
                 let mut rng = rand::thread_rng();
                 let starts = if pool.len() <= sample_size {
@@ -3490,6 +3541,7 @@ impl QueryGraph {
                     ratio,
                     starts.len(),
                     true,
+                    false,
                 )
             }
         } else {
@@ -3501,6 +3553,7 @@ impl QueryGraph {
                 1.0,
                 stage1_starts.len(),
                 false,
+                false,
             )
         };
 
@@ -3508,17 +3561,33 @@ impl QueryGraph {
         // Stage 1 always uses ratio = 1.0 (no filter), so the multiplication
         // is a no-op there.
         let selectivity = final_conditional * start_filter_ratio;
-        if selectivity == 0.0 {
+
+        // Distinguish a *genuine* zero (the start predicate matches no vertex
+        // at all → `pool_empty`) from a sampling miss (we found no
+        // structurally-valid, pred-passing embedding among the samples).  Only
+        // the former collapses the estimate to zero; the latter falls back to
+        // the static stats-based predicate selectivity so the PCF's structural
+        // cardinality survives instead of being truncated to zero.
+        let result = if pool_empty {
             crate::procedures::gcard_query::SELECTIVITY_ZERO
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            crate::procedures::gcard_query::STAGE2_RESULT_ZERO
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            0.0
+        } else if selectivity == 0.0 {
+            crate::procedures::gcard_query::SELECTIVITY_FALLBACK
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if stage2_used {
                 crate::procedures::gcard_query::STAGE2_RESULT_ZERO
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+            Self::static_fallback_selectivity(flat_graph, compiled)
+        } else {
+            selectivity
+        };
 
         eprintln!(
-            "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, conditional={:.6}, start_filter_ratio={:.6}, sel={:.6}, stage2={}",
+            "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, conditional={:.6}, start_filter_ratio={:.6}, sel={:.6}, result={:.6}, stage2={}, pool_empty={}",
             path_desc,
             compiled.start_idx,
             compiled.start_label,
@@ -3529,10 +3598,12 @@ impl QueryGraph {
             final_conditional,
             start_filter_ratio,
             selectivity,
+            result,
             stage2_used,
+            pool_empty,
         );
 
-        Ok(selectivity)
+        Ok(result)
     }
 
     /// Run the batched parallel walk loop with per-start CV adaptation and
@@ -3799,13 +3870,36 @@ impl QueryGraph {
         label: &str,
         predicates: &[ResolvedPredicate],
     ) -> f64 {
+        Self::stats_predicate_selectivity(flat_graph, label, false, predicates)
+    }
+
+    /// Joint stats-based selectivity of `predicates` against a single
+    /// vertex/edge `label`, using the FlatGraph's ColumnStats only (no scan).
+    /// `is_edge` selects between vertex and edge stat tables.  Returns a value
+    /// in `(0, 1]`; missing stats degrade gracefully to `1.0`/`0.5`.
+    fn stats_predicate_selectivity(
+        flat_graph: &FlatGraph,
+        label: &str,
+        is_edge: bool,
+        predicates: &[ResolvedPredicate],
+    ) -> f64 {
         if predicates.is_empty() {
             return 1.0;
         }
-        let Some(table_stats) = flat_graph.vertex_table_stats(label) else {
+        let table_stats = if is_edge {
+            flat_graph.edge_table_stats(label)
+        } else {
+            flat_graph.vertex_table_stats(label)
+        };
+        let Some(table_stats) = table_stats else {
             return 1.0;
         };
-        let Some(prop_names) = flat_graph.vertex_prop_schema().get(label) else {
+        let schema = if is_edge {
+            flat_graph.edge_prop_schema()
+        } else {
+            flat_graph.vertex_prop_schema()
+        };
+        let Some(prop_names) = schema.get(label) else {
             return 1.0;
         };
 
@@ -3821,6 +3915,105 @@ impl QueryGraph {
             joint *= Self::estimate_single_predicate_stats(col, &rp.op, &rp.value);
         }
         joint.clamp(1e-12, 1.0)
+    }
+
+    /// Static, sampling-free estimate of the *whole path*'s predicate
+    /// selectivity for the chosen plan — the product of every predicated
+    /// position's stats selectivity (start vertex + both segments, vertices via
+    /// vertex stats, edges via edge stats), assuming predicate independence.
+    ///
+    /// This is the fallback returned when sampling fails to find any
+    /// structurally-valid embedding: the structural cardinality is already
+    /// carried exactly by the PCF, so we only need to supply the predicate
+    /// multiplier analytically rather than collapsing the estimate to zero.
+    fn static_fallback_selectivity(
+        flat_graph: &FlatGraph,
+        compiled: &FlatCompiledPathQuery,
+    ) -> f64 {
+        let mut sel = Self::stats_predicate_selectivity(
+            flat_graph,
+            &compiled.start_label,
+            false,
+            &compiled.start_predicates,
+        );
+        for segment in [&compiled.left_segment, &compiled.right_segment] {
+            for step in segment {
+                match step {
+                    FlatCompiledStep::Vertex { label, predicates } if !predicates.is_empty() => {
+                        sel *=
+                            Self::stats_predicate_selectivity(flat_graph, label, false, predicates);
+                    }
+                    FlatCompiledStep::Edge {
+                        edge_label,
+                        predicates,
+                        ..
+                    } if !predicates.is_empty() => {
+                        sel *= Self::stats_predicate_selectivity(
+                            flat_graph, edge_label, true, predicates,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        sel.clamp(1e-12, 1.0)
+    }
+
+    /// Estimate the *structural participation fraction* of anchoring the walk at
+    /// vertex index `anchor` on the path described by `node_labels` /
+    /// `edge_labels` — i.e. the probability that a uniformly sampled vertex of
+    /// the anchor's label has at least one full structural embedding of the
+    /// path.  A high participation means uniform start sampling lands on
+    /// participating vertices and rarely dead-ends.
+    ///
+    /// * Endpoint anchors (`anchor == 0` or `anchor == k`) read the exact support of the full-path
+    ///   PCF from that endpoint — one catalog lookup, no independence assumption.
+    /// * Interior anchors combine the two half-path PCFs (left half and right half emanating from
+    ///   the anchor) under an independence approximation.
+    ///
+    /// Returns `None` when the catalog has no statistics for the relevant
+    /// pattern (so the caller treats participation as unknown rather than zero).
+    fn anchor_structural_participation(
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: &FlatGraph,
+        node_labels: &[String],
+        edge_labels: &[String],
+        anchor: usize,
+    ) -> Option<f64> {
+        let k = edge_labels.len();
+        let anchor_label = node_labels.get(anchor)?;
+        let pop = flat_graph.vertex_count_by_label(anchor_label);
+        if pop == 0 {
+            return None;
+        }
+        let pop = pop as f64;
+
+        let support_of = |node_seq: &[String], edge_seq: &[String], target: &str| -> Option<f64> {
+            let key = make_alt_key(node_seq, edge_seq);
+            let pcf = degree_seq_graph.get_piece_func_by_path(&key, target);
+            if pcf.is_empty_placeholder() {
+                None
+            } else {
+                Some(pcf.support())
+            }
+        };
+
+        if anchor == 0 || anchor == k {
+            let s = support_of(node_labels, edge_labels, anchor_label)?;
+            Some((s / pop).clamp(0.0, 1.0))
+        } else {
+            let left_support = support_of(
+                &node_labels[0..=anchor],
+                &edge_labels[0..anchor],
+                anchor_label,
+            )?;
+            let right_support = support_of(
+                &node_labels[anchor..=k],
+                &edge_labels[anchor..k],
+                anchor_label,
+            )?;
+            Some(((left_support / pop) * (right_support / pop)).clamp(0.0, 1.0))
+        }
     }
 
     fn estimate_single_predicate_stats(
@@ -4072,18 +4265,77 @@ impl QueryGraph {
     /// most selective (smallest estimated ratio).  Ties go to the plan with
     /// the smaller start population (cheaper to materialise later if the
     /// walk-fail-then-calculate stage 2 ever triggers).
+    /// Pick the single walk plan to sample, considering **both** predicate
+    /// selectivity (as before) **and** structural participation (new).
+    ///
+    /// Structure gates, selectivity refines: an anchor is "viable" when uniform
+    /// start sampling is expected to land on enough participating vertices
+    /// (`sample_size * participation >= VIABLE_MIN_HITS`).  Among viable anchors
+    /// the most predicate-selective start wins (smallest filter pool, cleanest
+    /// conditional estimate); if none is viable we pick the best structural
+    /// chance so the caller's fallback path runs from the least-bad anchor.
+    ///
+    /// Returns `(chosen_idx, participation_of_chosen)`.  The participation is
+    /// `None` when the catalog has no stats for that anchor's pattern.
+    #[allow(clippy::too_many_arguments)]
     fn select_best_walk_plan(
         &self,
         flat_graph: &FlatGraph,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
         plans: &[FlatCompiledPathQuery],
+        node_labels: &[String],
+        edge_labels: &[String],
+        sample_size: usize,
         _pred_cache: &Arc<DashMap<(u32, u64), bool>>,
         _filtered_pool_cache: &Arc<
             DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
         >,
-    ) -> usize {
-        let mut best_idx = 0usize;
-        let mut best_ratio = f64::INFINITY;
-        let mut best_pop = usize::MAX;
+    ) -> (usize, Option<f64>) {
+        // Minimum expected number of structurally-successful starts for an
+        // anchor to count as "viable" — above this, uniform sampling lands on
+        // enough participating vertices to yield a real conditional estimate.
+        const VIABLE_MIN_HITS: f64 = 5.0;
+
+        struct Cand {
+            idx: usize,
+            participation: Option<f64>,
+            viable: bool,
+            ratio: f64,
+            pop: usize,
+        }
+
+        let is_better = |a: &Cand, b: &Cand| -> bool {
+            // Viable anchors always beat non-viable ones.
+            if a.viable != b.viable {
+                return a.viable;
+            }
+            let pa = a.participation.unwrap_or(0.0);
+            let pb = b.participation.unwrap_or(0.0);
+            if a.viable {
+                // Both viable: most selective start first, then highest
+                // participation, then smallest population.
+                if a.ratio != b.ratio {
+                    return a.ratio < b.ratio;
+                }
+                if pa != pb {
+                    return pa > pb;
+                }
+                a.pop < b.pop
+            } else {
+                // Both non-viable: best structural chance first, then most
+                // selective start, then smallest population.
+                if pa != pb {
+                    return pa > pb;
+                }
+                if a.ratio != b.ratio {
+                    return a.ratio < b.ratio;
+                }
+                a.pop < b.pop
+            }
+        };
+
+        let n = sample_size as f64;
+        let mut best: Option<Cand> = None;
 
         for (idx, plan) in plans.iter().enumerate() {
             let ratio = if plan.start_predicates.is_empty() {
@@ -4096,31 +4348,49 @@ impl QueryGraph {
                 )
             };
             let pop = flat_graph.vertex_count_by_label(&plan.start_label);
+            let participation = Self::anchor_structural_participation(
+                degree_seq_graph,
+                flat_graph,
+                node_labels,
+                edge_labels,
+                plan.start_idx,
+            );
+            // Unknown participation is treated as neutral/viable so anchors
+            // without catalog stats fall back to the legacy selectivity ranking
+            // instead of being penalised to the bottom.
+            let viable = match participation {
+                Some(p) => n * p >= VIABLE_MIN_HITS,
+                None => true,
+            };
 
-            // Strictly smaller ratio wins.  On a tie, the smaller starting
-            // population wins — when ratios are equal we'd rather walk from a
-            // smaller-fanout vertex (less work, same expected behaviour).
-            let better = ratio < best_ratio || (ratio == best_ratio && pop < best_pop);
-            if better {
-                best_idx = idx;
-                best_ratio = ratio;
-                best_pop = pop;
+            let cand = Cand {
+                idx,
+                participation,
+                viable,
+                ratio,
+                pop,
+            };
+            if best.as_ref().is_none_or(|b| is_better(&cand, b)) {
+                best = Some(cand);
             }
         }
 
+        let best = best.expect("plans is non-empty");
         if crate::procedures::gcard_query::GCARD_VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
         {
             eprintln!(
-                "[plan-select] plans={}, chosen={}, est_ratio={:.6e}, pop={}, start_label={}",
+                "[plan-select] plans={}, chosen={}, viable={}, participation={:?}, est_ratio={:.6e}, pop={}, start_label={}",
                 plans.len(),
-                best_idx,
-                best_ratio,
-                best_pop,
-                plans[best_idx].start_label,
+                best.idx,
+                best.viable,
+                best.participation,
+                best.ratio,
+                best.pop,
+                plans[best.idx].start_label,
             );
         }
 
-        best_idx
+        (best.idx, best.participation)
     }
 
     /// Execute a single Wander Join walk over [`FlatGraph`] using the given

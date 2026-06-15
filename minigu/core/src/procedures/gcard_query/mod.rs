@@ -97,6 +97,16 @@ pub(crate) static STAGE2_RESULT_ZERO: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 pub(crate) static SELECTIVITY_ZERO: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// Times a sampling miss (zero structurally-valid samples, but the predicate
+/// pool is *not* empty) fell back to the static stats-based predicate
+/// selectivity instead of collapsing the estimate to zero.
+pub(crate) static SELECTIVITY_FALLBACK: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// Times the pre-walk guard skipped sampling entirely because even the best
+/// anchor's expected structural hit count was below one, and returned the
+/// static fallback directly.
+pub(crate) static WALK_GUARD_SKIPPED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 use std::convert::TryFrom;
 
@@ -302,6 +312,11 @@ pub fn build_procedure() -> Procedure {
         BUILD_PIVOT_PATH_NANOS.store(0, Ordering::Relaxed);
         BUILD_ABSTRACT_EDGE_NANOS.store(0, Ordering::Relaxed);
         BUILD_PCF_LOOKUP_NANOS.store(0, Ordering::Relaxed);
+        // NOTE: SELECTIVITY_FALLBACK / WALK_GUARD_SKIPPED are intentionally NOT
+        // reset here — like the other [cache-prof] counters (filter_pool_*,
+        // stage2_*, selectivity_zero) they accumulate across all gcard_query
+        // calls in the process, so the final [cache-prof] line reports true
+        // cumulative totals rather than only the last query's values.
 
         // Prefer FlatGraph path when available (avoids MemoryGraph / MVCC overhead).
         type FlatGraphType = crate::procedures::gcard_query::flat_graph::FlatGraph;
@@ -635,9 +650,18 @@ pub fn build_procedure() -> Procedure {
                 let stage2_count = STAGE2_TRIGGERED.load(Ordering::Relaxed);
                 let stage2_zero = STAGE2_RESULT_ZERO.load(Ordering::Relaxed);
                 let sel_zero = SELECTIVITY_ZERO.load(Ordering::Relaxed);
+                let sel_fallback = SELECTIVITY_FALLBACK.load(Ordering::Relaxed);
+                let guard_skipped = WALK_GUARD_SKIPPED.load(Ordering::Relaxed);
                 eprintln!(
-                    "[cache-prof] filter_pool_hits={}, filter_pool_misses={}, filter_pool_empty={}, stage2_triggered={}, stage2_result_zero={}, selectivity_zero={}",
-                    cache_hits, cache_misses, pool_empty, stage2_count, stage2_zero, sel_zero,
+                    "[cache-prof] filter_pool_hits={}, filter_pool_misses={}, filter_pool_empty={}, stage2_triggered={}, stage2_result_zero={}, selectivity_zero={}, selectivity_fallback={}, walk_guard_skipped={}",
+                    cache_hits,
+                    cache_misses,
+                    pool_empty,
+                    stage2_count,
+                    stage2_zero,
+                    sel_zero,
+                    sel_fallback,
+                    guard_skipped,
                 );
                 cardinality_value
             }
