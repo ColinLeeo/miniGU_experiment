@@ -123,20 +123,82 @@ impl GraphSkeleton<AbstractEdge> {
         generations
     }
 
+    fn active_root_candidates_after_functional_leaf_prune(&self) -> HashSet<VertexId> {
+        let mut remaining: HashSet<VertexId> = self.vertices.keys().copied().collect();
+
+        loop {
+            if remaining.len() <= 1 {
+                break;
+            }
+
+            let mut to_remove = Vec::new();
+            for &vertex_id in &remaining {
+                if self.local_pcfs.contains_key(&vertex_id) {
+                    continue;
+                }
+
+                let incident = self
+                    .get_neighbor_edges(vertex_id)
+                    .into_iter()
+                    .filter_map(|edge_id| {
+                        let edge = self.edges.get(&edge_id)?;
+                        let neighbor = if edge.src == vertex_id {
+                            edge.dst
+                        } else {
+                            edge.src
+                        };
+                        remaining.contains(&neighbor).then_some((neighbor, edge_id))
+                    })
+                    .collect::<Vec<_>>();
+
+                if incident.len() == 1 {
+                    let (neighbor, edge_id) = incident[0];
+                    if self.edge_is_functional_from_to(edge_id, neighbor, vertex_id) {
+                        to_remove.push(vertex_id);
+                    }
+                }
+            }
+
+            if to_remove.is_empty() {
+                break;
+            }
+            for vertex_id in to_remove {
+                remaining.remove(&vertex_id);
+            }
+        }
+
+        remaining
+    }
+
     pub fn pick_root(&self) -> Option<VertexId> {
         // 选一个“最居中”的根：使最大层数最小。
-        // 这样做能减小规约深度，通常也让传播更平衡。
+        // 先剥掉可由 n-1 functional 语义省略的 leaf，再在剩余 active core 上比较，
+        // 避免同一个核心因为不同 functional leaf 挂载位置而选到不同 root。
         let vertices: Vec<VertexId> = self.vertices.keys().copied().collect();
         if vertices.is_empty() {
             return None;
         }
 
-        let mut best_root = vertices[0];
+        let active_candidates = self.active_root_candidates_after_functional_leaf_prune();
+        let candidates: Vec<VertexId> = if active_candidates.is_empty() {
+            vertices.clone()
+        } else {
+            let mut candidates = active_candidates.iter().copied().collect::<Vec<_>>();
+            candidates.sort_unstable();
+            candidates
+        };
+        let active_for_scoring: HashSet<VertexId> = candidates.iter().copied().collect();
+
+        let mut best_root = candidates[0];
         let mut min_max_gen = usize::MAX;
 
-        for &candidate in &vertices {
+        for &candidate in &candidates {
             let generations = self.get_topological_generations(candidate);
-            let max_gen = generations.values().copied().max().unwrap_or(0);
+            let max_gen = active_for_scoring
+                .iter()
+                .filter_map(|vertex_id| generations.get(vertex_id).copied())
+                .max()
+                .unwrap_or(0);
             if max_gen < min_max_gen {
                 min_max_gen = max_gen;
                 best_root = candidate;
@@ -280,16 +342,23 @@ impl GraphSkeleton<AbstractEdge> {
         from: VertexId,
         to: VertexId,
     ) -> ContributionKind {
-        let Some(edge) = self.edges.get(&edge_id) else {
+        if !self.edges.contains_key(&edge_id) {
             return ContributionKind::Empty;
         };
-        if edge.functional != FunctionalDirection::None
-            || self.edge_is_functional_from_to(edge_id, from, to)
-        {
-            ContributionKind::FunctionalOnly
-        } else {
-            ContributionKind::NonFunctional
-        }
+        let _ = (from, to);
+        ContributionKind::NonFunctional
+    }
+
+    fn is_omittable_functional_leaf(
+        &self,
+        vertex_id: VertexId,
+        parent_id: VertexId,
+        parent_edge_id: EdgeId,
+        has_children: bool,
+    ) -> bool {
+        !has_children
+            && !self.local_pcfs.contains_key(&vertex_id)
+            && self.edge_is_functional_from_to(parent_edge_id, parent_id, vertex_id)
     }
 
     fn vertex_label(&self, vertex_id: VertexId) -> String {
@@ -393,6 +462,9 @@ impl GraphSkeleton<AbstractEdge> {
                         let kind = child_kinds.get(child_id).copied().unwrap_or_else(|| {
                             self.edge_contribution_kind_from_to(*child_edge_id, v, *child_id)
                         });
+                        if kind == ContributionKind::Empty {
+                            continue;
+                        }
                         let desc = child_descs
                             .get(child_id)
                             .cloned()
@@ -434,8 +506,24 @@ impl GraphSkeleton<AbstractEdge> {
                 let Some(&(parent, parent_edge_id)) = parent_map.get(&v) else {
                     continue;
                 };
-                let parent_edge_kind =
-                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v);
+                let has_children = children_map
+                    .get(&v)
+                    .is_some_and(|children| !children.is_empty());
+                let omits_parent_edge =
+                    self.is_omittable_functional_leaf(v, parent, parent_edge_id, has_children);
+                let parent_edge_kind = if omits_parent_edge {
+                    ContributionKind::Empty
+                } else {
+                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                };
+
+                if omits_parent_edge && input_descs.is_empty() {
+                    out.push_str(&format!(
+                        "  at {} omit_leaf {} => skip functional/n-1\n",
+                        self.vertex_label(v),
+                        self.edge_ref(parent_edge_id)
+                    ));
+                }
 
                 let projected_kind = if input_descs.is_empty() {
                     parent_edge_kind
@@ -585,72 +673,97 @@ impl GraphSkeleton<AbstractEdge> {
                 };
 
                 let (result, result_kind) = if let Some(children) = children {
-                    let child_pcfs: Vec<Pcf> = children
+                    let child_contributions = children
                         .iter()
-                        .filter_map(|(child_id, _)| child_vertex_pcf.get(child_id).cloned())
-                        .collect();
-                    let child_kinds = children
-                        .iter()
-                        .map(|(child_id, _)| {
-                            child_vertex_kind
+                        .filter_map(|(child_id, _)| {
+                            let kind = child_vertex_kind
                                 .get(child_id)
                                 .copied()
-                                .unwrap_or(ContributionKind::Empty)
+                                .unwrap_or(ContributionKind::Empty);
+                            if kind == ContributionKind::Empty {
+                                None
+                            } else {
+                                child_vertex_pcf
+                                    .get(child_id)
+                                    .cloned()
+                                    .map(|pcf| (pcf, kind))
+                            }
                         })
+                        .collect::<Vec<_>>();
+                    let child_pcfs = child_contributions
+                        .iter()
+                        .map(|(pcf, _)| pcf.clone())
+                        .collect::<Vec<_>>();
+                    let child_kinds = child_contributions
+                        .iter()
+                        .map(|(_, kind)| *kind)
                         .collect::<Vec<_>>();
                     let local_kind = if self.local_pcfs.contains_key(&v) {
                         ContributionKind::NonFunctional
                     } else {
                         ContributionKind::Empty
                     };
-                    let multiplied_kind = ContributionKind::combine(
-                        child_kinds
-                            .iter()
-                            .copied()
-                            .chain(std::iter::once(local_kind)),
-                    );
-                    let non_functional_child_count = child_kinds
-                        .iter()
-                        .filter(|kind| kind.is_non_functional())
-                        .count()
-                        + usize::from(local_kind.is_non_functional());
-                    if non_functional_child_count >= 2 {
-                        record_effective_alpha_refs();
-                    }
-                    let multiplied_child_pcf = self.multiply_local_and(v, child_pcfs.iter());
-                    let projected = if cur_gen > 0 {
-                        // 非根节点需要把“孩子方向的统计”投影回父边所处的坐标系。
-                        if multiplied_kind.is_non_functional() {
-                            record_effective_beta_right();
+                    if child_pcfs.is_empty() && local_kind == ContributionKind::Empty {
+                        if cur_gen > 0 {
+                            let parent_edge_kind = parent_opt
+                                .map(|&(parent, parent_edge_id)| {
+                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                                })
+                                .unwrap_or(ContributionKind::Empty);
+                            (parent_to_vertex_pcf, parent_edge_kind)
+                        } else {
+                            (Pcf::empty(), ContributionKind::Empty)
                         }
-                        beta_right(
-                            &multiplied_child_pcf,
-                            &vertex_to_parent_pcf,
-                            &parent_to_vertex_pcf,
-                        )
                     } else {
-                        multiplied_child_pcf
-                    };
-                    if cur_gen > 0 {
-                        // 然后再把“来自孩子的贡献”和“本节点到父节点的边 PCF”乘起来。
-                        let parent_edge_kind = parent_opt
-                            .map(|&(parent, parent_edge_id)| {
-                                self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
-                            })
-                            .unwrap_or(ContributionKind::Empty);
-                        if usize::from(multiplied_kind.is_non_functional())
-                            + usize::from(parent_edge_kind.is_non_functional())
-                            >= 2
-                        {
+                        let multiplied_kind = ContributionKind::combine(
+                            child_kinds
+                                .iter()
+                                .copied()
+                                .chain(std::iter::once(local_kind)),
+                        );
+                        let non_functional_child_count = child_kinds
+                            .iter()
+                            .filter(|kind| kind.is_non_functional())
+                            .count()
+                            + usize::from(local_kind.is_non_functional());
+                        if non_functional_child_count >= 2 {
                             record_effective_alpha_refs();
                         }
-                        let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
-                        (
-                            alpha_refs(&pcf_refs),
-                            ContributionKind::combine([multiplied_kind, parent_edge_kind]),
-                        )
-                    } else {
-                        (projected, multiplied_kind)
+                        let multiplied_child_pcf = self.multiply_local_and(v, child_pcfs.iter());
+                        let projected = if cur_gen > 0 {
+                            // 非根节点需要把“孩子方向的统计”投影回父边所处的坐标系。
+                            if multiplied_kind.is_non_functional() {
+                                record_effective_beta_right();
+                            }
+                            beta_right(
+                                &multiplied_child_pcf,
+                                &vertex_to_parent_pcf,
+                                &parent_to_vertex_pcf,
+                            )
+                        } else {
+                            multiplied_child_pcf
+                        };
+                        if cur_gen > 0 {
+                            // 然后再把“来自孩子的贡献”和“本节点到父节点的边 PCF”乘起来。
+                            let parent_edge_kind = parent_opt
+                                .map(|&(parent, parent_edge_id)| {
+                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
+                                })
+                                .unwrap_or(ContributionKind::Empty);
+                            if usize::from(multiplied_kind.is_non_functional())
+                                + usize::from(parent_edge_kind.is_non_functional())
+                                >= 2
+                            {
+                                record_effective_alpha_refs();
+                            }
+                            let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
+                            (
+                                alpha_refs(&pcf_refs),
+                                ContributionKind::combine([multiplied_kind, parent_edge_kind]),
+                            )
+                        } else {
+                            (projected, multiplied_kind)
+                        }
                     }
                 } else {
                     if cur_gen > 0 {
@@ -673,13 +786,23 @@ impl GraphSkeleton<AbstractEdge> {
                             let pcf_refs: Vec<&Pcf> = vec![&projected, &parent_to_vertex_pcf];
                             (alpha_refs(&pcf_refs), ContributionKind::NonFunctional)
                         } else {
-                            // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边。
-                            let kind = parent_opt
-                                .map(|&(parent, parent_edge_id)| {
-                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v)
-                                })
-                                .unwrap_or(ContributionKind::Empty);
-                            (parent_to_vertex_pcf, kind)
+                            // 叶子节点没有孩子，它对父节点的贡献就只来自那条父边；
+                            // 如果父边是从 n 侧到当前 leaf 1 侧的 functional 边，则该 join
+                            // 不改变基数。
+                            let (parent, parent_edge_id) =
+                                parent_opt.copied().ok_or_else(|| {
+                                    GCardError::InvalidState(
+                                        "Leaf without root must have a parent edge".to_string(),
+                                    )
+                                })?;
+                            if self.is_omittable_functional_leaf(v, parent, parent_edge_id, false) {
+                                (Pcf::empty(), ContributionKind::Empty)
+                            } else {
+                                (
+                                    parent_to_vertex_pcf,
+                                    self.edge_contribution_kind_from_to(parent_edge_id, parent, v),
+                                )
+                            }
                         }
                     } else if self.local_pcfs.contains_key(&v) {
                         (
@@ -748,12 +871,22 @@ mod tests {
     }
 
     fn edge(src: u64, dst: u64, src_pcf: Pcf, dst_pcf: Pcf) -> AbstractEdge {
+        edge_with_functional(src, dst, src_pcf, dst_pcf, FunctionalDirection::None)
+    }
+
+    fn edge_with_functional(
+        src: u64,
+        dst: u64,
+        src_pcf: Pcf,
+        dst_pcf: Pcf,
+        functional: FunctionalDirection,
+    ) -> AbstractEdge {
         AbstractEdge {
             src,
             dst,
             src_pcf: Arc::new(src_pcf),
             dst_pcf: Arc::new(dst_pcf),
-            functional: FunctionalDirection::None,
+            functional,
             predicates: Vec::new(),
             original_edge_ids: Vec::new(),
             path_vertices: vec![src, dst],
@@ -785,5 +918,51 @@ mod tests {
 
         assert_ne!(expected, wrong_coordinate_product);
         assert_eq!(graph.get_es().unwrap(), expected);
+    }
+
+    #[test]
+    fn functional_leaf_is_omitted_only_in_parent_to_leaf_direction() {
+        let active = pcf(vec![2.0], vec![10.0]);
+        let functional_parent_side = pcf(vec![9.0], vec![10.0]);
+        let functional_leaf_side = pcf(vec![1.0], vec![10.0]);
+
+        let mut forward = AbstractGraph::new();
+        forward.add_vertex(vertex(1, "root"));
+        forward.add_vertex(vertex(2, "functional_leaf"));
+        forward.add_vertex(vertex(3, "active_leaf"));
+        forward.add_edge(
+            1,
+            edge_with_functional(
+                1,
+                2,
+                functional_parent_side.clone(),
+                functional_leaf_side.clone(),
+                FunctionalDirection::SrcToDst,
+            ),
+        );
+        forward.add_edge(2, edge(1, 3, active.clone(), active.clone()));
+
+        let expected_forward = active.get_num_rows();
+        assert_eq!(forward.get_es().unwrap(), expected_forward);
+
+        let mut reverse = AbstractGraph::new();
+        reverse.add_vertex(vertex(1, "root"));
+        reverse.add_vertex(vertex(2, "functional_leaf"));
+        reverse.add_vertex(vertex(3, "active_leaf"));
+        reverse.add_edge(
+            1,
+            edge_with_functional(
+                2,
+                1,
+                functional_leaf_side,
+                functional_parent_side.clone(),
+                FunctionalDirection::SrcToDst,
+            ),
+        );
+        reverse.add_edge(2, edge(1, 3, active.clone(), active.clone()));
+
+        let expected_reverse = alpha_refs(&[&functional_parent_side, &active]).get_num_rows();
+        assert_ne!(expected_reverse, expected_forward);
+        assert_eq!(reverse.get_es().unwrap(), expected_reverse);
     }
 }
