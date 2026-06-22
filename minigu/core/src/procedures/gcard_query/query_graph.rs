@@ -12,6 +12,41 @@ static GLOBAL_FILTERED_POOL_CACHE: LazyLock<
     Arc<DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>>,
 > = LazyLock::new(|| Arc::new(DashMap::new()));
 
+fn decomp_trace_enabled() -> bool {
+    std::env::var_os("GCARD_DECOMP_TRACE_LOG").is_some()
+}
+
+fn decomp_trace_line(line: impl AsRef<str>) {
+    let Some(path) = std::env::var_os("GCARD_DECOMP_TRACE_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", line.as_ref());
+    }
+}
+
+fn decomp_trace_multiline(text: impl AsRef<str>) {
+    let Some(path) = std::env::var_os("GCARD_DECOMP_TRACE_LOG") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = write!(file, "{}", text.as_ref());
+        if !text.as_ref().ends_with('\n') {
+            let _ = writeln!(file);
+        }
+    }
+}
+
 use dashmap::DashMap;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
@@ -525,6 +560,180 @@ impl QueryGraph {
         }
     }
 
+    fn trace_sorted_edge_ids(edge_ids: &HashSet<EdgeId>) -> Vec<EdgeId> {
+        let mut ids: Vec<EdgeId> = edge_ids.iter().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn trace_predicates(predicates: &[PredicateDef]) -> String {
+        if predicates.is_empty() {
+            return "[]".to_string();
+        }
+        predicates
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}#{}.{:?}({}) {:?} {:?}",
+                    p.target, p.id, p.predicate_id, p.property, p.op, p.value
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn trace_edge_brief(
+        &self,
+        edge_id: EdgeId,
+        cardinalities: Option<&HashMap<EdgeId, u64>>,
+    ) -> String {
+        match self.inner.edges.get(&edge_id) {
+            Some(edge) => {
+                let src = self
+                    .inner
+                    .vertices
+                    .get(&edge.src_vertex_id)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                let dst = self
+                    .inner
+                    .vertices
+                    .get(&edge.dst_vertex_id)
+                    .map(|v| v.label.as_str())
+                    .unwrap_or("?");
+                let card = cardinalities
+                    .and_then(|c| c.get(&edge_id).copied())
+                    .map(|c| format!(", card={}", c))
+                    .unwrap_or_default();
+                format!(
+                    "e{}:{}({})->{}({}) label={}{} edge_preds={}",
+                    edge_id,
+                    edge.src_vertex_id,
+                    src,
+                    edge.dst_vertex_id,
+                    dst,
+                    edge.label,
+                    card,
+                    Self::trace_predicates(&edge.predicates)
+                )
+            }
+            None => format!("e{}:<missing>", edge_id),
+        }
+    }
+
+    fn trace_edge_set(
+        &self,
+        edge_ids: &HashSet<EdgeId>,
+        cardinalities: Option<&HashMap<EdgeId, u64>>,
+    ) -> String {
+        Self::trace_sorted_edge_ids(edge_ids)
+            .into_iter()
+            .map(|eid| self.trace_edge_brief(eid, cardinalities))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn trace_path(&self, path: &Path) -> String {
+        let mut chain = String::new();
+        for (idx, vertex_id) in path.vertices.iter().enumerate() {
+            if idx > 0 {
+                let edge_id = path.edges.get(idx - 1).copied().unwrap_or_default();
+                let edge_label = self
+                    .inner
+                    .edges
+                    .get(&edge_id)
+                    .map(|e| e.label.as_str())
+                    .unwrap_or("?");
+                chain.push_str(&format!(" -e{}:{}-> ", edge_id, edge_label));
+            }
+            let vertex = self.inner.vertices.get(vertex_id);
+            let label = vertex.map(|v| v.label.as_str()).unwrap_or("?");
+            let preds = vertex
+                .map(|v| Self::trace_predicates(&v.predicates))
+                .unwrap_or_else(|| "[]".to_string());
+            chain.push_str(&format!("v{}:{} preds={}", vertex_id, label, preds));
+        }
+        format!(
+            "start={} end={} vertices={:?} edges={:?} chain={}",
+            path.start, path.end, path.vertices, path.edges, chain
+        )
+    }
+
+    fn trace_ranges(&self, path: &Path, ranges: &[(usize, usize)]) -> String {
+        ranges
+            .iter()
+            .map(|(start, end)| {
+                let edge_ids = path.edges.get(*start..*end).unwrap_or(&[]).to_vec();
+                let vertex_ids = if *start <= *end && *end < path.vertices.len() {
+                    path.vertices[*start..=*end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                format!(
+                    "{}..{} vertices={:?} edges={:?}",
+                    start, end, vertex_ids, edge_ids
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" || ")
+    }
+
+    fn trace_abstract_edge(edge: &AbstractEdge) -> String {
+        let functional = match edge.functional {
+            FunctionalDirection::None => "none",
+            FunctionalDirection::SrcToDst => "src->dst",
+            FunctionalDirection::DstToSrc => "dst->src",
+            FunctionalDirection::Both => "both",
+        };
+        format!(
+            "{}->{} path_vertices={:?} original_edges={:?} predicates={} selectivity={:.6} functional={}",
+            edge.src,
+            edge.dst,
+            edge.path_vertices,
+            edge.original_edge_ids,
+            Self::trace_predicates(&edge.predicates),
+            edge.selectivity,
+            functional
+        )
+    }
+
+    fn trace_abstract_edge_set(edges: &[AbstractEdge]) -> String {
+        if edges.is_empty() {
+            return "<empty>".to_string();
+        }
+        edges
+            .iter()
+            .enumerate()
+            .map(|(idx, edge)| format!("ae{}:{}", idx + 1, Self::trace_abstract_edge(edge)))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn trace_query_summary(&self) -> String {
+        let mut out = String::new();
+        out.push_str("vertices:\n");
+        let mut vertex_ids: Vec<_> = self.inner.vertices.keys().copied().collect();
+        vertex_ids.sort_unstable();
+        for vid in vertex_ids {
+            if let Some(vertex) = self.inner.vertices.get(&vid) {
+                out.push_str(&format!(
+                    "  v{} label={} predicates={} degree={}\n",
+                    vid,
+                    vertex.label,
+                    Self::trace_predicates(&vertex.predicates),
+                    self.get_degree(vid)
+                ));
+            }
+        }
+        out.push_str("edges:\n");
+        let mut edge_ids: Vec<_> = self.inner.edges.keys().copied().collect();
+        edge_ids.sort_unstable();
+        for eid in edge_ids {
+            out.push_str(&format!("  {}\n", self.trace_edge_brief(eid, None)));
+        }
+        out
+    }
+
     pub fn get_predicate_location(&self, predicate_id: PredicateId) -> Option<PredicateLocation> {
         self.predicate_index
             .get(&predicate_id)
@@ -934,6 +1143,13 @@ impl QueryGraph {
         let mut candidates = BinaryHeap::new();
 
         let first_tree = first_tree.unwrap();
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[tree-enum] initial_best_tree score={} edges={}",
+                first_tree.total_score,
+                self.trace_edge_set(&first_tree.edge_ids, Some(cardinalities))
+            ));
+        }
         let mut sorted_key: Vec<EdgeId> = first_tree.edge_ids.iter().copied().collect();
         sorted_key.sort();
         seen_trees.insert(sorted_key);
@@ -942,6 +1158,14 @@ impl QueryGraph {
         while result.len() < k && !candidates.is_empty() {
             let current = candidates.pop().unwrap();
             let current_edge_set = current.edge_ids.clone();
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[tree-enum] emit_tree rank={} score={} edges={}",
+                    result.len() + 1,
+                    current.total_score,
+                    self.trace_edge_set(&current_edge_set, Some(cardinalities))
+                ));
+            }
 
             result.push((
                 self.build_subgraph_from_edges(&current_edge_set),
@@ -966,14 +1190,33 @@ impl QueryGraph {
             // Use edge id as deterministic tiebreaker.
             non_tree_edges.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
-            for (new_edge_id, _new_edge_card) in non_tree_edges {
+            for (new_edge_id, new_edge_card) in non_tree_edges {
                 if let Some(new_edge) = self.inner.edges.get(&new_edge_id) {
                     let src = new_edge.src_vertex_id;
                     let dst = new_edge.dst_vertex_id;
+                    if decomp_trace_enabled() {
+                        decomp_trace_line(format!(
+                            "[cycle-break] tree_rank={} add_non_tree_edge={} card={} src={} dst={}",
+                            result.len(),
+                            new_edge_id,
+                            new_edge_card,
+                            src,
+                            dst
+                        ));
+                    }
 
                     if let Some(path_edges) =
                         self.find_path_edges_in_tree(&current.edge_ids, src, dst)
                     {
+                        if decomp_trace_enabled() {
+                            let mut cycle_edges = path_edges.clone();
+                            cycle_edges.insert(new_edge_id);
+                            decomp_trace_line(format!(
+                                "[cycle-break] formed_cycle path_edges={} cycle_edges={}",
+                                self.trace_edge_set(&path_edges, Some(cardinalities)),
+                                self.trace_edge_set(&cycle_edges, Some(cardinalities))
+                            ));
+                        }
                         // 往树里加一条非树边会形成环。
                         // 为了保持树结构，必须从这条环上再删掉一条边。
                         // 优先删除基数最大的树边，使新树总基数尽量小。
@@ -990,7 +1233,7 @@ impl QueryGraph {
                         path_edges_with_card
                             .sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-                        for (edge_to_remove, _old_card) in path_edges_with_card {
+                        for (edge_to_remove, old_card) in path_edges_with_card {
                             let mut new_edge_set = current.edge_ids.clone();
                             new_edge_set.remove(&edge_to_remove);
                             new_edge_set.insert(new_edge_id);
@@ -999,6 +1242,14 @@ impl QueryGraph {
                                 new_edge_set.iter().copied().collect();
                             sorted_key.sort();
                             if seen_trees.contains(&sorted_key) {
+                                if decomp_trace_enabled() {
+                                    decomp_trace_line(format!(
+                                        "[cycle-break] remove_edge={} old_card={} result=skip_seen edges={}",
+                                        edge_to_remove,
+                                        old_card,
+                                        self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                                    ));
+                                }
                                 continue;
                             }
 
@@ -1014,17 +1265,45 @@ impl QueryGraph {
                                         total_score,
                                     };
 
+                                if decomp_trace_enabled() {
+                                    decomp_trace_line(format!(
+                                        "[cycle-break] remove_edge={} old_card={} result=push_candidate score={} edges={}",
+                                        edge_to_remove,
+                                        old_card,
+                                        total_score,
+                                        self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                                    ));
+                                }
                                 seen_trees.insert(sorted_key);
                                 candidates.push(candidate);
+                            } else if decomp_trace_enabled() {
+                                decomp_trace_line(format!(
+                                    "[cycle-break] remove_edge={} old_card={} result=skip_not_tree edges={}",
+                                    edge_to_remove,
+                                    old_card,
+                                    self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                                ));
                             }
                         }
                     } else {
+                        if decomp_trace_enabled() {
+                            decomp_trace_line(format!(
+                                "[cycle-break] add_non_tree_edge={} did_not_find_existing_path",
+                                new_edge_id
+                            ));
+                        }
                         let mut new_edge_set = current.edge_ids.clone();
                         new_edge_set.insert(new_edge_id);
 
                         let mut sorted_key: Vec<EdgeId> = new_edge_set.iter().copied().collect();
                         sorted_key.sort();
                         if seen_trees.contains(&sorted_key) {
+                            if decomp_trace_enabled() {
+                                decomp_trace_line(format!(
+                                    "[cycle-break] disconnected_add result=skip_seen edges={}",
+                                    self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                                ));
+                            }
                             continue;
                         }
 
@@ -1039,8 +1318,20 @@ impl QueryGraph {
                                 total_score,
                             };
 
+                            if decomp_trace_enabled() {
+                                decomp_trace_line(format!(
+                                    "[cycle-break] disconnected_add result=push_candidate score={} edges={}",
+                                    total_score,
+                                    self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                                ));
+                            }
                             seen_trees.insert(sorted_key);
                             candidates.push(candidate);
+                        } else if decomp_trace_enabled() {
+                            decomp_trace_line(format!(
+                                "[cycle-break] disconnected_add result=skip_not_tree edges={}",
+                                self.trace_edge_set(&new_edge_set, Some(cardinalities))
+                            ));
                         }
                     }
                 }
@@ -1714,28 +2005,78 @@ impl QueryGraph {
             Ok(())
         };
 
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!("[path] {}", self.trace_path(path)));
+        }
+
         let mut functional_ranges = self.abstract_edge_ranges_for_path(path, k);
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[path-ranges] default ranges={}",
+                self.trace_ranges(path, &functional_ranges)
+            ));
+        }
         let mut i = 0;
         while i + 1 < functional_ranges.len() {
             let cut_edge_idx = functional_ranges[i].1;
             let merged = (functional_ranges[i].0, functional_ranges[i + 1].1);
+            let can_contract = self.can_contract_path_cut(path, cut_edge_idx, degree_seq_graph);
+            let has_catalog =
+                self.path_slice_has_catalog(path, merged.0, merged.1, degree_seq_graph);
 
-            if self.can_contract_path_cut(path, cut_edge_idx, degree_seq_graph)
-                && self.path_slice_has_catalog(path, merged.0, merged.1, degree_seq_graph)
-            {
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[path-merge-check] cut_edge_idx={} merged={}..{} can_contract={} has_catalog={}",
+                    cut_edge_idx, merged.0, merged.1, can_contract, has_catalog
+                ));
+            }
+            if can_contract && has_catalog {
                 functional_ranges[i] = merged;
                 functional_ranges.remove(i + 1);
+                if decomp_trace_enabled() {
+                    decomp_trace_line(format!(
+                        "[path-merge] accepted ranges={}",
+                        self.trace_ranges(path, &functional_ranges)
+                    ));
+                }
                 i = i.saturating_sub(1);
             } else {
                 i += 1;
             }
         }
-        add_ranges(functional_ranges, &mut candidates)?;
-
-        for ranges in self.abstract_edge_range_variants_for_path(path, k) {
-            add_ranges(ranges, &mut candidates)?;
+        add_ranges(functional_ranges.clone(), &mut candidates)?;
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[path-candidate] mode=functional_merge_or_default ranges={} abstract_edges={}",
+                self.trace_ranges(path, &functional_ranges),
+                Self::trace_abstract_edge_set(candidates.last().map(Vec::as_slice).unwrap_or(&[]))
+            ));
         }
 
+        for ranges in self.abstract_edge_range_variants_for_path(path, k) {
+            let before = candidates.len();
+            add_ranges(ranges.clone(), &mut candidates)?;
+            if decomp_trace_enabled() {
+                if candidates.len() > before {
+                    decomp_trace_line(format!(
+                        "[path-candidate] mode=range_variant ranges={} abstract_edges={}",
+                        self.trace_ranges(path, &ranges),
+                        Self::trace_abstract_edge_set(
+                            candidates.last().map(Vec::as_slice).unwrap_or(&[])
+                        )
+                    ));
+                } else {
+                    decomp_trace_line(format!(
+                        "[path-candidate] mode=range_variant ranges={} result=skip_duplicate",
+                        self.trace_ranges(path, &ranges)
+                    ));
+                }
+            }
+        }
+
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!("[path-candidate] total={}", candidates.len()));
+        }
         Ok(candidates)
     }
 
@@ -2269,9 +2610,21 @@ impl QueryGraph {
             DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
         > = GLOBAL_FILTERED_POOL_CACHE.clone();
 
+        if decomp_trace_enabled() {
+            decomp_trace_line("==== GCARD decomposition trace begin ====");
+            decomp_trace_line(format!(
+                "[query] k={} tree_num={} sample_size={} predicate_apply_type={:?} unit_selectivity_walks={}",
+                k, tree_num, sample_size, predicate_apply_type, unit_selectivity_walks
+            ));
+            decomp_trace_multiline(self.trace_query_summary());
+        }
+
         let t_cycle = std::time::Instant::now();
         let has_cycle = self.has_cycle();
         BUILD_CYCLE_CHECK_NANOS.fetch_add(t_cycle.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!("[cycle-check] has_cycle={}", has_cycle));
+        }
 
         if !has_cycle {
             let abstract_graphs = self.build_abstract_graph_candidates_from_query_graph_flat(
@@ -2296,7 +2649,34 @@ impl QueryGraph {
         // ── Cycle case: enumerate spanning trees ──────────────────────────────
         let t_tree = std::time::Instant::now();
         let cardinalities = self.estimate_edge_cardinalities(flat_graph);
+        if decomp_trace_enabled() {
+            let mut edge_ids: Vec<_> = self.inner.edges.keys().copied().collect();
+            edge_ids.sort_unstable();
+            decomp_trace_line("[edge-cardinality] estimated query edge cardinalities:");
+            for eid in edge_ids {
+                decomp_trace_line(format!(
+                    "  {}",
+                    self.trace_edge_brief(eid, Some(&cardinalities))
+                ));
+            }
+        }
         let trees_with_scores = self.build_k_best_trees(&cardinalities, tree_num.max(1));
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[tree-enum] selected_tree_count={} requested={}",
+                trees_with_scores.len(),
+                tree_num.max(1)
+            ));
+            for (idx, (tree, score)) in trees_with_scores.iter().enumerate() {
+                let tree_edges: HashSet<EdgeId> = tree.inner.edges.keys().copied().collect();
+                decomp_trace_line(format!(
+                    "[tree] rank={} score={} edges={}",
+                    idx + 1,
+                    score,
+                    self.trace_edge_set(&tree_edges, Some(&cardinalities))
+                ));
+            }
+        }
         BUILD_SCORE_TREE_NANOS.fetch_add(t_tree.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let results: Vec<GCardResult<Vec<(AbstractGraph, u64)>>> = trees_with_scores
@@ -2626,13 +3006,40 @@ impl QueryGraph {
         let pivot_nodes = query_graph.find_pivot_nodes();
         let paths = query_graph.find_paths_from_pivots(&pivot_nodes);
         BUILD_PIVOT_PATH_NANOS.fetch_add(t_pivot.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if decomp_trace_enabled() {
+            let subgraph_edges: HashSet<EdgeId> = query_graph.inner.edges.keys().copied().collect();
+            let mut pivots: Vec<_> = pivot_nodes.iter().copied().collect();
+            pivots.sort_unstable();
+            decomp_trace_line(format!(
+                "[decompose-tree] edges={} pivots={:?} path_count={}",
+                query_graph.trace_edge_set(&subgraph_edges, None),
+                pivots,
+                paths.len()
+            ));
+            for (idx, path) in paths.iter().enumerate() {
+                decomp_trace_line(format!(
+                    "[decompose-tree] path{} {}",
+                    idx + 1,
+                    query_graph.trace_path(path)
+                ));
+            }
+        }
 
         let t_ae = std::time::Instant::now();
         let limit = Self::split_candidate_limit();
         let mut edge_sets: Vec<Vec<AbstractEdge>> = vec![Vec::new()];
-        for path in paths {
+        for (path_idx, path) in paths.into_iter().enumerate() {
             let path_candidates =
                 query_graph.build_abstract_edge_candidates_for_path(&path, k, degree_seq_graph)?;
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[cross-product] path_index={} incoming_sets={} path_candidates={} limit={}",
+                    path_idx + 1,
+                    edge_sets.len(),
+                    path_candidates.len(),
+                    limit
+                ));
+            }
             let mut next = Vec::new();
             for existing in &edge_sets {
                 for candidate in &path_candidates {
@@ -2648,6 +3055,27 @@ impl QueryGraph {
                 }
             }
             edge_sets = next;
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[cross-product] path_index={} outgoing_sets={}",
+                    path_idx + 1,
+                    edge_sets.len()
+                ));
+            }
+        }
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[abstract-edge-combo] count={} limit={}",
+                edge_sets.len(),
+                limit
+            ));
+            for (idx, edges) in edge_sets.iter().enumerate() {
+                decomp_trace_line(format!(
+                    "[abstract-edge-combo] idx={} edges={}",
+                    idx + 1,
+                    Self::trace_abstract_edge_set(edges)
+                ));
+            }
         }
         BUILD_ABSTRACT_EDGE_NANOS.fetch_add(t_ae.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
@@ -2673,13 +3101,46 @@ impl QueryGraph {
         if let Some((local_pcfs, consumed_edges)) =
             query_graph.extract_raw_star_local_pcfs(degree_seq_graph)
         {
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[raw-star-mode] accepted consumed_edges={:?} local_pcf_centers={:?}",
+                    {
+                        let mut ids: Vec<_> = consumed_edges.iter().copied().collect();
+                        ids.sort_unstable();
+                        ids
+                    },
+                    {
+                        let mut centers: Vec<_> = local_pcfs.keys().copied().collect();
+                        centers.sort_unstable();
+                        centers
+                    }
+                ));
+            }
             let residual = query_graph.subgraph_without_edges(&consumed_edges);
             let pivot_nodes = residual.find_pivot_nodes();
             let residual_paths = residual.find_paths_from_pivots(&pivot_nodes);
+            if decomp_trace_enabled() {
+                let mut pivots: Vec<_> = pivot_nodes.iter().copied().collect();
+                pivots.sort_unstable();
+                decomp_trace_line(format!(
+                    "[raw-star-mode] residual pivots={:?} path_count={}",
+                    pivots,
+                    residual_paths.len()
+                ));
+            }
             let mut residual_edge_sets: Vec<Vec<AbstractEdge>> = vec![Vec::new()];
-            for path in residual_paths {
+            for (path_idx, path) in residual_paths.into_iter().enumerate() {
                 let path_candidates =
                     residual.build_abstract_edge_candidates_for_path(&path, k, degree_seq_graph)?;
+                if decomp_trace_enabled() {
+                    decomp_trace_line(format!(
+                        "[raw-star-cross-product] path_index={} incoming_sets={} path_candidates={} limit={}",
+                        path_idx + 1,
+                        residual_edge_sets.len(),
+                        path_candidates.len(),
+                        limit
+                    ));
+                }
                 let mut next = Vec::new();
                 for existing in &residual_edge_sets {
                     for candidate in &path_candidates {
@@ -2695,6 +3156,19 @@ impl QueryGraph {
                     }
                 }
                 residual_edge_sets = next;
+            }
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[raw-star-combo] residual_combo_count={}",
+                    residual_edge_sets.len()
+                ));
+                for (idx, edges) in residual_edge_sets.iter().enumerate() {
+                    decomp_trace_line(format!(
+                        "[raw-star-combo] idx={} residual_edges={}",
+                        idx + 1,
+                        Self::trace_abstract_edge_set(edges)
+                    ));
+                }
             }
 
             for edges in residual_edge_sets {
@@ -2744,6 +3218,17 @@ impl QueryGraph {
             DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
         >,
     ) -> GCardResult<AbstractGraph> {
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[build-abstract-graph] input_edges={} initial_local_pcf_centers={:?}",
+                Self::trace_abstract_edge_set(&all_abstract_edges),
+                {
+                    let mut centers: Vec<_> = initial_local_pcfs.keys().copied().collect();
+                    centers.sort_unstable();
+                    centers
+                }
+            ));
+        }
         let results: Vec<GCardResult<AbstractEdge>> = all_abstract_edges
             .into_par_iter()
             .map(|mut abstract_edge| {
@@ -2850,6 +3335,12 @@ impl QueryGraph {
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(catalog_max_star_degree)
         };
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[raw-star-extract] catalog_max_star_degree={} max_star_degree={}",
+                catalog_max_star_degree, max_star_degree
+            ));
+        }
         if max_star_degree < 2 {
             return None;
         }
@@ -2910,6 +3401,21 @@ impl QueryGraph {
                 .filter(|(edge_id, _)| !consumed_edges.contains(edge_id))
                 .collect::<Vec<_>>();
             mergeable.sort_by(|a, b| a.1.vs.cmp(&b.1.vs).then(a.1.es.cmp(&b.1.es)));
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[raw-star-extract] center={} label={} candidate_arms={}",
+                    center,
+                    center_vertex.label,
+                    mergeable
+                        .iter()
+                        .map(|(edge_id, arm)| format!(
+                            "edge={} arm_vs={:?} arm_es={:?}",
+                            edge_id, arm.vs, arm.es
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
 
             while !mergeable.is_empty() {
                 let unique_arms = mergeable
@@ -2926,6 +3432,18 @@ impl QueryGraph {
                     break;
                 };
 
+                if decomp_trace_enabled() {
+                    let selected_edges = selected_indices
+                        .iter()
+                        .map(|&idx| mergeable[idx].0)
+                        .collect::<Vec<_>>();
+                    decomp_trace_line(format!(
+                        "[raw-star-extract] center={} selected_edges={:?} pcf_rows={:.0}",
+                        center,
+                        selected_edges,
+                        pcf.get_num_rows()
+                    ));
+                }
                 for &idx in &selected_indices {
                     consumed_edges.insert(mergeable[idx].0);
                 }
@@ -3007,6 +3525,12 @@ impl QueryGraph {
                 .unwrap_or(catalog_max_star_length)
         };
 
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[post-star-extract] catalog_max_star_degree={} catalog_max_star_length={} max_star_degree={} max_star_length={}",
+                catalog_max_star_degree, catalog_max_star_length, max_star_degree, max_star_length
+            ));
+        }
         let mut consumed = HashSet::new();
         let mut local_pcfs: HashMap<VertexId, Vec<Pcf>> = HashMap::new();
         let mut centers: Vec<_> = candidates_by_center.keys().copied().collect();
@@ -3028,6 +3552,21 @@ impl QueryGraph {
                 .collect::<Vec<_>>();
 
             mergeable.sort_by(|a, b| a.1.vs.cmp(&b.1.vs).then(a.1.es.cmp(&b.1.es)));
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[post-star-extract] center={} label={} candidate_arms={}",
+                    center,
+                    center_label,
+                    mergeable
+                        .iter()
+                        .map(|(idx, arm)| format!(
+                            "abstract_idx={} arm_vs={:?} arm_es={:?}",
+                            idx, arm.vs, arm.es
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ));
+            }
 
             while !mergeable.is_empty() {
                 let mut unique_arms = Vec::new();
@@ -3049,6 +3588,25 @@ impl QueryGraph {
                     break;
                 };
 
+                if decomp_trace_enabled() {
+                    let selected_edges = selected_indices
+                        .iter()
+                        .map(|&i| {
+                            let edge_idx = mergeable[i].0;
+                            format!(
+                                "idx={} {}",
+                                edge_idx,
+                                Self::trace_abstract_edge(&edges[edge_idx])
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    decomp_trace_line(format!(
+                        "[post-star-extract] center={} selected_abstract_edges={} pcf_rows={:.0}",
+                        center,
+                        selected_edges.join(" | "),
+                        pcf.get_num_rows()
+                    ));
+                }
                 for &i in &selected_indices {
                     consumed.insert(mergeable[i].0);
                 }

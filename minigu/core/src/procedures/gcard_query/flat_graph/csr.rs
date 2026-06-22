@@ -80,6 +80,12 @@ impl CsrAdjWithEid {
         &self.offsets
     }
 
+    /// Packed `(neighbor_vid, edge_id)` entries in CSR order.
+    #[inline]
+    pub fn neighbor_entries(&self) -> &[(VertexId, EdgeId)] {
+        &self.neighbors
+    }
+
     /// Extract only the neighbor vertex IDs (dropping edge IDs).
     pub fn neighbors_vids(&self) -> Vec<VertexId> {
         self.neighbors.iter().map(|&(vid, _)| vid).collect()

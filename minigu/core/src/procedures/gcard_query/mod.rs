@@ -364,8 +364,10 @@ pub fn build_procedure() -> Procedure {
                 #[allow(dead_code)]
                 let mut min_es_abstract_graph: Option<AbstractGraph> = None;
                 let plan_trace_log_path = std::env::var_os("GCARD_PLAN_TRACE_LOG");
-                let print_plan =
-                    std::env::var_os("GCARD_PRINT_PLAN").is_some() || plan_trace_log_path.is_some();
+                let decomp_trace_log_path = std::env::var_os("GCARD_DECOMP_TRACE_LOG");
+                let print_plan = std::env::var_os("GCARD_PRINT_PLAN").is_some()
+                    || plan_trace_log_path.is_some()
+                    || decomp_trace_log_path.is_some();
                 let print_alpha_beta =
                     print_plan || std::env::var_os("GCARD_PRINT_ALPHA_BETA").is_some();
                 let mut min_es_alpha_beta_counts: Option<AlphaBetaCallCounts> = None;
@@ -540,6 +542,48 @@ pub fn build_procedure() -> Procedure {
                     sel_total,
                     sel_n1 > 0,
                 );
+                if let (Some(abs), Some(log_path)) =
+                    (&min_es_abstract_graph, decomp_trace_log_path.clone())
+                {
+                    match std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&log_path)
+                    {
+                        Ok(mut file) => {
+                            use std::io::Write;
+                            let query_name = Path::new(query_json_path.as_str())
+                                .file_stem()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("unknown");
+                            let _ = writeln!(
+                                file,
+                                "==== selected best decomposition query={} selected_index={:?} selected_score={:?} estimate={} ====",
+                                query_name, index_of_min_es, score_of_min_es, cardinality_value
+                            );
+                            let _ = writeln!(file, "{}", abs.describe_plan());
+                            let _ = writeln!(file, "{}", abs.describe_reduction_trace());
+                            if let Some(counts) = min_es_alpha_beta_counts {
+                                let _ = writeln!(
+                                    file,
+                                    "counts raw_alpha_total={} raw_beta_total={} effective_alpha_total={} effective_beta_total={}",
+                                    counts.total_alpha(),
+                                    counts.total_beta(),
+                                    counts.total_effective_alpha(),
+                                    counts.total_effective_beta()
+                                );
+                            }
+                            let _ = writeln!(file, "==== GCARD decomposition trace end ====\n");
+                        }
+                        Err(err) => {
+                            eprintln!(
+                                "[gcard-decomp-trace] failed to open {}: {}",
+                                Path::new(&log_path).display(),
+                                err
+                            );
+                        }
+                    }
+                }
                 if print_plan {
                     let query_name = Path::new(query_json_path.as_str())
                         .file_stem()

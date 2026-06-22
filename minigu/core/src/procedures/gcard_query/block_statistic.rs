@@ -32,6 +32,15 @@ fn bucket_upper_bound(bucket_id: u8) -> u64 {
     BUCKET_BASE.saturating_pow(bucket_id as u32)
 }
 
+#[inline]
+fn bucket_index_base2(value: u64) -> usize {
+    if value == 0 {
+        0
+    } else {
+        u64::BITS as usize - (value - 1).leading_zeros() as usize
+    }
+}
+
 /// 前 8 bit 有效值 + 余量；bucket 作为 shift，余量 = value & ((1<<shift)-1)，shift 上限 56。
 #[inline]
 fn prefix_and_remainder(value: u64, bucket_id: u8) -> (u8, u64) {
@@ -211,24 +220,20 @@ impl BlockStatistic {
             return;
         }
         let max_val = values.iter().copied().max().unwrap_or(0);
-        let bounds = build_bounds(BUCKET_BASE, max_val);
+        let n_buckets = bucket_index_base2(max_val) + 1;
         self.bucket_ids.clear();
         self.prefix.clear();
         self.bucket_ids.reserve(values.len());
         self.prefix.reserve(values.len());
-        let mut res_max: Vec<u64> = Vec::new();
-        let mut bucket_max: Vec<u64> = Vec::new();
+        let mut res_max: Vec<u64> = vec![0; n_buckets];
+        let mut bucket_max: Vec<u64> = vec![0; n_buckets];
         for &v in values {
-            let b = get_bucket_index(&bounds, v);
+            let b = bucket_index_base2(v);
             let b_u8 = b.min(u8::MAX as usize) as u8;
             let (p, r) = prefix_and_remainder(v, b_u8);
             self.bucket_ids.push(b_u8);
             self.prefix.push(p);
             let idx = b.min(u8::MAX as usize);
-            if res_max.len() <= idx {
-                res_max.resize(idx + 1, 0);
-                bucket_max.resize(idx + 1, 0);
-            }
             res_max[idx] = res_max[idx].max(r);
             bucket_max[idx] = bucket_max[idx].max(v);
         }

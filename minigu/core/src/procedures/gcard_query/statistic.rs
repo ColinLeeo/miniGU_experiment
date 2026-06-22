@@ -163,6 +163,88 @@ impl Statistic {
         Ok(())
     }
 
+    pub(crate) fn insert_prebuilt_path_block(
+        &mut self,
+        label: &str,
+        vertex_ids: &[VertexId],
+        alt_key: AltKey,
+        block: BlockStatistic,
+    ) -> GCardResult<()> {
+        self.insert_prebuilt_with(label, vertex_ids, |entry| {
+            entry.path_statistic.insert(alt_key, block);
+        })
+    }
+
+    pub(crate) fn insert_prebuilt_star_block(
+        &mut self,
+        label: &str,
+        vertex_ids: &[VertexId],
+        star_key: StarStatKey,
+        block: BlockStatistic,
+    ) -> GCardResult<()> {
+        let center = star_key.center_label.clone();
+        let arm_keys: Vec<AltKey> = star_key.arms.iter().map(|arm| arm.to_alt_key()).collect();
+        let star_key_for_index = star_key.clone();
+        self.insert_prebuilt_with(label, vertex_ids, |entry| {
+            entry.star_statistic.insert(star_key, block);
+        })?;
+        for arm_key in arm_keys {
+            self.arm_to_star_keys
+                .entry((center.clone(), arm_key))
+                .or_default()
+                .push(star_key_for_index.clone());
+        }
+        Ok(())
+    }
+
+    fn insert_prebuilt_with<F>(
+        &mut self,
+        label: &str,
+        vertex_ids: &[VertexId],
+        insert: F,
+    ) -> GCardResult<()>
+    where
+        F: FnOnce(&mut LabelStatistic),
+    {
+        if !vertex_ids.windows(2).all(|w| w[0] <= w[1]) {
+            return Err(GCardError::InvalidData(
+                "prebuilt statistic vertex_ids must be sorted".into(),
+            ));
+        }
+
+        let entry = self
+            .label_path_statistic
+            .entry(label.to_string())
+            .or_default();
+
+        if !entry.vertex_ids.is_empty() {
+            if entry.vertex_ids.len() != vertex_ids.len() {
+                return Err(GCardError::InvalidData(
+                    "vertex_ids length differs from existing".into(),
+                ));
+            }
+            let (ex_min, ex_max) = (
+                *entry.vertex_ids.first().unwrap_or(&0),
+                *entry.vertex_ids.last().unwrap_or(&0),
+            );
+            let (new_min, new_max) = (
+                *vertex_ids.first().unwrap_or(&0),
+                *vertex_ids.last().unwrap_or(&0),
+            );
+            if ex_min != new_min || ex_max != new_max {
+                return Err(GCardError::InvalidData(
+                    "vertex_ids min/max differs from existing".into(),
+                ));
+            }
+        } else {
+            entry.vertex_ids = vertex_ids.to_vec();
+            entry.rebuild_rank_index();
+        }
+
+        insert(entry);
+        Ok(())
+    }
+
     fn insert_or_update_with<F>(
         &mut self,
         label: &str,
@@ -178,6 +260,43 @@ impl Statistic {
                 "vertex_ids and frequencies length mismatch".into(),
             ));
         }
+        let input_sorted = vertex_ids.windows(2).all(|w| w[0] <= w[1]);
+
+        let entry = self
+            .label_path_statistic
+            .entry(label.to_string())
+            .or_default();
+
+        if input_sorted {
+            let block = BlockStatistic::from_u64_sequence(frequencies)?;
+            if !entry.vertex_ids.is_empty() {
+                if entry.vertex_ids.len() != vertex_ids.len() {
+                    return Err(GCardError::InvalidData(
+                        "vertex_ids length differs from existing".into(),
+                    ));
+                }
+                let (ex_min, ex_max) = (
+                    *entry.vertex_ids.first().unwrap_or(&0),
+                    *entry.vertex_ids.last().unwrap_or(&0),
+                );
+                let (new_min, new_max) = (
+                    *vertex_ids.first().unwrap_or(&0),
+                    *vertex_ids.last().unwrap_or(&0),
+                );
+                if ex_min != new_min || ex_max != new_max {
+                    return Err(GCardError::InvalidData(
+                        "vertex_ids min/max differs from existing".into(),
+                    ));
+                }
+            } else {
+                entry.vertex_ids = vertex_ids.to_vec();
+                entry.rebuild_rank_index();
+            }
+
+            insert(entry, block);
+            return Ok(());
+        }
+
         let mut pairs: Vec<(VertexId, u64)> = vertex_ids
             .iter()
             .zip(frequencies.iter())
@@ -187,10 +306,6 @@ impl Statistic {
         let (sorted_vertex_ids, sorted_frequencies): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
 
         let block = BlockStatistic::from_u64_sequence(&sorted_frequencies)?;
-        let entry = self
-            .label_path_statistic
-            .entry(label.to_string())
-            .or_default();
 
         if !entry.vertex_ids.is_empty() {
             if entry.vertex_ids.len() != sorted_vertex_ids.len() {
@@ -199,8 +314,8 @@ impl Statistic {
                 ));
             }
             let (ex_min, ex_max) = (
-                *entry.vertex_ids.iter().min().unwrap(),
-                *entry.vertex_ids.iter().max().unwrap(),
+                *entry.vertex_ids.first().unwrap_or(&0),
+                *entry.vertex_ids.last().unwrap_or(&0),
             );
             let (new_min, new_max) = (
                 *sorted_vertex_ids.first().unwrap_or(&0),
@@ -543,19 +658,20 @@ pub fn save_statistic(
     db_path: &Path,
     graph_name: &str,
     statistic: &Statistic,
-) -> Result<(), anyhow::Error> {
+) -> Result<usize, anyhow::Error> {
     // `Statistic` 是可持久化的基础资产：
     // 后续即使进程重启，也能从它重建查询所需的压缩视图。
     let path = crate::catalog_persistence::statistic_path(db_path, graph_name);
     let bytes = bincode::serialize(statistic)
         .map_err(|e| anyhow::anyhow!("failed to serialize statistic: {}", e))?;
     std::fs::write(&path, &bytes)?;
+    let size = bytes.len();
     println!(
         "Statistic saved to {} ({:.2} MB)",
         path.display(),
-        bytes.len() as f64 / 1024.0 / 1024.0
+        size as f64 / 1024.0 / 1024.0
     );
-    Ok(())
+    Ok(size)
 }
 
 pub fn load_statistic(path: &Path) -> Result<Option<Statistic>, anyhow::Error> {

@@ -730,28 +730,19 @@ pub struct RawHopData {
     pub offsets: Vec<usize>,
 }
 
-fn build_vec_neighbor_data_from_raw(
-    raw: RawHopData,
-    scan_pool: &rayon::ThreadPool,
-) -> VecNeighborData {
-    // Build dst_verts (unique sorted destinations)
-    let mut sorted_dsts = raw.neighbors_flat.clone();
-    sorted_dsts.sort_unstable();
-    sorted_dsts.dedup();
-    let dst_verts = sorted_dsts;
-    let dst_to_local: HashMap<VertexId, u32> = dst_verts
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v, i as u32))
-        .collect();
+fn build_compact_vec_neighbor_data_from_raw(raw: RawHopData) -> VecNeighborData {
+    let mut dst_verts: Vec<VertexId> = Vec::new();
+    let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
+    let mut flat_neighbors: Vec<u32> = Vec::with_capacity(raw.neighbors_flat.len());
 
-    // Remap VertexId → local u32
-    let flat_neighbors: Vec<u32> = scan_pool.install(|| {
-        raw.neighbors_flat
-            .par_iter()
-            .map(|vid| dst_to_local[vid])
-            .collect()
-    });
+    for vid in raw.neighbors_flat {
+        let next_local_id = dst_verts.len() as u32;
+        let local_id = *dst_to_local.entry(vid).or_insert_with(|| {
+            dst_verts.push(vid);
+            next_local_id
+        });
+        flat_neighbors.push(local_id);
+    }
 
     let src_vid_to_idx: HashMap<VertexId, u32> = raw
         .src_vids
@@ -769,18 +760,71 @@ fn build_vec_neighbor_data_from_raw(
     }
 }
 
-/// Build `ScannedHops` from externally-provided raw adjacency data.
-///
-/// `get_hop(vertex_label, edge_label, outgoing)` must return a `RawHopData`
-/// for the requested hop. This allows building the scan cache from CSV files
-/// without loading data into `MemoryGraph`.
-pub fn scan_all_hops_from_raw(
-    get_hop: &dyn Fn(&str, &str, bool) -> RawHopData,
+fn build_sorted_vec_neighbor_data_from_raw(
+    raw: RawHopData,
+    scan_pool: &rayon::ThreadPool,
+    parallel_remap: bool,
+) -> VecNeighborData {
+    // Build dst_verts (unique sorted destinations). This keeps the old behavior as
+    // an opt-out fallback, but costs one extra full-size VertexId clone.
+    let mut sorted_dsts = raw.neighbors_flat.clone();
+    sorted_dsts.sort_unstable();
+    sorted_dsts.dedup();
+    let dst_verts = sorted_dsts;
+    let dst_to_local: HashMap<VertexId, u32> = dst_verts
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect();
+
+    // Remap VertexId → local u32
+    let flat_neighbors: Vec<u32> = if parallel_remap {
+        scan_pool.install(|| {
+            raw.neighbors_flat
+                .par_iter()
+                .map(|vid| dst_to_local[vid])
+                .collect()
+        })
+    } else {
+        raw.neighbors_flat
+            .iter()
+            .map(|vid| dst_to_local[vid])
+            .collect()
+    };
+
+    let src_vid_to_idx: HashMap<VertexId, u32> = raw
+        .src_vids
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect();
+
+    VecNeighborData {
+        src_verts: Arc::new(raw.src_vids),
+        src_vid_to_idx,
+        dst_verts,
+        flat_neighbors,
+        offsets: raw.offsets,
+    }
+}
+
+fn build_vec_neighbor_data_from_raw(
+    raw: RawHopData,
+    scan_pool: &rayon::ThreadPool,
+    parallel_remap: bool,
+) -> VecNeighborData {
+    if scan_compact_remap() {
+        build_compact_vec_neighbor_data_from_raw(raw)
+    } else {
+        build_sorted_vec_neighbor_data_from_raw(raw, scan_pool, parallel_remap)
+    }
+}
+
+fn collect_scan_deps(
     edges: &HashMap<String, EdgeEndpoints>,
     schema_path: &PathsByLen,
     max_k: usize,
-    scan_pool: &rayon::ThreadPool,
-) -> Result<ScannedHops, anyhow::Error> {
+) -> (Vec<PatternDeps>, Vec<HopKey>) {
     let mut seen_alt_keys: HashSet<AltKey> = HashSet::new();
     let mut all_deps: Vec<PatternDeps> = Vec::new();
     for len in 1..=max_k {
@@ -799,14 +843,14 @@ pub fn scan_all_hops_from_raw(
         unique_hops.insert(deps.right_hop.clone());
     }
 
-    let mut vec_caches: HashMap<HopKey, VecNeighborData> = HashMap::new();
-    for hop in &unique_hops {
-        let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
-        let vec_data = build_vec_neighbor_data_from_raw(raw, scan_pool);
-        vec_caches.insert(hop.clone(), vec_data);
-    }
+    (all_deps, unique_hops.into_iter().collect())
+}
 
-    // Build remap tables (identical to scan_all_hops)
+fn finish_scanned_hops(
+    all_deps: Vec<PatternDeps>,
+    vec_caches: HashMap<HopKey, VecNeighborData>,
+    edges: &HashMap<String, EdgeEndpoints>,
+) -> Result<ScannedHops, anyhow::Error> {
     let mut remap_pairs: HashSet<(HopKey, HopKey)> = HashSet::new();
     for deps in &all_deps {
         if deps.pattern.es.len() >= 2 {
@@ -846,6 +890,102 @@ pub fn scan_all_hops_from_raw(
     })
 }
 
+fn scan_hop_parallelism(_scan_pool: &rayon::ThreadPool, hop_count: usize) -> usize {
+    let default_parallelism = hop_count.max(1);
+    let requested = std::env::var("GCARD_SCAN_HOP_PARALLELISM")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default_parallelism);
+    requested.min(hop_count.max(1))
+}
+
+fn scan_inner_remap_parallel() -> bool {
+    std::env::var("GCARD_SCAN_INNER_REMAP_PARALLEL")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn scan_compact_remap() -> bool {
+    std::env::var("GCARD_SCAN_COMPACT_REMAP")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn scan_flat_direct() -> bool {
+    std::env::var("GCARD_SCAN_FLAT_DIRECT")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
+/// Build `ScannedHops` from externally-provided raw adjacency data.
+///
+/// `get_hop(vertex_label, edge_label, outgoing)` must return a `RawHopData`
+/// for the requested hop. This allows building the scan cache from CSV files
+/// without loading data into `MemoryGraph`.
+pub fn scan_all_hops_from_raw(
+    get_hop: &(dyn Fn(&str, &str, bool) -> RawHopData + Sync),
+    edges: &HashMap<String, EdgeEndpoints>,
+    schema_path: &PathsByLen,
+    max_k: usize,
+    scan_pool: &rayon::ThreadPool,
+) -> Result<ScannedHops, anyhow::Error> {
+    let (all_deps, unique_hops) = collect_scan_deps(edges, schema_path, max_k);
+
+    let hop_parallelism = scan_hop_parallelism(scan_pool, unique_hops.len());
+    let inner_remap_parallel = scan_inner_remap_parallel();
+    let compact_remap = scan_compact_remap();
+    eprintln!(
+        "GCard_scan: unique_hops={}, hop_parallelism={}, inner_remap_parallel={}, compact_remap={}",
+        unique_hops.len(),
+        hop_parallelism,
+        inner_remap_parallel,
+        compact_remap,
+    );
+
+    let mut vec_caches: HashMap<HopKey, VecNeighborData> =
+        HashMap::with_capacity(unique_hops.len());
+    if hop_parallelism == 1 {
+        for hop in &unique_hops {
+            let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
+            let vec_data = build_vec_neighbor_data_from_raw(raw, scan_pool, true);
+            vec_caches.insert(hop.clone(), vec_data);
+        }
+    } else {
+        for chunk in unique_hops.chunks(hop_parallelism) {
+            let rows: Vec<(HopKey, VecNeighborData)> = scan_pool.install(|| {
+                chunk
+                    .par_iter()
+                    .map(|hop| {
+                        let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
+                        let vec_data =
+                            build_vec_neighbor_data_from_raw(raw, scan_pool, inner_remap_parallel);
+                        (hop.clone(), vec_data)
+                    })
+                    .collect()
+            });
+            vec_caches.extend(rows);
+        }
+    }
+
+    finish_scanned_hops(all_deps, vec_caches, edges)
+}
+
 // ----- FlatGraph-based hop building -----
 
 fn raw_hop_data_from_flat_csr(
@@ -854,9 +994,10 @@ fn raw_hop_data_from_flat_csr(
 ) -> RawHopData {
     match csr {
         Some(csr) => {
-            let neighbors_vids = csr.neighbors_vids();
             let csr_verts = csr.verts();
             let csr_offsets = csr.offsets();
+            let neighbor_entries = csr.neighbor_entries();
+            let neighbor_count = neighbor_entries.len();
             let mut offsets = Vec::with_capacity(verts.len() + 1);
             let mut csr_pos = 0usize;
             for &vid in verts {
@@ -869,21 +1010,91 @@ fn raw_hop_data_from_flat_csr(
                     let cur = if csr_pos < csr_verts.len() {
                         csr_offsets[csr_pos]
                     } else {
-                        neighbors_vids.len()
+                        neighbor_count
                     };
                     offsets.push(cur);
                 }
             }
-            offsets.push(neighbors_vids.len());
+            offsets.push(neighbor_count);
             RawHopData {
                 src_vids: verts.to_vec(),
-                neighbors_flat: neighbors_vids,
+                neighbors_flat: neighbor_entries.iter().map(|&(vid, _)| vid).collect(),
                 offsets,
             }
         }
         None => RawHopData {
             src_vids: verts.to_vec(),
             neighbors_flat: Vec::new(),
+            offsets: vec![0; verts.len() + 1],
+        },
+    }
+}
+
+fn build_vec_neighbor_data_from_flat_csr(
+    verts: &[VertexId],
+    csr: Option<&crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid>,
+) -> VecNeighborData {
+    match csr {
+        Some(csr) => {
+            let csr_verts = csr.verts();
+            let csr_offsets = csr.offsets();
+            let neighbor_entries = csr.neighbor_entries();
+            let neighbor_count = neighbor_entries.len();
+
+            let mut offsets = Vec::with_capacity(verts.len() + 1);
+            let mut csr_pos = 0usize;
+            for &vid in verts {
+                while csr_pos < csr_verts.len() && csr_verts[csr_pos] < vid {
+                    csr_pos += 1;
+                }
+                if csr_pos < csr_verts.len() && csr_verts[csr_pos] == vid {
+                    offsets.push(csr_offsets[csr_pos]);
+                } else {
+                    let cur = if csr_pos < csr_verts.len() {
+                        csr_offsets[csr_pos]
+                    } else {
+                        neighbor_count
+                    };
+                    offsets.push(cur);
+                }
+            }
+            offsets.push(neighbor_count);
+
+            let mut dst_verts: Vec<VertexId> = Vec::new();
+            let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
+            let mut flat_neighbors: Vec<u32> = Vec::with_capacity(neighbor_count);
+            for &(vid, _) in neighbor_entries {
+                let next_local_id = dst_verts.len() as u32;
+                let local_id = *dst_to_local.entry(vid).or_insert_with(|| {
+                    dst_verts.push(vid);
+                    next_local_id
+                });
+                flat_neighbors.push(local_id);
+            }
+
+            let src_vid_to_idx: HashMap<VertexId, u32> = verts
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v, i as u32))
+                .collect();
+
+            VecNeighborData {
+                src_verts: Arc::new(verts.to_vec()),
+                src_vid_to_idx,
+                dst_verts,
+                flat_neighbors,
+                offsets,
+            }
+        }
+        None => VecNeighborData {
+            src_vid_to_idx: verts
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| (v, i as u32))
+                .collect(),
+            src_verts: Arc::new(verts.to_vec()),
+            dst_verts: Vec::new(),
+            flat_neighbors: Vec::new(),
             offsets: vec![0; verts.len() + 1],
         },
     }
@@ -900,17 +1111,69 @@ pub fn scan_all_hops_from_flat_graph(
     max_k: usize,
     scan_pool: &rayon::ThreadPool,
 ) -> Result<ScannedHops, anyhow::Error> {
-    scan_all_hops_from_raw(
-        &|vertex_label, edge_label, outgoing| {
-            let verts = flat_graph.all_vertex_ids_by_label(vertex_label);
-            let key = (vertex_label.to_string(), edge_label.to_string(), outgoing);
-            raw_hop_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key))
-        },
-        edges,
-        schema_path,
-        max_k,
-        scan_pool,
-    )
+    if !scan_compact_remap() || !scan_flat_direct() {
+        return scan_all_hops_from_raw(
+            &|vertex_label, edge_label, outgoing| {
+                let verts = flat_graph.all_vertex_ids_by_label(vertex_label);
+                let key = (vertex_label.to_string(), edge_label.to_string(), outgoing);
+                raw_hop_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key))
+            },
+            edges,
+            schema_path,
+            max_k,
+            scan_pool,
+        );
+    }
+
+    let (all_deps, unique_hops) = collect_scan_deps(edges, schema_path, max_k);
+    let hop_parallelism = scan_hop_parallelism(scan_pool, unique_hops.len());
+    let inner_remap_parallel = scan_inner_remap_parallel();
+    eprintln!(
+        "GCard_scan: unique_hops={}, hop_parallelism={}, inner_remap_parallel={}, compact_remap=true, flat_direct=true",
+        unique_hops.len(),
+        hop_parallelism,
+        inner_remap_parallel,
+    );
+
+    let mut vec_caches: HashMap<HopKey, VecNeighborData> =
+        HashMap::with_capacity(unique_hops.len());
+    if hop_parallelism == 1 {
+        for hop in &unique_hops {
+            let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
+            let key = (
+                hop.vertex_label.clone(),
+                hop.edge_label.clone(),
+                hop.outgoing,
+            );
+            let vec_data =
+                build_vec_neighbor_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key));
+            vec_caches.insert(hop.clone(), vec_data);
+        }
+    } else {
+        for chunk in unique_hops.chunks(hop_parallelism) {
+            let rows: Vec<(HopKey, VecNeighborData)> = scan_pool.install(|| {
+                chunk
+                    .par_iter()
+                    .map(|hop| {
+                        let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
+                        let key = (
+                            hop.vertex_label.clone(),
+                            hop.edge_label.clone(),
+                            hop.outgoing,
+                        );
+                        let vec_data = build_vec_neighbor_data_from_flat_csr(
+                            verts,
+                            flat_graph.hop_csrs().get(&key),
+                        );
+                        (hop.clone(), vec_data)
+                    })
+                    .collect()
+            });
+            vec_caches.extend(rows);
+        }
+    }
+
+    finish_scanned_hops(all_deps, vec_caches, edges)
 }
 
 #[cfg(test)]

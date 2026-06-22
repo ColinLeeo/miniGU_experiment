@@ -4,10 +4,11 @@ use std::sync::Arc;
 use minigu_common::data_type::LogicalType;
 use minigu_context::procedure::Procedure;
 use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 
-use super::Statistic;
 use super::degree_compute_dense::{PathsByLen, PatternDegCache, StarDegCache};
 use super::flat_graph::FlatGraph;
+use super::{BlockStatistic, Statistic};
 use crate::procedures::gcard_query::catalog::{
     DegreeSeqGraphCompressed, EdgeCardinality, PathAlias, make_alt_key,
 };
@@ -356,6 +357,29 @@ fn create_thread_pool(num_threads: usize) -> Result<rayon::ThreadPool, anyhow::E
         .map_err(|e| anyhow::anyhow!("Failed to create thread pool: {}", e))
 }
 
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(default)
+}
+
+fn build_reports_enabled() -> bool {
+    env_flag("GCARD_BUILD_REPORTS", false)
+}
+
+fn schema_paths_log_enabled() -> bool {
+    env_flag("GCARD_PRINT_SCHEMA_PATHS", false)
+}
+
+fn save_statistic_enabled() -> bool {
+    env_flag("GCARD_SAVE_STATISTIC", true)
+}
+
 pub(super) fn parse_star_collection_config(max_k: usize) -> (usize, usize) {
     let max_star_length = std::env::var("GCARD_MAX_STAR_LENGTH")
         .ok()
@@ -397,15 +421,105 @@ pub(super) fn build_statistic_from_pattern_and_star_cache(
             )
             .map_err(|e| anyhow::anyhow!("Statistic::insert_or_update_star: {}", e))?;
     }
-    println!("=== Per-label path/star count in Statistic ===");
-    for (label, ls) in &statistic.label_path_statistic {
-        println!(
-            "  {:20} paths: {:5}  stars: {:5}  vertices: {:10}",
-            label,
-            ls.path_statistic.len(),
-            ls.star_statistic.len(),
-            ls.vertex_ids.len()
-        );
+    if build_reports_enabled() {
+        println!("=== Per-label path/star count in Statistic ===");
+        for (label, ls) in &statistic.label_path_statistic {
+            println!(
+                "  {:20} paths: {:5}  stars: {:5}  vertices: {:10}",
+                label,
+                ls.path_statistic.len(),
+                ls.star_statistic.len(),
+                ls.vertex_ids.len()
+            );
+        }
+    }
+    Ok(statistic)
+}
+
+fn build_statistic_from_pattern_and_star_cache_parallel(
+    cache: &PatternDegCache,
+    star_cache: &StarDegCache,
+    pool: &rayon::ThreadPool,
+) -> Result<Statistic, anyhow::Error> {
+    let mut path_tasks = Vec::new();
+    for (path_pattern, endpoint_degrees) in cache {
+        let alt_key = path_pattern.to_alt_key();
+        for (node_name, (vertex_ids, frequencies)) in endpoint_degrees {
+            path_tasks.push((
+                node_name.clone(),
+                Arc::clone(vertex_ids),
+                alt_key.clone(),
+                frequencies.as_slice(),
+            ));
+        }
+    }
+
+    let path_blocks: Vec<Result<_, anyhow::Error>> = pool.install(|| {
+        path_tasks
+            .par_iter()
+            .map(|(node_name, vertex_ids, alt_key, frequencies)| {
+                let block = BlockStatistic::from_u64_sequence(frequencies)
+                    .map_err(|e| anyhow::anyhow!("BlockStatistic::from_u64_sequence: {}", e))?;
+                Ok((
+                    node_name.clone(),
+                    Arc::clone(vertex_ids),
+                    alt_key.clone(),
+                    block,
+                ))
+            })
+            .collect()
+    });
+
+    let mut star_tasks = Vec::new();
+    for (star_key, (vertex_ids, frequencies)) in star_cache {
+        star_tasks.push((
+            star_key.clone(),
+            Arc::clone(vertex_ids),
+            frequencies.as_slice(),
+        ));
+    }
+
+    let star_blocks: Vec<Result<_, anyhow::Error>> = pool.install(|| {
+        star_tasks
+            .par_iter()
+            .map(|(star_key, vertex_ids, frequencies)| {
+                let block = BlockStatistic::from_u64_sequence(frequencies)
+                    .map_err(|e| anyhow::anyhow!("BlockStatistic::from_u64_sequence: {}", e))?;
+                Ok((star_key.clone(), Arc::clone(vertex_ids), block))
+            })
+            .collect()
+    });
+
+    let mut statistic = Statistic::default();
+    for row in path_blocks {
+        let (node_name, vertex_ids, alt_key, block) = row?;
+        statistic
+            .insert_prebuilt_path_block(&node_name, vertex_ids.as_slice(), alt_key, block)
+            .map_err(|e| anyhow::anyhow!("Statistic::insert_prebuilt_path_block: {}", e))?;
+    }
+    for row in star_blocks {
+        let (star_key, vertex_ids, block) = row?;
+        statistic
+            .insert_prebuilt_star_block(
+                &star_key.center_label.clone(),
+                vertex_ids.as_slice(),
+                star_key,
+                block,
+            )
+            .map_err(|e| anyhow::anyhow!("Statistic::insert_prebuilt_star_block: {}", e))?;
+    }
+
+    if build_reports_enabled() {
+        println!("=== Per-label path/star count in Statistic ===");
+        for (label, ls) in &statistic.label_path_statistic {
+            println!(
+                "  {:20} paths: {:5}  stars: {:5}  vertices: {:10}",
+                label,
+                ls.path_statistic.len(),
+                ls.star_statistic.len(),
+                ls.vertex_ids.len()
+            );
+        }
     }
     Ok(statistic)
 }
@@ -422,29 +536,84 @@ fn build_and_persist_statistic(
     db_path: &Option<std::path::PathBuf>,
     graph_name: &str,
     max_k: usize,
+    pool: &rayon::ThreadPool,
 ) -> Result<(), anyhow::Error> {
-    let statistic = build_statistic_from_pattern_and_star_cache(cache, star_cache)?;
-    let size = statistic.serialized_size();
-    println!(
-        "Statistic estimated bincode size: {} bytes - {:.2} MB",
-        size,
-        size as f64 / 1024.0 / 1024.0
-    );
-    statistic.report_compressed_sizes();
+    let statistic_build_start = std::time::Instant::now();
+    let statistic = build_statistic_from_pattern_and_star_cache_parallel(cache, star_cache, pool)?;
+    let statistic_build_elapsed = statistic_build_start.elapsed();
+    if build_reports_enabled() {
+        let size = statistic.serialized_size();
+        println!(
+            "Statistic estimated bincode size: {} bytes - {:.2} MB",
+            size,
+            size as f64 / 1024.0 / 1024.0
+        );
+        statistic.report_compressed_sizes();
+    }
 
-    let mut degree_seq_graph_compressed = statistic
-        .to_degree_seq_graph_compressed()
-        .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
+    let save_enabled = db_path.is_some() && save_statistic_enabled();
+    let (degree_seq_graph_compressed_result, compression_elapsed, save_result) =
+        std::thread::scope(|scope| {
+            let save_handle = if save_enabled {
+                db_path.as_ref().map(|db_path| {
+                    let graph_name = graph_name.to_string();
+                    let statistic_ref = &statistic;
+                    scope.spawn(move || {
+                        let save_start = std::time::Instant::now();
+                        let result = save_statistic(db_path, &graph_name, statistic_ref);
+                        (result, save_start.elapsed())
+                    })
+                })
+            } else {
+                None
+            };
+
+            let compression_start = std::time::Instant::now();
+            let degree_seq_graph_compressed_result = statistic
+                .to_degree_seq_graph_compressed()
+                .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e));
+            let compression_elapsed = compression_start.elapsed();
+
+            let save_result = match save_handle {
+                Some(handle) => Some(
+                    handle
+                        .join()
+                        .map_err(|_| anyhow::anyhow!("save_statistic thread panicked"))?,
+                ),
+                None => None,
+            };
+
+            Ok::<_, anyhow::Error>((
+                degree_seq_graph_compressed_result,
+                compression_elapsed,
+                save_result,
+            ))
+        })?;
+
+    let mut degree_seq_graph_compressed = degree_seq_graph_compressed_result?;
+    let save_elapsed = if let Some((save_result, elapsed)) = save_result {
+        let _saved_size = save_result?;
+        Some(elapsed)
+    } else {
+        None
+    };
     degree_seq_graph_compressed.edge_cardinalities = edge_cardinalities;
+    let alias_start = std::time::Instant::now();
     let alias_count = add_functional_path_aliases(&mut degree_seq_graph_compressed, edges, max_k);
+    let alias_elapsed = alias_start.elapsed();
     println!(
         "Functional path aliases generated: {} (not scanned)",
         alias_count
     );
-
-    if let Some(db_path) = db_path {
-        save_statistic(db_path, graph_name, &statistic)?;
-    }
+    println!(
+        "Statistic substeps: build={:.3}s compressed_view={:.3}s save={} alias={:.3}s",
+        statistic_build_elapsed.as_secs_f64(),
+        compression_elapsed.as_secs_f64(),
+        save_elapsed
+            .map(|elapsed| format!("{:.3}s", elapsed.as_secs_f64()))
+            .unwrap_or_else(|| "skipped".to_string()),
+        alias_elapsed.as_secs_f64(),
+    );
 
     graph_container.set_degree_seq_graph_compressed(Arc::new(degree_seq_graph_compressed));
     graph_container.set_statistic(Arc::new(statistic));
@@ -464,6 +633,7 @@ pub fn build_procedure() -> Procedure {
         LogicalType::UInt8,  // compute_threads
     ];
     Procedure::new(parameters, None, move |context, args| {
+        let create_catalog_start = std::time::Instant::now();
         let graph_name = args[0]
             .try_as_string()
             .expect("expecting string value for graph_name")
@@ -521,18 +691,20 @@ pub fn build_procedure() -> Procedure {
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
         {
             let total: usize = schema_path.values().map(|s| s.len()).sum();
-            println!("=== Schema paths (total: {}) ===", total);
             println!(
-                "path collection: base_max_k={}, functional_extension_aliases={}, scanned_max_len={}",
+                "Schema paths: total={} base_max_k={} functional_extension_aliases={} scanned_max_len={}",
+                total,
                 max_k,
                 parse_functional_extension_config(max_k),
                 max_k
             );
-            for len in 1..=max_k {
-                if let Some(paths) = schema_path.get(&len) {
-                    println!("--- length {} ({} paths) ---", len, paths.len());
-                    for p in paths {
-                        println!("  {}", p);
+            if schema_paths_log_enabled() {
+                for len in 1..=max_k {
+                    if let Some(paths) = schema_path.get(&len) {
+                        println!("--- length {} ({} paths) ---", len, paths.len());
+                        for p in paths {
+                            println!("  {}", p);
+                        }
                     }
                 }
             }
@@ -576,6 +748,7 @@ pub fn build_procedure() -> Procedure {
         drop(scanned);
 
         // ── Build statistic & persist ──
+        let statistic_start = std::time::Instant::now();
         build_and_persist_statistic(
             &cache,
             &star_cache,
@@ -585,7 +758,22 @@ pub fn build_procedure() -> Procedure {
             &db_path,
             &graph_name,
             max_k,
+            &pool,
         )?;
+        let statistic_elapsed = statistic_start.elapsed();
+        println!(
+            "Statistic pipeline time: {:.3}s",
+            statistic_elapsed.as_secs_f64()
+        );
+        println!(
+            "GCard build excl input load time: {:.3}s (save_statistic={})",
+            create_catalog_start.elapsed().as_secs_f64(),
+            if save_statistic_enabled() {
+                "on"
+            } else {
+                "off"
+            }
+        );
 
         Ok(vec![])
     })
