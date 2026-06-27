@@ -827,6 +827,327 @@ impl QueryGraph {
         result
     }
 
+    pub fn estimate_positive_rank_closure_factor_for_abstract_graph_flat(
+        &self,
+        abstract_graph: &AbstractGraph,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+    ) -> f64 {
+        let Some(fg) = flat_graph else {
+            return 1.0;
+        };
+
+        let covered_edges: HashSet<EdgeId> = abstract_graph
+            .edges
+            .values()
+            .flat_map(|edge| edge.original_edge_ids.iter().copied())
+            .collect();
+        let min_tree_edges = self.inner.vertices.len().saturating_sub(1);
+        if covered_edges.len() < min_tree_edges {
+            return 1.0;
+        }
+
+        let mut factor = 1.0f64;
+
+        for edge in self.inner.edges.values() {
+            if covered_edges.contains(&edge.id) {
+                continue;
+            }
+
+            if let Some(rank_factor) = self.estimate_positive_rank_edge_closure_factor(
+                edge,
+                &covered_edges,
+                degree_seq_graph,
+                fg,
+            ) {
+                factor *= rank_factor;
+                continue;
+            }
+
+            // No legacy density fallback: only the positive-rank estimator is applied.
+        }
+
+        factor.clamp(0.0, 1.0)
+    }
+
+    fn estimate_positive_rank_edge_closure_factor(
+        &self,
+        missing_edge: &QueryEdge,
+        covered_edges: &HashSet<EdgeId>,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: &FlatGraph,
+    ) -> Option<f64> {
+        let (_, missing_path_edges) = self.find_two_hop_path_in_edge_set(
+            covered_edges,
+            missing_edge.dst_vertex_id,
+            missing_edge.src_vertex_id,
+        )?;
+
+        let cycle_edges: HashSet<EdgeId> = [
+            missing_edge.id,
+            missing_path_edges[0],
+            missing_path_edges[1],
+        ]
+        .into_iter()
+        .collect();
+        let mut directional_taus = Vec::with_capacity(3);
+        let mut directional_path_cards = Vec::with_capacity(3);
+        let mut missing_direction_path_card = None;
+
+        let mut cycle_edge_ids: Vec<EdgeId> = cycle_edges.iter().copied().collect();
+        cycle_edge_ids.sort_unstable();
+        for closing_edge_id in cycle_edge_ids {
+            let closing_edge = self.inner.edges.get(&closing_edge_id)?;
+            let path_edge_set: HashSet<EdgeId> = cycle_edges
+                .iter()
+                .copied()
+                .filter(|edge_id| *edge_id != closing_edge_id)
+                .collect();
+            let (path_vertices, path_edges) = self.find_two_hop_path_in_edge_set(
+                &path_edge_set,
+                closing_edge.dst_vertex_id,
+                closing_edge.src_vertex_id,
+            )?;
+            let (tau, w_path) = self.estimate_positive_rank_direction_tau(
+                closing_edge,
+                path_vertices,
+                path_edges,
+                degree_seq_graph,
+                flat_graph,
+            )?;
+            if closing_edge_id == missing_edge.id {
+                missing_direction_path_card = Some(w_path);
+            }
+            directional_taus.push(tau);
+            directional_path_cards.push(w_path);
+        }
+
+        if directional_taus.len() != 3 {
+            return None;
+        }
+        directional_taus.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let upper = directional_path_cards
+            .into_iter()
+            .fold(f64::INFINITY, |acc, value| acc.min(value));
+        let tau = directional_taus[1].clamp(0.0, upper);
+        let w_path = missing_direction_path_card?;
+        if w_path <= 0.0 {
+            return Some(0.0);
+        }
+
+        Some((tau / w_path).clamp(0.0, 1.0))
+    }
+
+    fn estimate_positive_rank_direction_tau(
+        &self,
+        closing_edge: &QueryEdge,
+        path_vertices: [VertexId; 3],
+        path_edges: [EdgeId; 2],
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: &FlatGraph,
+    ) -> Option<(f64, f64)> {
+        let path_node_labels: Vec<String> = path_vertices
+            .iter()
+            .map(|vertex_id| self.inner.vertices.get(vertex_id).map(|v| v.label.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        let path_edge_labels: Vec<String> = path_edges
+            .iter()
+            .map(|edge_id| self.inner.edges.get(edge_id).map(|e| e.label.clone()))
+            .collect::<Option<Vec<_>>>()?;
+        let path_key = make_alt_key(&path_node_labels, &path_edge_labels);
+
+        let path_start_label = path_node_labels.first()?;
+        let path_end_label = path_node_labels.last()?;
+        let path_start_pcf = degree_seq_graph.get_piece_func_by_path(&path_key, path_start_label);
+        let path_end_pcf = degree_seq_graph.get_piece_func_by_path(&path_key, path_end_label);
+        if path_start_pcf.is_empty_placeholder() || path_end_pcf.is_empty_placeholder() {
+            return None;
+        }
+
+        let closing_src_vertex = self.inner.vertices.get(&closing_edge.src_vertex_id)?;
+        let closing_dst_vertex = self.inner.vertices.get(&closing_edge.dst_vertex_id)?;
+        let closing_node_labels = vec![
+            closing_src_vertex.label.clone(),
+            closing_dst_vertex.label.clone(),
+        ];
+        let closing_edge_labels = vec![closing_edge.label.clone()];
+        let closing_key = make_alt_key(&closing_node_labels, &closing_edge_labels);
+
+        let mut closing_src_pcf =
+            degree_seq_graph.get_piece_func_by_path(&closing_key, &closing_src_vertex.label);
+        let mut closing_dst_pcf =
+            degree_seq_graph.get_piece_func_by_path(&closing_key, &closing_dst_vertex.label);
+        if closing_src_pcf.is_empty_placeholder() || closing_dst_pcf.is_empty_placeholder() {
+            return None;
+        }
+
+        let edge_selectivity =
+            self.estimate_query_edge_predicate_selectivity(closing_edge, flat_graph);
+        if edge_selectivity <= 0.0 {
+            return Some((
+                0.0,
+                Self::pcf_relation_cardinality(&path_start_pcf, &path_end_pcf),
+            ));
+        }
+        if edge_selectivity < 1.0 {
+            closing_src_pcf = closing_src_pcf.scale_by_ratio(edge_selectivity);
+            closing_dst_pcf = closing_dst_pcf.scale_by_ratio(edge_selectivity);
+        }
+
+        let w_path = Self::pcf_relation_cardinality(&path_start_pcf, &path_end_pcf);
+        let closing_card = Self::pcf_relation_cardinality(&closing_src_pcf, &closing_dst_pcf);
+        if w_path <= 0.0 || closing_card <= 0.0 {
+            return Some((0.0, w_path));
+        }
+
+        let dst_population = flat_graph.vertex_count_by_label(&closing_dst_vertex.label) as f64;
+        let src_population = flat_graph.vertex_count_by_label(&closing_src_vertex.label) as f64;
+        if dst_population <= 0.0 || src_population <= 0.0 {
+            return Some((0.0, w_path));
+        }
+
+        let j_dst = Self::pcf_positive_rank_dot(&path_start_pcf, &closing_dst_pcf, dst_population);
+        let j_src = Self::pcf_positive_rank_dot(&path_end_pcf, &closing_src_pcf, src_population);
+        let tau = j_dst * j_src / (w_path * closing_card);
+
+        Some((tau, w_path))
+    }
+
+    fn find_two_hop_path_in_edge_set(
+        &self,
+        edge_set: &HashSet<EdgeId>,
+        start: VertexId,
+        end: VertexId,
+    ) -> Option<([VertexId; 3], [EdgeId; 2])> {
+        if start == end {
+            return None;
+        }
+
+        let mut first_edges = Vec::new();
+        first_edges.extend(self.get_outgoing_edges(start));
+        first_edges.extend(self.get_incoming_edges(start));
+
+        for first in first_edges {
+            if !edge_set.contains(&first.id) {
+                continue;
+            }
+            let mid = if first.src_vertex_id == start {
+                first.dst_vertex_id
+            } else {
+                first.src_vertex_id
+            };
+            if mid == start {
+                continue;
+            }
+
+            let mut second_edges = Vec::new();
+            second_edges.extend(self.get_outgoing_edges(mid));
+            second_edges.extend(self.get_incoming_edges(mid));
+            for second in second_edges {
+                if second.id == first.id || !edge_set.contains(&second.id) {
+                    continue;
+                }
+                let other = if second.src_vertex_id == mid {
+                    second.dst_vertex_id
+                } else {
+                    second.src_vertex_id
+                };
+                if other == end {
+                    return Some(([start, mid, end], [first.id, second.id]));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn pcf_positive_rank_dot(left: &Pcf, right: &Pcf, population: f64) -> f64 {
+        if population <= 0.0 {
+            return 0.0;
+        }
+        let mut left_desc = Self::pcf_segments(left, population);
+        let mut right_desc = Self::pcf_segments(right, population);
+        left_desc.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        right_desc.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Self::pcf_segment_dot(&left_desc, &right_desc)
+    }
+
+    fn estimate_query_edge_predicate_selectivity(
+        &self,
+        edge: &QueryEdge,
+        flat_graph: &FlatGraph,
+    ) -> f64 {
+        let mut edge_selectivity = 1.0f64;
+        for pred in &edge.predicates {
+            edge_selectivity *= Self::estimate_selectivity_from_stats(
+                flat_graph.edge_column_stats(&edge.label, &pred.property),
+                &pred.op,
+                &pred.value,
+            );
+        }
+        edge_selectivity.clamp(0.0, 1.0)
+    }
+
+    fn pcf_relation_cardinality(src_pcf: &Pcf, dst_pcf: &Pcf) -> f64 {
+        let src_rows = src_pcf.get_num_rows();
+        let dst_rows = dst_pcf.get_num_rows();
+        if src_rows <= 0.0 {
+            return dst_rows.max(0.0);
+        }
+        if dst_rows <= 0.0 {
+            return src_rows.max(0.0);
+        }
+        src_rows.min(dst_rows)
+    }
+
+    fn pcf_segments(pcf: &Pcf, population: f64) -> Vec<(f64, f64)> {
+        let mut segments = Vec::new();
+        let mut left = 0.0;
+        for (idx, right) in pcf.right_interval_edges.iter().copied().enumerate() {
+            let capped_right = right.min(population).max(left);
+            let width = capped_right - left;
+            if width > 0.0 {
+                segments.push((width, pcf.constants[idx].max(0.0)));
+            }
+            left = capped_right;
+            if left >= population {
+                break;
+            }
+        }
+        if left < population {
+            segments.push((population - left, 0.0));
+        }
+        segments
+    }
+
+    fn pcf_segment_dot(left: &[(f64, f64)], right: &[(f64, f64)]) -> f64 {
+        let mut i = 0usize;
+        let mut j = 0usize;
+        let mut left_remaining = left.first().map(|x| x.0).unwrap_or(0.0);
+        let mut right_remaining = right.first().map(|x| x.0).unwrap_or(0.0);
+        let mut total = 0.0;
+
+        while i < left.len() && j < right.len() {
+            let width = left_remaining.min(right_remaining);
+            if width > 0.0 {
+                total += width * left[i].1 * right[j].1;
+                left_remaining -= width;
+                right_remaining -= width;
+            }
+
+            if left_remaining <= 1e-9 {
+                i += 1;
+                left_remaining = left.get(i).map(|x| x.0).unwrap_or(0.0);
+            }
+            if right_remaining <= 1e-9 {
+                j += 1;
+                right_remaining = right.get(j).map(|x| x.0).unwrap_or(0.0);
+            }
+        }
+
+        total
+    }
+
     /// Estimate selectivity of a single predicate using column statistics.
     fn estimate_selectivity_from_stats(
         col_stats: Option<&super::flat_graph::stats::ColumnStats>,

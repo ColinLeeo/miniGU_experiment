@@ -149,6 +149,21 @@ pub(crate) fn max_bucket_enabled() -> bool {
     GCARD_MAX_BUCKET.load(Ordering::Relaxed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosureFactorMode {
+    Off,
+    PositiveRank,
+}
+
+fn closure_factor_mode() -> ClosureFactorMode {
+    std::env::var("GCARD_CLOSURE_FACTOR")
+        .map(|value| match value.to_ascii_lowercase().as_str() {
+            "positive_rank" => ClosureFactorMode::PositiveRank,
+            _ => ClosureFactorMode::Off,
+        })
+        .unwrap_or(ClosureFactorMode::Off)
+}
+
 pub fn set_session_guc(name: &str, value: bool) -> std::io::Result<()> {
     if name.eq_ignore_ascii_case("functional_refine") {
         GCARD_FUNCTIONAL_REFINE.store(value, Ordering::Relaxed);
@@ -360,6 +375,7 @@ pub fn build_procedure() -> Procedure {
                 let mut min_nonzero_es = f64::INFINITY;
                 let mut score_of_min_es: Option<u64> = None;
                 let mut index_of_min_es: Option<usize> = None;
+                let mut closure_factor_of_min_es: Option<f64> = None;
                 let mut max_score: u64 = 0;
                 #[allow(dead_code)]
                 let mut min_es_abstract_graph: Option<AbstractGraph> = None;
@@ -405,6 +421,17 @@ pub fn build_procedure() -> Procedure {
                     } else {
                         None
                     };
+                    let raw_es = es;
+                    let closure_factor = match closure_factor_mode() {
+                        ClosureFactorMode::Off => 1.0,
+                        ClosureFactorMode::PositiveRank => query_graph
+                            .estimate_positive_rank_closure_factor_for_abstract_graph_flat(
+                                &abs_for_debug,
+                                &metadata,
+                                Some(flat_graph_ref),
+                            ),
+                    };
+                    es *= closure_factor;
 
                     if GCARD_VERBOSE.load(Ordering::Relaxed) {
                         println!("es: {}", es);
@@ -421,12 +448,14 @@ pub fn build_procedure() -> Procedure {
                         })
                         .count();
                     println!(
-                        "[gcard-cand] query={} idx={}/{} score={} card={} n1_edges={}/{}",
+                        "[gcard-cand] query={} idx={}/{} score={} card={} raw_card={} closure_factor={:.9} n1_edges={}/{}",
                         cand_query_stem,
                         idx + 1,
                         total_count,
                         score,
                         es.ceil(),
+                        raw_es.ceil(),
+                        closure_factor,
                         n1_ae,
                         total_ae
                     );
@@ -503,6 +532,7 @@ pub fn build_procedure() -> Procedure {
                             index_of_min_es = Some(idx + 1);
                             min_es_abstract_graph = Some(abs_for_debug);
                             min_es_alpha_beta_counts = alpha_beta_counts;
+                            closure_factor_of_min_es = Some(closure_factor);
                         }
                     }
                 }
@@ -528,7 +558,7 @@ pub fn build_procedure() -> Procedure {
                 };
                 println!(
                     "[gcard-cand-min] query={} selected={} score={} card={} total_candidates={} \
-                     selected_n1_edges={}/{} n1_fast_path={}",
+                     selected_n1_edges={}/{} n1_fast_path={} closure_factor={:.9}",
                     cand_query_stem,
                     index_of_min_es
                         .map(|i| i.to_string())
@@ -541,6 +571,7 @@ pub fn build_procedure() -> Procedure {
                     sel_n1,
                     sel_total,
                     sel_n1 > 0,
+                    closure_factor_of_min_es.unwrap_or(1.0),
                 );
                 if let (Some(abs), Some(log_path)) =
                     (&min_es_abstract_graph, decomp_trace_log_path.clone())
