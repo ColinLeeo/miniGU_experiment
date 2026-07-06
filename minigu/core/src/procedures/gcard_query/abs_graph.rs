@@ -596,6 +596,24 @@ impl GraphSkeleton<AbstractEdge> {
         alpha_refs(&refs)
     }
 
+    fn single_edge_cardinality(edge: &AbstractEdge) -> f64 {
+        let src_rows = edge.src_pcf.get_num_rows();
+        let dst_rows = edge.dst_pcf.get_num_rows();
+        match edge.functional {
+            FunctionalDirection::SrcToDst => src_rows.max(0.0),
+            FunctionalDirection::DstToSrc => dst_rows.max(0.0),
+            FunctionalDirection::Both | FunctionalDirection::None => {
+                if src_rows <= 0.0 {
+                    dst_rows.max(0.0)
+                } else if dst_rows <= 0.0 {
+                    src_rows.max(0.0)
+                } else {
+                    src_rows.min(dst_rows)
+                }
+            }
+        }
+    }
+
     pub fn get_es(&mut self) -> GCardResult<f64> {
         // `es` 可以理解为当前抽象图估算出来的结果规模。
         // 做法是把抽象图当成一棵（或近似树状）结构，自底向上组合每条边的 PCF。
@@ -610,6 +628,13 @@ impl GraphSkeleton<AbstractEdge> {
             return Err(GCardError::InvalidState(
                 "AbstractGraph must have at least 2 vertices".to_string(),
             ));
+        }
+
+        if self.edges.len() == 1 && self.vertices.len() == 2 && self.local_pcfs.is_empty() {
+            let edge = self.edges.values().next().ok_or_else(|| {
+                GCardError::InvalidState("Single-edge graph must have an edge".to_string())
+            })?;
+            return Ok(Self::single_edge_cardinality(edge));
         }
 
         let root = self
@@ -964,5 +989,27 @@ mod tests {
         let expected_reverse = alpha_refs(&[&functional_parent_side, &active]).get_num_rows();
         assert_ne!(expected_reverse, expected_forward);
         assert_eq!(reverse.get_es().unwrap(), expected_reverse);
+    }
+
+    #[test]
+    fn single_functional_edge_keeps_edge_cardinality() {
+        let src_side = pcf(vec![7.0], vec![11.0]);
+        let dst_side = pcf(vec![3.0], vec![13.0]);
+
+        let mut graph = AbstractGraph::new();
+        graph.add_vertex(vertex(1, "many_side"));
+        graph.add_vertex(vertex(2, "one_side"));
+        graph.add_edge(
+            1,
+            edge_with_functional(
+                1,
+                2,
+                src_side.clone(),
+                dst_side,
+                FunctionalDirection::SrcToDst,
+            ),
+        );
+
+        assert_eq!(graph.get_es().unwrap(), src_side.get_num_rows());
     }
 }
