@@ -692,8 +692,174 @@ pub fn load_statistic(path: &Path) -> Result<Option<Statistic>, anyhow::Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::procedures::gcard_query::utils::PathPattern;
+
+    fn load_statistic_for_compare(path: PathBuf) -> Statistic {
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", path.display(), e));
+        let mut statistic: Statistic = bincode::deserialize(&bytes)
+            .unwrap_or_else(|e| panic!("failed to deserialize {}: {}", path.display(), e));
+        statistic.rebuild_indexes();
+        statistic
+    }
+
+    fn assert_same_vec<T: Eq + std::fmt::Debug>(path: &str, field: &str, left: &[T], right: &[T]) {
+        if left == right {
+            return;
+        }
+        let first_diff = left
+            .iter()
+            .zip(right.iter())
+            .position(|(l, r)| l != r)
+            .map(|idx| {
+                format!(
+                    "first_diff={} left={:?} right={:?}",
+                    idx, left[idx], right[idx]
+                )
+            })
+            .unwrap_or_else(|| "one vector is a prefix of the other".to_string());
+        panic!(
+            "{} {} differ: left_len={} right_len={} {}",
+            path,
+            field,
+            left.len(),
+            right.len(),
+            first_diff
+        );
+    }
+
+    fn assert_same_block_statistic(path: &str, left: &BlockStatistic, right: &BlockStatistic) {
+        assert_same_vec(path, "bucket_ids", &left.bucket_ids, &right.bucket_ids);
+        assert_same_vec(path, "prefix", &left.prefix, &right.prefix);
+        assert_same_vec(path, "res_vec", &left.res_vec, &right.res_vec);
+        assert_same_vec(
+            path,
+            "bucket_max_values",
+            &left.bucket_max_values,
+            &right.bucket_max_values,
+        );
+    }
+
+    fn sorted_path_blocks(
+        map: &HashMap<AltKey, BlockStatistic>,
+    ) -> Vec<(Vec<u8>, &AltKey, &BlockStatistic)> {
+        let mut out: Vec<_> = map
+            .iter()
+            .map(|(key, block)| {
+                (
+                    bincode::serialize(key).expect("serialize AltKey"),
+                    key,
+                    block,
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn sorted_star_blocks(
+        map: &HashMap<StarStatKey, BlockStatistic>,
+    ) -> Vec<(Vec<u8>, &StarStatKey, &BlockStatistic)> {
+        let mut out: Vec<_> = map
+            .iter()
+            .map(|(key, block)| {
+                (
+                    bincode::serialize(key).expect("serialize StarStatKey"),
+                    key,
+                    block,
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    fn assert_same_statistic_degree_sequences(left: &Statistic, right: &Statistic) {
+        let mut left_labels: Vec<_> = left.label_path_statistic.keys().collect();
+        let mut right_labels: Vec<_> = right.label_path_statistic.keys().collect();
+        left_labels.sort();
+        right_labels.sort();
+        assert_eq!(left_labels, right_labels, "label sets differ");
+
+        let mut path_block_count = 0usize;
+        let mut star_block_count = 0usize;
+        let mut vertex_count = 0usize;
+        for label in left_labels {
+            let left_label = &left.label_path_statistic[label];
+            let right_label = &right.label_path_statistic[label];
+            assert_eq!(
+                left_label.vertex_ids, right_label.vertex_ids,
+                "vertex_ids differ for label {}",
+                label
+            );
+            vertex_count += left_label.vertex_ids.len();
+
+            let left_paths = sorted_path_blocks(&left_label.path_statistic);
+            let right_paths = sorted_path_blocks(&right_label.path_statistic);
+            assert_eq!(
+                left_paths.len(),
+                right_paths.len(),
+                "path block count differs for label {}",
+                label
+            );
+            for ((left_key_bytes, left_key, left_block), (right_key_bytes, _, right_block)) in
+                left_paths.iter().zip(right_paths.iter())
+            {
+                assert_eq!(
+                    left_key_bytes, right_key_bytes,
+                    "path key set/order differs for label {}",
+                    label
+                );
+                let path = format!("label={} path={:?}", label, left_key);
+                assert_same_block_statistic(&path, left_block, right_block);
+            }
+            path_block_count += left_paths.len();
+
+            let left_stars = sorted_star_blocks(&left_label.star_statistic);
+            let right_stars = sorted_star_blocks(&right_label.star_statistic);
+            assert_eq!(
+                left_stars.len(),
+                right_stars.len(),
+                "star block count differs for label {}",
+                label
+            );
+            for ((left_key_bytes, left_key, left_block), (right_key_bytes, _, right_block)) in
+                left_stars.iter().zip(right_stars.iter())
+            {
+                assert_eq!(
+                    left_key_bytes, right_key_bytes,
+                    "star key set/order differs for label {}",
+                    label
+                );
+                let path = format!("label={} star={:?}", label, left_key);
+                assert_same_block_statistic(&path, left_block, right_block);
+            }
+            star_block_count += left_stars.len();
+        }
+
+        eprintln!(
+            "statistic degree sequence compare OK: labels={} vertex_ids={} path_blocks={} star_blocks={}",
+            left.label_path_statistic.len(),
+            vertex_count,
+            path_block_count,
+            star_block_count
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn compare_statistic_degree_sequences_from_env() {
+        let left = std::env::var("GCARD_STAT_COMPARE_LEFT")
+            .expect("GCARD_STAT_COMPARE_LEFT must point to a statistic.bin");
+        let right = std::env::var("GCARD_STAT_COMPARE_RIGHT")
+            .expect("GCARD_STAT_COMPARE_RIGHT must point to a statistic.bin");
+        let left = load_statistic_for_compare(PathBuf::from(left));
+        let right = load_statistic_for_compare(PathBuf::from(right));
+        assert_same_statistic_degree_sequences(&left, &right);
+    }
 
     #[test]
     fn star_statistic_is_stored_once_for_center_vertices() {

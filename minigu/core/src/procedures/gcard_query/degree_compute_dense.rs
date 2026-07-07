@@ -32,6 +32,25 @@ struct HopKey {
     outgoing: bool,
 }
 
+fn cmp_hop_key(a: &HopKey, b: &HopKey) -> std::cmp::Ordering {
+    a.vertex_label
+        .cmp(&b.vertex_label)
+        .then_with(|| a.edge_label.cmp(&b.edge_label))
+        .then_with(|| a.outgoing.cmp(&b.outgoing))
+}
+
+fn cmp_hop_pair(a: &(HopKey, HopKey), b: &(HopKey, HopKey)) -> std::cmp::Ordering {
+    cmp_hop_key(&a.0, &b.0).then_with(|| cmp_hop_key(&a.1, &b.1))
+}
+
+fn cmp_pattern_deps(a: &PatternDeps, b: &PatternDeps) -> std::cmp::Ordering {
+    a.pattern
+        .to_string()
+        .cmp(&b.pattern.to_string())
+        .then_with(|| cmp_hop_key(&a.left_hop, &b.left_hop))
+        .then_with(|| cmp_hop_key(&a.right_hop, &b.right_hop))
+}
+
 // ----- Vec-based neighbor data with dense local IDs -----
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -323,6 +342,7 @@ fn enumerate_oriented_arms_in_schema(
 /// of a pattern share the same vertex label but use different hops
 /// (e.g., [Person, knows, Person, likes, Person]).
 type InternalDegCache = HashMap<PathPattern, HashMap<HopKey, Vec<u64>>>;
+type RemapKey = (HopKey, HopKey);
 
 /// Compute dense degree vector for one endpoint of a pattern.
 fn compute_endpoint_dense(
@@ -330,7 +350,7 @@ fn compute_endpoint_dense(
     vec_data: &VecNeighborData,
     cache: &InternalDegCache,
     edges: &HashMap<String, EdgeEndpoints>,
-    remap_tables: &HashMap<(HopKey, HopKey), Vec<u32>>,
+    remap_tables: &HashMap<RemapKey, Vec<u32>>,
 ) -> Result<Vec<u64>, anyhow::Error> {
     if oriented.es.len() == 1 {
         return Ok(degree_vec_from_data(vec_data));
@@ -351,8 +371,9 @@ fn compute_endpoint_dense(
                 suffix
             )
         })?;
+    let remap_key = (current_hop, suffix_hop);
     let remap = remap_tables
-        .get(&(current_hop, suffix_hop))
+        .get(&remap_key)
         .ok_or_else(|| anyhow::anyhow!("remap table missing for pattern {}", oriented))?;
 
     Ok(extend_vec_with_suffix(vec_data, suffix_degs, remap))
@@ -364,9 +385,9 @@ fn compute_endpoint_dense(
 pub struct ScannedHops {
     vec_caches: HashMap<HopKey, VecNeighborData>,
     all_deps: Vec<PatternDeps>,
-    /// Pre-computed remap tables: (current_hop, suffix_hop) → Vec<u32>.
+    /// Pre-computed remap tables: (current_hop, suffix_hop) -> Vec<u32>.
     /// remap[dst_local_id] = suffix hop's src index, or u32::MAX if not found.
-    remap_tables: HashMap<(HopKey, HopKey), Vec<u32>>,
+    remap_tables: HashMap<RemapKey, Vec<u32>>,
 }
 
 impl ScannedHops {
@@ -418,6 +439,185 @@ impl ScannedHops {
     }
 }
 
+fn collect_remap_pairs(
+    all_deps: &[PatternDeps],
+    edges: &HashMap<String, EdgeEndpoints>,
+) -> Vec<(HopKey, HopKey)> {
+    let mut remap_pairs: HashSet<(HopKey, HopKey)> = HashSet::new();
+    for deps in all_deps {
+        if deps.pattern.es.len() >= 2 {
+            let suffix_left = deps.pattern.suffix();
+            let suffix_left_hop = hop_key_for_pattern_start(&suffix_left, edges);
+            remap_pairs.insert((deps.left_hop.clone(), suffix_left_hop));
+
+            let reversed = deps.pattern.reversed();
+            let suffix_right = reversed.suffix();
+            let suffix_right_hop = hop_key_for_pattern_start(&suffix_right, edges);
+            remap_pairs.insert((deps.right_hop.clone(), suffix_right_hop));
+        }
+    }
+    let mut remap_pairs: Vec<_> = remap_pairs.into_iter().collect();
+    remap_pairs.sort_by(cmp_hop_pair);
+    remap_pairs
+}
+
+fn remap_parallel_enabled() -> bool {
+    std::env::var("GCARD_REMAP_PARALLEL")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn fingerprint_mix(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(0x100000001b3);
+}
+
+fn fingerprint_str(hash: &mut u64, value: &str) {
+    for &b in value.as_bytes() {
+        fingerprint_mix(hash, b as u64);
+    }
+    fingerprint_mix(hash, 0xff);
+}
+
+fn fingerprint_hop_key(hash: &mut u64, hop: &HopKey) {
+    fingerprint_str(hash, &hop.vertex_label);
+    fingerprint_str(hash, &hop.edge_label);
+    fingerprint_mix(hash, hop.outgoing as u64);
+}
+
+fn remap_tables_fingerprint(remap_tables: &HashMap<RemapKey, Vec<u32>>) -> u64 {
+    let mut rows: Vec<_> = remap_tables.iter().collect();
+    rows.sort_by(|(a, _), (b, _)| cmp_hop_pair(a, b));
+
+    let mut hash = 0xcbf29ce484222325u64;
+    for ((current_hop, suffix_hop), remap) in rows {
+        fingerprint_hop_key(&mut hash, current_hop);
+        fingerprint_hop_key(&mut hash, suffix_hop);
+        fingerprint_mix(&mut hash, remap.len() as u64);
+        for &idx in remap {
+            fingerprint_mix(&mut hash, idx as u64);
+        }
+    }
+    hash
+}
+
+#[derive(Clone)]
+struct RemapWorkItem {
+    current_hop: HopKey,
+    suffix_hop: HopKey,
+}
+
+fn build_one_remap(
+    current_hop: &HopKey,
+    suffix_hop: &HopKey,
+    vec_caches: &HashMap<HopKey, VecNeighborData>,
+) -> Result<(Vec<u32>, RemapProfile), anyhow::Error> {
+    let key_start = std::time::Instant::now();
+    let current_data = vec_caches
+        .get(current_hop)
+        .ok_or_else(|| anyhow::anyhow!("current hop not found: {:?}", current_hop))?;
+    let suffix_data = vec_caches
+        .get(suffix_hop)
+        .ok_or_else(|| anyhow::anyhow!("suffix hop not found: {:?}", suffix_hop))?;
+    let suffix_src_vid_to_idx = &suffix_data.src_vid_to_idx;
+    let mut matched_count = 0usize;
+    let remap: Vec<u32> = current_data
+        .dst_verts
+        .iter()
+        .map(|v| match suffix_src_vid_to_idx.get(v).copied() {
+            Some(idx) => {
+                matched_count += 1;
+                idx
+            }
+            None => u32::MAX,
+        })
+        .collect();
+    let profile = RemapProfile {
+        current_hop: current_hop.clone(),
+        suffix_hop: suffix_hop.clone(),
+        entry_count: remap.len(),
+        matched_count,
+        build_time_s: key_start.elapsed().as_secs_f64(),
+    };
+    Ok((remap, profile))
+}
+
+fn build_remap_tables(
+    all_deps: &[PatternDeps],
+    vec_caches: &HashMap<HopKey, VecNeighborData>,
+    edges: &HashMap<String, EdgeEndpoints>,
+    scan_pool: &rayon::ThreadPool,
+) -> Result<HashMap<RemapKey, Vec<u32>>, anyhow::Error> {
+    let remap_pairs = collect_remap_pairs(all_deps, edges);
+    let remap_parallel = remap_parallel_enabled();
+    let work_items: Vec<RemapWorkItem> = remap_pairs
+        .iter()
+        .map(|(current_hop, suffix_hop)| RemapWorkItem {
+            current_hop: current_hop.clone(),
+            suffix_hop: suffix_hop.clone(),
+        })
+        .collect();
+
+    let remap_start = std::time::Instant::now();
+    let built: Vec<Result<(RemapKey, Vec<u32>, RemapProfile), anyhow::Error>> = if remap_parallel {
+        scan_pool.install(|| {
+            work_items
+                .par_iter()
+                .map(|item| {
+                    let (remap, profile) =
+                        build_one_remap(&item.current_hop, &item.suffix_hop, vec_caches)?;
+                    Ok((
+                        (item.current_hop.clone(), item.suffix_hop.clone()),
+                        remap,
+                        profile,
+                    ))
+                })
+                .collect()
+        })
+    } else {
+        work_items
+            .iter()
+            .map(|item| {
+                let (remap, profile) =
+                    build_one_remap(&item.current_hop, &item.suffix_hop, vec_caches)?;
+                Ok((
+                    (item.current_hop.clone(), item.suffix_hop.clone()),
+                    remap,
+                    profile,
+                ))
+            })
+            .collect()
+    };
+
+    let mut remap_tables: HashMap<RemapKey, Vec<u32>> = HashMap::with_capacity(remap_pairs.len());
+    let mut remap_profiles: Vec<RemapProfile> = Vec::with_capacity(remap_pairs.len());
+    for row in built {
+        let (key, remap, profile) = row?;
+        remap_profiles.push(profile);
+        remap_tables.insert(key, remap);
+    }
+
+    print_remap_profiles(remap_pairs.len(), &remap_profiles);
+    let remap_entries: usize = remap_tables.values().map(Vec::len).sum();
+    let remap_fingerprint = remap_tables_fingerprint(&remap_tables);
+    eprintln!(
+        "GCard_scan_remap_summary: logical_pairs={} unique_remaps={} remap_entries={} remap_fingerprint={:016x} remap_time={:.6}s parallel_enabled={}",
+        remap_pairs.len(),
+        remap_tables.len(),
+        remap_entries,
+        remap_fingerprint,
+        remap_start.elapsed().as_secs_f64(),
+        remap_parallel,
+    );
+
+    Ok(remap_tables)
+}
+
 // ----- Phase 1: Scan all hops -----
 
 pub fn scan_all_hops(
@@ -440,11 +640,15 @@ pub fn scan_all_hops(
         }
     }
 
+    all_deps.sort_by(cmp_pattern_deps);
+
     let mut unique_hops: HashSet<HopKey> = HashSet::new();
     for deps in &all_deps {
         unique_hops.insert(deps.left_hop.clone());
         unique_hops.insert(deps.right_hop.clone());
     }
+    let mut unique_hops: Vec<_> = unique_hops.into_iter().collect();
+    unique_hops.sort_by(cmp_hop_key);
 
     let mut vec_caches: HashMap<HopKey, VecNeighborData> = HashMap::new();
     for hop in &unique_hops {
@@ -459,41 +663,7 @@ pub fn scan_all_hops(
         vec_caches.insert(hop.clone(), vec_data);
     }
 
-    // Phase 6: Pre-compute remap tables for all (current_hop, suffix_hop) pairs.
-    // For each len>=2 pattern, we need remaps for left and right endpoint computation.
-    let mut remap_pairs: HashSet<(HopKey, HopKey)> = HashSet::new();
-    for deps in &all_deps {
-        if deps.pattern.es.len() >= 2 {
-            // Left endpoint: current = left_hop, suffix = first hop of pattern.suffix()
-            let suffix_left = deps.pattern.suffix();
-            let suffix_left_hop = hop_key_for_pattern_start(&suffix_left, edges);
-            remap_pairs.insert((deps.left_hop.clone(), suffix_left_hop));
-
-            // Right endpoint: current = right_hop, suffix = first hop of reversed.suffix()
-            let reversed = deps.pattern.reversed();
-            let suffix_right = reversed.suffix();
-            let suffix_right_hop = hop_key_for_pattern_start(&suffix_right, edges);
-            remap_pairs.insert((deps.right_hop.clone(), suffix_right_hop));
-        }
-    }
-
-    let mut remap_tables: HashMap<(HopKey, HopKey), Vec<u32>> = HashMap::new();
-    for (current_hop, suffix_hop) in &remap_pairs {
-        let current_data = vec_caches.get(current_hop).unwrap();
-        let suffix_data = vec_caches.get(suffix_hop).unwrap();
-        let remap: Vec<u32> = current_data
-            .dst_verts
-            .iter()
-            .map(|v| {
-                suffix_data
-                    .src_vid_to_idx
-                    .get(v)
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            })
-            .collect();
-        remap_tables.insert((current_hop.clone(), suffix_hop.clone()), remap);
-    }
+    let remap_tables = build_remap_tables(&all_deps, &vec_caches, edges, scan_pool)?;
 
     Ok(ScannedHops {
         vec_caches,
@@ -531,10 +701,11 @@ pub fn compute_from_scanned_hops_with_star(
     let mut computed_patterns: HashSet<PathPattern> = HashSet::new();
 
     for len in 1..=max_k {
-        let level_deps: Vec<&PatternDeps> = all_deps
+        let mut level_deps: Vec<&PatternDeps> = all_deps
             .iter()
             .filter(|d| d.len() == len && !computed_patterns.contains(&d.pattern))
             .collect();
+        level_deps.sort_by(|a, b| cmp_pattern_deps(a, b));
 
         if level_deps.is_empty() {
             continue;
@@ -599,12 +770,20 @@ pub fn compute_from_scanned_hops_with_star(
     // Consumes the cache to move degree Vecs (no clone). Uses Arc for shared src_verts.
     let mut output: PatternDegCache = HashMap::with_capacity(cache.len());
     for (pattern, endpoints) in cache {
-        let mut out_endpoints: HashMap<String, DegreeSeq> = HashMap::with_capacity(endpoints.len());
-        for (hop_key, degrees) in endpoints {
+        let mut endpoint_rows: Vec<_> = endpoints.into_iter().collect();
+        endpoint_rows.sort_by(|(a, _), (b, _)| cmp_hop_key(a, b));
+
+        let mut out_endpoints: HashMap<String, DegreeSeq> =
+            HashMap::with_capacity(endpoint_rows.len());
+        for (hop_key, degrees) in endpoint_rows {
             let vec_data = vec_caches.get(&hop_key).unwrap();
             let vids = Arc::clone(&vec_data.src_verts);
             // Use the hop's vertex_label as the endpoint name for downstream consumers.
-            out_endpoints.insert(hop_key.vertex_label.clone(), (vids, degrees));
+            // Some cyclic paths have the same label at both endpoints; the public
+            // statistic key cannot represent both, so keep a deterministic endpoint.
+            out_endpoints
+                .entry(hop_key.vertex_label.clone())
+                .or_insert((vids, degrees));
         }
         output.insert(pattern, out_endpoints);
     }
@@ -730,6 +909,95 @@ pub struct RawHopData {
     pub offsets: Vec<usize>,
 }
 
+#[derive(Clone)]
+struct HopScanProfile {
+    hop: HopKey,
+    src_count: usize,
+    edge_count: usize,
+    unique_dst_count: usize,
+    build_time_s: f64,
+}
+
+fn print_hop_scan_profiles(profiles: &[HopScanProfile]) {
+    let mut rows = profiles.to_vec();
+    rows.sort_by(|a, b| {
+        b.build_time_s
+            .partial_cmp(&a.build_time_s)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_build_time_s: f64 = rows.iter().map(|p| p.build_time_s).sum();
+    let total_edges: usize = rows.iter().map(|p| p.edge_count).sum();
+    let max_build_time_s = rows.first().map(|p| p.build_time_s).unwrap_or(0.0);
+    eprintln!(
+        "GCard_scan_hop_summary: hops={} total_edges={} total_hop_build_time={:.6}s max_hop_build_time={:.6}s",
+        rows.len(),
+        total_edges,
+        total_build_time_s,
+        max_build_time_s,
+    );
+
+    for profile in rows {
+        eprintln!(
+            "GCard_scan_hop: vertex_label={} edge_label={} outgoing={} src_count={} edge_count={} unique_dst_count={} build_time={:.6}s",
+            profile.hop.vertex_label,
+            profile.hop.edge_label,
+            profile.hop.outgoing,
+            profile.src_count,
+            profile.edge_count,
+            profile.unique_dst_count,
+            profile.build_time_s,
+        );
+    }
+}
+
+#[derive(Clone)]
+struct RemapProfile {
+    current_hop: HopKey,
+    suffix_hop: HopKey,
+    entry_count: usize,
+    matched_count: usize,
+    build_time_s: f64,
+}
+
+fn print_remap_profiles(logical_pair_count: usize, profiles: &[RemapProfile]) {
+    let mut rows = profiles.to_vec();
+    rows.sort_by(|a, b| {
+        b.build_time_s
+            .partial_cmp(&a.build_time_s)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_entries: usize = rows.iter().map(|p| p.entry_count).sum();
+    let total_matched: usize = rows.iter().map(|p| p.matched_count).sum();
+    let total_build_time_s: f64 = rows.iter().map(|p| p.build_time_s).sum();
+    let max_build_time_s = rows.first().map(|p| p.build_time_s).unwrap_or(0.0);
+    eprintln!(
+        "GCard_scan_remap_key_summary: logical_pairs={} unique_remaps={} total_entries={} total_matched={} total_key_build_time={:.6}s max_key_build_time={:.6}s",
+        logical_pair_count,
+        rows.len(),
+        total_entries,
+        total_matched,
+        total_build_time_s,
+        max_build_time_s,
+    );
+
+    for profile in rows {
+        eprintln!(
+            "GCard_scan_remap_key: current=({},{},{}) suffix=({},{},{}) entries={} matched={} build_time={:.6}s",
+            profile.current_hop.vertex_label,
+            profile.current_hop.edge_label,
+            profile.current_hop.outgoing,
+            profile.suffix_hop.vertex_label,
+            profile.suffix_hop.edge_label,
+            profile.suffix_hop.outgoing,
+            profile.entry_count,
+            profile.matched_count,
+            profile.build_time_s,
+        );
+    }
+}
+
 fn build_compact_vec_neighbor_data_from_raw(raw: RawHopData) -> VecNeighborData {
     let mut dst_verts: Vec<VertexId> = Vec::new();
     let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
@@ -760,66 +1028,6 @@ fn build_compact_vec_neighbor_data_from_raw(raw: RawHopData) -> VecNeighborData 
     }
 }
 
-fn build_sorted_vec_neighbor_data_from_raw(
-    raw: RawHopData,
-    scan_pool: &rayon::ThreadPool,
-    parallel_remap: bool,
-) -> VecNeighborData {
-    // Build dst_verts (unique sorted destinations). This keeps the old behavior as
-    // an opt-out fallback, but costs one extra full-size VertexId clone.
-    let mut sorted_dsts = raw.neighbors_flat.clone();
-    sorted_dsts.sort_unstable();
-    sorted_dsts.dedup();
-    let dst_verts = sorted_dsts;
-    let dst_to_local: HashMap<VertexId, u32> = dst_verts
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v, i as u32))
-        .collect();
-
-    // Remap VertexId → local u32
-    let flat_neighbors: Vec<u32> = if parallel_remap {
-        scan_pool.install(|| {
-            raw.neighbors_flat
-                .par_iter()
-                .map(|vid| dst_to_local[vid])
-                .collect()
-        })
-    } else {
-        raw.neighbors_flat
-            .iter()
-            .map(|vid| dst_to_local[vid])
-            .collect()
-    };
-
-    let src_vid_to_idx: HashMap<VertexId, u32> = raw
-        .src_vids
-        .iter()
-        .enumerate()
-        .map(|(i, &v)| (v, i as u32))
-        .collect();
-
-    VecNeighborData {
-        src_verts: Arc::new(raw.src_vids),
-        src_vid_to_idx,
-        dst_verts,
-        flat_neighbors,
-        offsets: raw.offsets,
-    }
-}
-
-fn build_vec_neighbor_data_from_raw(
-    raw: RawHopData,
-    scan_pool: &rayon::ThreadPool,
-    parallel_remap: bool,
-) -> VecNeighborData {
-    if scan_compact_remap() {
-        build_compact_vec_neighbor_data_from_raw(raw)
-    } else {
-        build_sorted_vec_neighbor_data_from_raw(raw, scan_pool, parallel_remap)
-    }
-}
-
 fn collect_scan_deps(
     edges: &HashMap<String, EdgeEndpoints>,
     schema_path: &PathsByLen,
@@ -837,51 +1045,26 @@ fn collect_scan_deps(
         }
     }
 
+    all_deps.sort_by(cmp_pattern_deps);
+
     let mut unique_hops: HashSet<HopKey> = HashSet::new();
     for deps in &all_deps {
         unique_hops.insert(deps.left_hop.clone());
         unique_hops.insert(deps.right_hop.clone());
     }
+    let mut unique_hops: Vec<_> = unique_hops.into_iter().collect();
+    unique_hops.sort_by(cmp_hop_key);
 
-    (all_deps, unique_hops.into_iter().collect())
+    (all_deps, unique_hops)
 }
 
 fn finish_scanned_hops(
     all_deps: Vec<PatternDeps>,
     vec_caches: HashMap<HopKey, VecNeighborData>,
     edges: &HashMap<String, EdgeEndpoints>,
+    scan_pool: &rayon::ThreadPool,
 ) -> Result<ScannedHops, anyhow::Error> {
-    let mut remap_pairs: HashSet<(HopKey, HopKey)> = HashSet::new();
-    for deps in &all_deps {
-        if deps.pattern.es.len() >= 2 {
-            let suffix_left = deps.pattern.suffix();
-            let suffix_left_hop = hop_key_for_pattern_start(&suffix_left, edges);
-            remap_pairs.insert((deps.left_hop.clone(), suffix_left_hop));
-
-            let reversed = deps.pattern.reversed();
-            let suffix_right = reversed.suffix();
-            let suffix_right_hop = hop_key_for_pattern_start(&suffix_right, edges);
-            remap_pairs.insert((deps.right_hop.clone(), suffix_right_hop));
-        }
-    }
-
-    let mut remap_tables: HashMap<(HopKey, HopKey), Vec<u32>> = HashMap::new();
-    for (current_hop, suffix_hop) in &remap_pairs {
-        let current_data = vec_caches.get(current_hop).unwrap();
-        let suffix_data = vec_caches.get(suffix_hop).unwrap();
-        let remap: Vec<u32> = current_data
-            .dst_verts
-            .iter()
-            .map(|v| {
-                suffix_data
-                    .src_vid_to_idx
-                    .get(v)
-                    .copied()
-                    .unwrap_or(u32::MAX)
-            })
-            .collect();
-        remap_tables.insert((current_hop.clone(), suffix_hop.clone()), remap);
-    }
+    let remap_tables = build_remap_tables(&all_deps, &vec_caches, edges, scan_pool)?;
 
     Ok(ScannedHops {
         vec_caches,
@@ -898,28 +1081,6 @@ fn scan_hop_parallelism(_scan_pool: &rayon::ThreadPool, hop_count: usize) -> usi
         .filter(|&n| n > 0)
         .unwrap_or(default_parallelism);
     requested.min(hop_count.max(1))
-}
-
-fn scan_inner_remap_parallel() -> bool {
-    std::env::var("GCARD_SCAN_INNER_REMAP_PARALLEL")
-        .ok()
-        .and_then(|s| match s.as_str() {
-            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
-            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(true)
-}
-
-fn scan_compact_remap() -> bool {
-    std::env::var("GCARD_SCAN_COMPACT_REMAP")
-        .ok()
-        .and_then(|s| match s.as_str() {
-            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
-            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
-            _ => None,
-        })
-        .unwrap_or(true)
 }
 
 fn scan_flat_direct() -> bool {
@@ -948,42 +1109,63 @@ pub fn scan_all_hops_from_raw(
     let (all_deps, unique_hops) = collect_scan_deps(edges, schema_path, max_k);
 
     let hop_parallelism = scan_hop_parallelism(scan_pool, unique_hops.len());
-    let inner_remap_parallel = scan_inner_remap_parallel();
-    let compact_remap = scan_compact_remap();
     eprintln!(
-        "GCard_scan: unique_hops={}, hop_parallelism={}, inner_remap_parallel={}, compact_remap={}",
+        "GCard_scan: unique_hops={}, hop_parallelism={}",
         unique_hops.len(),
         hop_parallelism,
-        inner_remap_parallel,
-        compact_remap,
     );
 
     let mut vec_caches: HashMap<HopKey, VecNeighborData> =
         HashMap::with_capacity(unique_hops.len());
+    let mut profiles: Vec<HopScanProfile> = Vec::with_capacity(unique_hops.len());
     if hop_parallelism == 1 {
         for hop in &unique_hops {
+            let start = std::time::Instant::now();
             let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
-            let vec_data = build_vec_neighbor_data_from_raw(raw, scan_pool, true);
+            let src_count = raw.src_vids.len();
+            let edge_count = raw.neighbors_flat.len();
+            let vec_data = build_compact_vec_neighbor_data_from_raw(raw);
+            let profile = HopScanProfile {
+                hop: hop.clone(),
+                src_count,
+                edge_count,
+                unique_dst_count: vec_data.dst_verts.len(),
+                build_time_s: start.elapsed().as_secs_f64(),
+            };
+            profiles.push(profile);
             vec_caches.insert(hop.clone(), vec_data);
         }
     } else {
         for chunk in unique_hops.chunks(hop_parallelism) {
-            let rows: Vec<(HopKey, VecNeighborData)> = scan_pool.install(|| {
+            let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
                 chunk
                     .par_iter()
                     .map(|hop| {
+                        let start = std::time::Instant::now();
                         let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
-                        let vec_data =
-                            build_vec_neighbor_data_from_raw(raw, scan_pool, inner_remap_parallel);
-                        (hop.clone(), vec_data)
+                        let src_count = raw.src_vids.len();
+                        let edge_count = raw.neighbors_flat.len();
+                        let vec_data = build_compact_vec_neighbor_data_from_raw(raw);
+                        let profile = HopScanProfile {
+                            hop: hop.clone(),
+                            src_count,
+                            edge_count,
+                            unique_dst_count: vec_data.dst_verts.len(),
+                            build_time_s: start.elapsed().as_secs_f64(),
+                        };
+                        (hop.clone(), vec_data, profile)
                     })
                     .collect()
             });
-            vec_caches.extend(rows);
+            for (hop, vec_data, profile) in rows {
+                profiles.push(profile);
+                vec_caches.insert(hop, vec_data);
+            }
         }
     }
+    print_hop_scan_profiles(&profiles);
 
-    finish_scanned_hops(all_deps, vec_caches, edges)
+    finish_scanned_hops(all_deps, vec_caches, edges, scan_pool)
 }
 
 // ----- FlatGraph-based hop building -----
@@ -1111,7 +1293,7 @@ pub fn scan_all_hops_from_flat_graph(
     max_k: usize,
     scan_pool: &rayon::ThreadPool,
 ) -> Result<ScannedHops, anyhow::Error> {
-    if !scan_compact_remap() || !scan_flat_direct() {
+    if !scan_flat_direct() {
         return scan_all_hops_from_raw(
             &|vertex_label, edge_label, outgoing| {
                 let verts = flat_graph.all_vertex_ids_by_label(vertex_label);
@@ -1127,18 +1309,18 @@ pub fn scan_all_hops_from_flat_graph(
 
     let (all_deps, unique_hops) = collect_scan_deps(edges, schema_path, max_k);
     let hop_parallelism = scan_hop_parallelism(scan_pool, unique_hops.len());
-    let inner_remap_parallel = scan_inner_remap_parallel();
     eprintln!(
-        "GCard_scan: unique_hops={}, hop_parallelism={}, inner_remap_parallel={}, compact_remap=true, flat_direct=true",
+        "GCard_scan: unique_hops={}, hop_parallelism={}, flat_direct=true",
         unique_hops.len(),
         hop_parallelism,
-        inner_remap_parallel,
     );
 
     let mut vec_caches: HashMap<HopKey, VecNeighborData> =
         HashMap::with_capacity(unique_hops.len());
+    let mut profiles: Vec<HopScanProfile> = Vec::with_capacity(unique_hops.len());
     if hop_parallelism == 1 {
         for hop in &unique_hops {
+            let start = std::time::Instant::now();
             let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
             let key = (
                 hop.vertex_label.clone(),
@@ -1147,14 +1329,23 @@ pub fn scan_all_hops_from_flat_graph(
             );
             let vec_data =
                 build_vec_neighbor_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key));
+            let profile = HopScanProfile {
+                hop: hop.clone(),
+                src_count: vec_data.src_verts.len(),
+                edge_count: vec_data.flat_neighbors.len(),
+                unique_dst_count: vec_data.dst_verts.len(),
+                build_time_s: start.elapsed().as_secs_f64(),
+            };
+            profiles.push(profile);
             vec_caches.insert(hop.clone(), vec_data);
         }
     } else {
         for chunk in unique_hops.chunks(hop_parallelism) {
-            let rows: Vec<(HopKey, VecNeighborData)> = scan_pool.install(|| {
+            let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
                 chunk
                     .par_iter()
                     .map(|hop| {
+                        let start = std::time::Instant::now();
                         let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
                         let key = (
                             hop.vertex_label.clone(),
@@ -1165,15 +1356,26 @@ pub fn scan_all_hops_from_flat_graph(
                             verts,
                             flat_graph.hop_csrs().get(&key),
                         );
-                        (hop.clone(), vec_data)
+                        let profile = HopScanProfile {
+                            hop: hop.clone(),
+                            src_count: vec_data.src_verts.len(),
+                            edge_count: vec_data.flat_neighbors.len(),
+                            unique_dst_count: vec_data.dst_verts.len(),
+                            build_time_s: start.elapsed().as_secs_f64(),
+                        };
+                        (hop.clone(), vec_data, profile)
                     })
                     .collect()
             });
-            vec_caches.extend(rows);
+            for (hop, vec_data, profile) in rows {
+                profiles.push(profile);
+                vec_caches.insert(hop, vec_data);
+            }
         }
     }
+    print_hop_scan_profiles(&profiles);
 
-    finish_scanned_hops(all_deps, vec_caches, edges)
+    finish_scanned_hops(all_deps, vec_caches, edges, scan_pool)
 }
 
 #[cfg(test)]
