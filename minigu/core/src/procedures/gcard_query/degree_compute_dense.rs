@@ -472,6 +472,25 @@ fn remap_parallel_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn remap_inner_parallel_enabled() -> bool {
+    std::env::var("GCARD_REMAP_INNER_PARALLEL")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn remap_inner_parallel_threshold() -> usize {
+    std::env::var("GCARD_REMAP_INNER_PARALLEL_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1_000_000)
+}
+
 fn fingerprint_mix(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(0x100000001b3);
@@ -525,22 +544,59 @@ fn build_one_remap(
         .get(suffix_hop)
         .ok_or_else(|| anyhow::anyhow!("suffix hop not found: {:?}", suffix_hop))?;
     let suffix_src_vid_to_idx = &suffix_data.src_vid_to_idx;
-    let mut matched_count = 0usize;
-    let remap: Vec<u32> = current_data
-        .dst_verts
-        .iter()
-        .map(|v| match suffix_src_vid_to_idx.get(v).copied() {
-            Some(idx) => {
-                matched_count += 1;
-                idx
-            }
-            None => u32::MAX,
-        })
-        .collect();
+    let entry_count = current_data.dst_verts.len();
+    let use_inner_parallel = remap_inner_parallel_enabled()
+        && entry_count >= remap_inner_parallel_threshold()
+        && rayon::current_num_threads() > 1;
+
+    let (remap, matched_count) = if use_inner_parallel {
+        let chunk_size =
+            (entry_count / rayon::current_num_threads().max(1) / 4).clamp(16 * 1024, 256 * 1024);
+        let chunks: Vec<(Vec<u32>, usize)> = current_data
+            .dst_verts
+            .par_chunks(chunk_size)
+            .map(|chunk| {
+                let mut out = Vec::with_capacity(chunk.len());
+                let mut matched = 0usize;
+                for v in chunk {
+                    match suffix_src_vid_to_idx.get(v).copied() {
+                        Some(idx) => {
+                            matched += 1;
+                            out.push(idx);
+                        }
+                        None => out.push(u32::MAX),
+                    }
+                }
+                (out, matched)
+            })
+            .collect();
+
+        let mut remap = Vec::with_capacity(entry_count);
+        let mut matched_count = 0usize;
+        for (chunk, matched) in chunks {
+            matched_count += matched;
+            remap.extend(chunk);
+        }
+        (remap, matched_count)
+    } else {
+        let mut matched_count = 0usize;
+        let remap: Vec<u32> = current_data
+            .dst_verts
+            .iter()
+            .map(|v| match suffix_src_vid_to_idx.get(v).copied() {
+                Some(idx) => {
+                    matched_count += 1;
+                    idx
+                }
+                None => u32::MAX,
+            })
+            .collect();
+        (remap, matched_count)
+    };
     let profile = RemapProfile {
         current_hop: current_hop.clone(),
         suffix_hop: suffix_hop.clone(),
-        entry_count: remap.len(),
+        entry_count,
         matched_count,
         build_time_s: key_start.elapsed().as_secs_f64(),
     };
@@ -606,13 +662,14 @@ fn build_remap_tables(
     let remap_entries: usize = remap_tables.values().map(Vec::len).sum();
     let remap_fingerprint = remap_tables_fingerprint(&remap_tables);
     eprintln!(
-        "GCard_scan_remap_summary: logical_pairs={} unique_remaps={} remap_entries={} remap_fingerprint={:016x} remap_time={:.6}s parallel_enabled={}",
+        "GCard_scan_remap_summary: logical_pairs={} unique_remaps={} remap_entries={} remap_fingerprint={:016x} remap_time={:.6}s parallel_enabled={} inner_parallel_enabled={}",
         remap_pairs.len(),
         remap_tables.len(),
         remap_entries,
         remap_fingerprint,
         remap_start.elapsed().as_secs_f64(),
         remap_parallel,
+        remap_inner_parallel_enabled(),
     );
 
     Ok(remap_tables)
@@ -998,12 +1055,31 @@ fn print_remap_profiles(logical_pair_count: usize, profiles: &[RemapProfile]) {
     }
 }
 
-fn build_compact_vec_neighbor_data_from_raw(raw: RawHopData) -> VecNeighborData {
+fn hop_inner_parallel_enabled() -> bool {
+    std::env::var("GCARD_SCAN_HOP_INNER_PARALLEL")
+        .ok()
+        .and_then(|s| match s.as_str() {
+            "1" | "true" | "TRUE" | "yes" | "YES" => Some(true),
+            "0" | "false" | "FALSE" | "no" | "NO" => Some(false),
+            _ => None,
+        })
+        .unwrap_or(true)
+}
+
+fn hop_inner_parallel_threshold() -> usize {
+    std::env::var("GCARD_SCAN_HOP_INNER_PARALLEL_THRESHOLD")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1_000_000)
+}
+
+fn compact_neighbor_vids_sequential(neighbor_vids: Vec<VertexId>) -> (Vec<VertexId>, Vec<u32>) {
     let mut dst_verts: Vec<VertexId> = Vec::new();
     let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
-    let mut flat_neighbors: Vec<u32> = Vec::with_capacity(raw.neighbors_flat.len());
+    let mut flat_neighbors: Vec<u32> = Vec::with_capacity(neighbor_vids.len());
 
-    for vid in raw.neighbors_flat {
+    for vid in neighbor_vids {
         let next_local_id = dst_verts.len() as u32;
         let local_id = *dst_to_local.entry(vid).or_insert_with(|| {
             dst_verts.push(vid);
@@ -1012,6 +1088,56 @@ fn build_compact_vec_neighbor_data_from_raw(raw: RawHopData) -> VecNeighborData 
         flat_neighbors.push(local_id);
     }
 
+    (dst_verts, flat_neighbors)
+}
+
+fn compact_neighbor_vids_parallel(neighbor_vids: Vec<VertexId>) -> (Vec<VertexId>, Vec<u32>) {
+    let mut dst_verts = neighbor_vids.clone();
+    dst_verts.par_sort_unstable();
+    dst_verts.dedup();
+
+    let dst_to_local: HashMap<VertexId, u32> = dst_verts
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect();
+
+    let flat_neighbors: Vec<u32> = neighbor_vids
+        .par_iter()
+        .map(|vid| dst_to_local[vid])
+        .collect();
+
+    (dst_verts, flat_neighbors)
+}
+
+fn compact_neighbor_vids(
+    neighbor_vids: Vec<VertexId>,
+    allow_parallel: bool,
+) -> (Vec<VertexId>, Vec<u32>) {
+    if allow_parallel
+        && hop_inner_parallel_enabled()
+        && neighbor_vids.len() >= hop_inner_parallel_threshold()
+        && rayon::current_num_threads() > 1
+    {
+        compact_neighbor_vids_parallel(neighbor_vids)
+    } else {
+        compact_neighbor_vids_sequential(neighbor_vids)
+    }
+}
+
+fn build_src_vid_to_idx(verts: &[VertexId]) -> HashMap<VertexId, u32> {
+    verts
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect()
+}
+
+fn build_compact_vec_neighbor_data_from_raw(
+    raw: RawHopData,
+    allow_parallel: bool,
+) -> VecNeighborData {
+    let (dst_verts, flat_neighbors) = compact_neighbor_vids(raw.neighbors_flat, allow_parallel);
     let src_vid_to_idx: HashMap<VertexId, u32> = raw
         .src_vids
         .iter()
@@ -1124,7 +1250,7 @@ pub fn scan_all_hops_from_raw(
             let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
             let src_count = raw.src_vids.len();
             let edge_count = raw.neighbors_flat.len();
-            let vec_data = build_compact_vec_neighbor_data_from_raw(raw);
+            let vec_data = build_compact_vec_neighbor_data_from_raw(raw, false);
             let profile = HopScanProfile {
                 hop: hop.clone(),
                 src_count,
@@ -1136,31 +1262,29 @@ pub fn scan_all_hops_from_raw(
             vec_caches.insert(hop.clone(), vec_data);
         }
     } else {
-        for chunk in unique_hops.chunks(hop_parallelism) {
-            let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
-                chunk
-                    .par_iter()
-                    .map(|hop| {
-                        let start = std::time::Instant::now();
-                        let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
-                        let src_count = raw.src_vids.len();
-                        let edge_count = raw.neighbors_flat.len();
-                        let vec_data = build_compact_vec_neighbor_data_from_raw(raw);
-                        let profile = HopScanProfile {
-                            hop: hop.clone(),
-                            src_count,
-                            edge_count,
-                            unique_dst_count: vec_data.dst_verts.len(),
-                            build_time_s: start.elapsed().as_secs_f64(),
-                        };
-                        (hop.clone(), vec_data, profile)
-                    })
-                    .collect()
-            });
-            for (hop, vec_data, profile) in rows {
-                profiles.push(profile);
-                vec_caches.insert(hop, vec_data);
-            }
+        let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
+            unique_hops
+                .par_iter()
+                .map(|hop| {
+                    let start = std::time::Instant::now();
+                    let raw = get_hop(&hop.vertex_label, &hop.edge_label, hop.outgoing);
+                    let src_count = raw.src_vids.len();
+                    let edge_count = raw.neighbors_flat.len();
+                    let vec_data = build_compact_vec_neighbor_data_from_raw(raw, true);
+                    let profile = HopScanProfile {
+                        hop: hop.clone(),
+                        src_count,
+                        edge_count,
+                        unique_dst_count: vec_data.dst_verts.len(),
+                        build_time_s: start.elapsed().as_secs_f64(),
+                    };
+                    (hop.clone(), vec_data, profile)
+                })
+                .collect()
+        });
+        for (hop, vec_data, profile) in rows {
+            profiles.push(profile);
+            vec_caches.insert(hop, vec_data);
         }
     }
     print_hop_scan_profiles(&profiles);
@@ -1215,6 +1339,7 @@ fn raw_hop_data_from_flat_csr(
 fn build_vec_neighbor_data_from_flat_csr(
     verts: &[VertexId],
     csr: Option<&crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid>,
+    allow_parallel: bool,
 ) -> VecNeighborData {
     match csr {
         Some(csr) => {
@@ -1242,23 +1367,30 @@ fn build_vec_neighbor_data_from_flat_csr(
             }
             offsets.push(neighbor_count);
 
-            let mut dst_verts: Vec<VertexId> = Vec::new();
-            let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
-            let mut flat_neighbors: Vec<u32> = Vec::with_capacity(neighbor_count);
-            for &(vid, _) in neighbor_entries {
-                let next_local_id = dst_verts.len() as u32;
-                let local_id = *dst_to_local.entry(vid).or_insert_with(|| {
-                    dst_verts.push(vid);
-                    next_local_id
-                });
-                flat_neighbors.push(local_id);
-            }
+            let (dst_verts, flat_neighbors) = if allow_parallel
+                && hop_inner_parallel_enabled()
+                && neighbor_count >= hop_inner_parallel_threshold()
+                && rayon::current_num_threads() > 1
+            {
+                let neighbor_vids: Vec<VertexId> =
+                    neighbor_entries.par_iter().map(|&(vid, _)| vid).collect();
+                compact_neighbor_vids_parallel(neighbor_vids)
+            } else {
+                let mut dst_verts: Vec<VertexId> = Vec::new();
+                let mut dst_to_local: HashMap<VertexId, u32> = HashMap::new();
+                let mut flat_neighbors: Vec<u32> = Vec::with_capacity(neighbor_count);
+                for &(vid, _) in neighbor_entries {
+                    let next_local_id = dst_verts.len() as u32;
+                    let local_id = *dst_to_local.entry(vid).or_insert_with(|| {
+                        dst_verts.push(vid);
+                        next_local_id
+                    });
+                    flat_neighbors.push(local_id);
+                }
+                (dst_verts, flat_neighbors)
+            };
 
-            let src_vid_to_idx: HashMap<VertexId, u32> = verts
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (v, i as u32))
-                .collect();
+            let src_vid_to_idx = build_src_vid_to_idx(verts);
 
             VecNeighborData {
                 src_verts: Arc::new(verts.to_vec()),
@@ -1269,11 +1401,7 @@ fn build_vec_neighbor_data_from_flat_csr(
             }
         }
         None => VecNeighborData {
-            src_vid_to_idx: verts
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (v, i as u32))
-                .collect(),
+            src_vid_to_idx: build_src_vid_to_idx(verts),
             src_verts: Arc::new(verts.to_vec()),
             dst_verts: Vec::new(),
             flat_neighbors: Vec::new(),
@@ -1327,8 +1455,11 @@ pub fn scan_all_hops_from_flat_graph(
                 hop.edge_label.clone(),
                 hop.outgoing,
             );
-            let vec_data =
-                build_vec_neighbor_data_from_flat_csr(verts, flat_graph.hop_csrs().get(&key));
+            let vec_data = build_vec_neighbor_data_from_flat_csr(
+                verts,
+                flat_graph.hop_csrs().get(&key),
+                false,
+            );
             let profile = HopScanProfile {
                 hop: hop.clone(),
                 src_count: vec_data.src_verts.len(),
@@ -1340,37 +1471,36 @@ pub fn scan_all_hops_from_flat_graph(
             vec_caches.insert(hop.clone(), vec_data);
         }
     } else {
-        for chunk in unique_hops.chunks(hop_parallelism) {
-            let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
-                chunk
-                    .par_iter()
-                    .map(|hop| {
-                        let start = std::time::Instant::now();
-                        let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
-                        let key = (
-                            hop.vertex_label.clone(),
-                            hop.edge_label.clone(),
-                            hop.outgoing,
-                        );
-                        let vec_data = build_vec_neighbor_data_from_flat_csr(
-                            verts,
-                            flat_graph.hop_csrs().get(&key),
-                        );
-                        let profile = HopScanProfile {
-                            hop: hop.clone(),
-                            src_count: vec_data.src_verts.len(),
-                            edge_count: vec_data.flat_neighbors.len(),
-                            unique_dst_count: vec_data.dst_verts.len(),
-                            build_time_s: start.elapsed().as_secs_f64(),
-                        };
-                        (hop.clone(), vec_data, profile)
-                    })
-                    .collect()
-            });
-            for (hop, vec_data, profile) in rows {
-                profiles.push(profile);
-                vec_caches.insert(hop, vec_data);
-            }
+        let rows: Vec<(HopKey, VecNeighborData, HopScanProfile)> = scan_pool.install(|| {
+            unique_hops
+                .par_iter()
+                .map(|hop| {
+                    let start = std::time::Instant::now();
+                    let verts = flat_graph.all_vertex_ids_by_label(&hop.vertex_label);
+                    let key = (
+                        hop.vertex_label.clone(),
+                        hop.edge_label.clone(),
+                        hop.outgoing,
+                    );
+                    let vec_data = build_vec_neighbor_data_from_flat_csr(
+                        verts,
+                        flat_graph.hop_csrs().get(&key),
+                        true,
+                    );
+                    let profile = HopScanProfile {
+                        hop: hop.clone(),
+                        src_count: vec_data.src_verts.len(),
+                        edge_count: vec_data.flat_neighbors.len(),
+                        unique_dst_count: vec_data.dst_verts.len(),
+                        build_time_s: start.elapsed().as_secs_f64(),
+                    };
+                    (hop.clone(), vec_data, profile)
+                })
+                .collect()
+        });
+        for (hop, vec_data, profile) in rows {
+            profiles.push(profile);
+            vec_caches.insert(hop, vec_data);
         }
     }
     print_hop_scan_profiles(&profiles);
@@ -1407,6 +1537,25 @@ mod tests {
             flat_neighbors: Vec::new(),
             offsets: vec![0; 3],
         }
+    }
+
+    #[test]
+    fn parallel_neighbor_compaction_preserves_edge_targets() {
+        let neighbors = vec![42, 7, 42, 9, 7, 11, 9, 42];
+
+        let (seq_dst, seq_flat) = compact_neighbor_vids_sequential(neighbors.clone());
+        let (par_dst, par_flat) = compact_neighbor_vids_parallel(neighbors);
+
+        let seq_targets: Vec<VertexId> = seq_flat
+            .iter()
+            .map(|&local| seq_dst[local as usize])
+            .collect();
+        let par_targets: Vec<VertexId> = par_flat
+            .iter()
+            .map(|&local| par_dst[local as usize])
+            .collect();
+
+        assert_eq!(seq_targets, par_targets);
     }
 
     fn one_hop_arm(center: &str, edge: &str, leaf: &str) -> PathPattern {
