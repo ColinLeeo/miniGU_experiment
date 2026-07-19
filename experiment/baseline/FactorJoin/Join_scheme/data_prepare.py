@@ -10,6 +10,10 @@ import re
 from Schemas.stats.schema import gen_stats_light_schema
 from Schemas.imdb.schema import gen_imdb_schema, gen_job_light_imdb_schema
 from Schemas.ldbc.schema import gen_ldbc_sf1_schema
+from Schemas.aids.schema import gen_aids_merged_schema
+from Schemas.dblp.schema import gen_dblp_schema
+from Schemas.youtube.schema import gen_youtube_schema
+from Schemas.imdb.job_light_unique_schema import gen_job_light_unique_schema
 from Join_scheme.binning import identify_key_values, sub_optimal_bucketize, greedy_bucketize, \
                                 fixed_start_key_bucketize, get_start_key, naive_bucketize, \
                                 Table_bucket, update_bins, apply_binning_to_data_value_count
@@ -182,6 +186,7 @@ def get_data_by_date(data_path, time_date="2014-01-01 00:00:00"):
 
 
 def convert_time_to_int(data_folder):
+    start_date_int = int(time.mktime(time.strptime("2010-07-19 00:00:00", "%Y-%m-%d %H:%M:%S")))
     for file in os.listdir(data_folder):
         if file.endswith(".csv"):
             csv_file_location = os.path.join(data_folder, file)
@@ -191,8 +196,22 @@ def convert_time_to_int(data_folder):
                     if df_rows[attribute].values.dtype == 'object':
                         new_value = []
                         for value in df_rows[attribute].values:
-                            new_value.append(timestamp_transorform(value))
+                            if pd.isna(value):
+                                new_value.append(value)
+                                continue
+                            text = str(value).strip().strip("'")
+                            try:
+                                numeric_value = float(text)
+                                if numeric_value > 1_000_000_000:
+                                    numeric_value -= start_date_int
+                                new_value.append(numeric_value)
+                            except ValueError:
+                                new_value.append(timestamp_transorform(text))
                         df_rows[attribute] = new_value
+                    elif pd.api.types.is_numeric_dtype(df_rows[attribute]):
+                        numeric_values = pd.to_numeric(df_rows[attribute], errors="coerce")
+                        if numeric_values.dropna().max() > 1_000_000_000:
+                            df_rows[attribute] = numeric_values - start_date_int
             df_rows.to_csv(csv_file_location, index=False)
 
 
@@ -381,6 +400,14 @@ def process_stats_data(dataset, data_path, model_folder, n_bins=500, bucket_meth
         schema = gen_job_light_imdb_schema(data_path)
     elif dataset == "ldbc":
         schema = gen_ldbc_sf1_schema(data_path)
+    elif dataset == "job-light-unique":
+        schema = gen_job_light_unique_schema(data_path)
+    elif dataset == "aids_merged":
+        schema = gen_aids_merged_schema(data_path)
+    elif dataset == "dblp":
+        schema = gen_dblp_schema(data_path)
+    elif dataset == "youtube":
+        schema = gen_youtube_schema(data_path)
     else:
         assert False, f"dataset: {dataset} not supported for this function"
     all_keys, equivalent_keys = identify_key_values(schema)
@@ -400,7 +427,7 @@ def process_stats_data(dataset, data_path, model_folder, n_bins=500, bucket_meth
         if table_name in actual_data:
             df_rows = copy.deepcopy(actual_data[table_name])
         else:
-            if dataset in ("stats", "ldbc"):
+            if dataset in ("stats", "ldbc", "job-light-unique", "aids_merged", "dblp", "youtube"):
                 df_rows = read_table_csv(table_obj, db_name="stats")
             else:
                 df_rows = pd.read_csv(table_obj.csv_file_location)

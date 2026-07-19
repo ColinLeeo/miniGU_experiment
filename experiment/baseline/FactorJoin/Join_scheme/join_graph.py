@@ -126,10 +126,10 @@ def parse_query_simple(query):
 
 def get_join_hyper_graph(join_keys, equivalent_keys):
     equivalent_group = dict()
-    for table in join_keys:
-        for key in join_keys[table]:
+    for table in sorted(join_keys):
+        for key in sorted(join_keys[table]):
             seen = False
-            for indicator in equivalent_keys:
+            for indicator in sorted(equivalent_keys):
                 if key in equivalent_keys[indicator]:
                     if seen:
                         assert False, f"{key} appears in multiple equivalent groups."
@@ -148,10 +148,10 @@ def get_equivalent_key_group(join_keys, equivalent_keys):
     table_equivalent_group = dict()
     table_key_equivalent_group = dict()
     table_key_group_map = dict()
-    for table in join_keys:
-        for key in join_keys[table]:
+    for table in sorted(join_keys):
+        for key in sorted(join_keys[table]):
             seen = False
-            for indicator in equivalent_keys:
+            for indicator in sorted(equivalent_keys):
                 if key in equivalent_keys[indicator]:
                     if seen:
                         assert False, f"{key} appears in multiple equivalent groups."

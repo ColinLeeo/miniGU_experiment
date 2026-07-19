@@ -174,7 +174,9 @@ def equal_freq_binning(name, data, n_bins, data_len, return_bucket=True, return_
             bin_modes.append(counts[i])
             bin_vars.append(0)
             bin_means.append(counts[i])
-        return Bucket(name, bins, bin_modes, bin_vars, bin_means)
+        if return_bucket:
+            return Bucket(name, bins, bin_modes, bin_vars, bin_means)
+        return bins, bin_means
 
     unique_counts, count_counts = np.unique(counts, return_counts=True)
     idx = np.argsort(unique_counts)
@@ -681,7 +683,6 @@ def update_bins(bucket, data, equivalent_keys):
         binned_data[K] = temp_data
         new_bin_mode_all[K] = new_bin_mode
     return binned_data, new_bin_mode_all
-
 
 
 

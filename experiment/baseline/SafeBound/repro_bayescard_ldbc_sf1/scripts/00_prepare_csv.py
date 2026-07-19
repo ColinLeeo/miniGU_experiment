@@ -5,6 +5,7 @@ import os
 
 
 REPRO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+EXPERIMENT_DIR = os.path.abspath(os.path.join(REPRO_DIR, "..", "..", ".."))
 
 
 def normalize_bool(value):
@@ -51,7 +52,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--source-dir",
-        default="/home/zxz/miniGU/experiment/datasets/ldbc/sf1",
+        default=os.path.join(EXPERIMENT_DIR, "datasets", "ldbc", "sf1"),
     )
     parser.add_argument(
         "--output-dir",

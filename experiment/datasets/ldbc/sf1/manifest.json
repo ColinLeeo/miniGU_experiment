@@ -1,0 +1,889 @@
+{
+  "edges": [
+    {
+      "dst_label": "person",
+      "file": {
+        "format": "csv",
+        "path": "comment_hascreator_person.csv"
+      },
+      "label": "comment_hascreator_person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "comment"
+    },
+    {
+      "dst_label": "country",
+      "file": {
+        "format": "csv",
+        "path": "post_islocatedin_country.csv"
+      },
+      "label": "post_islocatedin_country",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "post"
+    },
+    {
+      "dst_label": "city",
+      "file": {
+        "format": "csv",
+        "path": "person_islocatedin_city.csv"
+      },
+      "label": "person_islocatedin_city",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "country",
+      "file": {
+        "format": "csv",
+        "path": "comment_islocatedin_country.csv"
+      },
+      "label": "comment_islocatedin_country",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "comment"
+    },
+    {
+      "dst_label": "country",
+      "file": {
+        "format": "csv",
+        "path": "company_islocatedin_country.csv"
+      },
+      "label": "company_islocatedin_country",
+      "properties": [],
+      "src_label": "company"
+    },
+    {
+      "dst_label": "post",
+      "file": {
+        "format": "csv",
+        "path": "person_likes_post.csv"
+      },
+      "label": "person_likes_post",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "person",
+      "file": {
+        "format": "csv",
+        "path": "forum_hasmoderator_person.csv"
+      },
+      "label": "forum_hasmoderator_person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "forum"
+    },
+    {
+      "dst_label": "tag",
+      "file": {
+        "format": "csv",
+        "path": "post_hastag_tag.csv"
+      },
+      "label": "post_hastag_tag",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        }
+      ],
+      "src_label": "post"
+    },
+    {
+      "dst_label": "person",
+      "file": {
+        "format": "csv",
+        "path": "person_knows_person.csv"
+      },
+      "label": "person_knows_person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "person",
+      "file": {
+        "format": "csv",
+        "path": "forum_hasmember_person.csv"
+      },
+      "label": "forum_hasmember_person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "forum"
+    },
+    {
+      "dst_label": "country",
+      "file": {
+        "format": "csv",
+        "path": "city_ispartof_country.csv"
+      },
+      "label": "city_ispartof_country",
+      "properties": [],
+      "src_label": "city"
+    },
+    {
+      "dst_label": "tag",
+      "file": {
+        "format": "csv",
+        "path": "forum_hastag_tag.csv"
+      },
+      "label": "forum_hastag_tag",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        }
+      ],
+      "src_label": "forum"
+    },
+    {
+      "dst_label": "person",
+      "file": {
+        "format": "csv",
+        "path": "post_hascreator_person.csv"
+      },
+      "label": "post_hascreator_person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "post"
+    },
+    {
+      "dst_label": "tagclass",
+      "file": {
+        "format": "csv",
+        "path": "tag_hastype_tagclass.csv"
+      },
+      "label": "tag_hastype_tagclass",
+      "properties": [],
+      "src_label": "tag"
+    },
+    {
+      "dst_label": "university",
+      "file": {
+        "format": "csv",
+        "path": "person_studyat_university.csv"
+      },
+      "label": "person_studyat_university",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "classyear",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "company",
+      "file": {
+        "format": "csv",
+        "path": "person_workat_company.csv"
+      },
+      "label": "person_workat_company",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "workfrom",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "tag",
+      "file": {
+        "format": "csv",
+        "path": "comment_hastag_tag.csv"
+      },
+      "label": "comment_hastag_tag",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        }
+      ],
+      "src_label": "comment"
+    },
+    {
+      "dst_label": "tag",
+      "file": {
+        "format": "csv",
+        "path": "person_hasinterest_tag.csv"
+      },
+      "label": "person_hasinterest_tag",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "comment",
+      "file": {
+        "format": "csv",
+        "path": "person_likes_comment.csv"
+      },
+      "label": "person_likes_comment",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "person"
+    },
+    {
+      "dst_label": "city",
+      "file": {
+        "format": "csv",
+        "path": "university_islocatedin_city.csv"
+      },
+      "label": "university_islocatedin_city",
+      "properties": [],
+      "src_label": "university"
+    },
+    {
+      "dst_label": "post",
+      "file": {
+        "format": "csv",
+        "path": "forum_containerof_post.csv"
+      },
+      "label": "forum_containerof_post",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "forum"
+    },
+    {
+      "dst_label": "continent",
+      "file": {
+        "format": "csv",
+        "path": "country_ispartof_continent.csv"
+      },
+      "label": "country_ispartof_continent",
+      "properties": [],
+      "src_label": "country"
+    },
+    {
+      "dst_label": "comment",
+      "file": {
+        "format": "csv",
+        "path": "comment_replyof_comment.csv"
+      },
+      "label": "comment_replyof_comment",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "comment"
+    },
+    {
+      "dst_label": "tagclass",
+      "file": {
+        "format": "csv",
+        "path": "tagclass_issubclassof_tagclass.csv"
+      },
+      "label": "tagclass_issubclassof_tagclass",
+      "properties": [],
+      "src_label": "tagclass"
+    },
+    {
+      "dst_label": "post",
+      "file": {
+        "format": "csv",
+        "path": "comment_replyof_post.csv"
+      },
+      "label": "comment_replyof_post",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        }
+      ],
+      "src_label": "comment"
+    }
+  ],
+  "vertices": [
+    {
+      "file": {
+        "format": "csv",
+        "path": "tag.csv"
+      },
+      "label": "tag",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "tagclass.csv"
+      },
+      "label": "tagclass",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "post.csv"
+      },
+      "label": "post",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "imagefile",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "locationip",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "browserused",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "language",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "content",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "length",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "university.csv"
+      },
+      "label": "university",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "type",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "city.csv"
+      },
+      "label": "city",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "type",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "forum.csv"
+      },
+      "label": "forum",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "title",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "continent.csv"
+      },
+      "label": "continent",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "type",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "company.csv"
+      },
+      "label": "company",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "type",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "person.csv"
+      },
+      "label": "person",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "firstname",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "lastname",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "gender",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "birthday",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "locationip",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "browserused",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "language",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "email",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "comment.csv"
+      },
+      "label": "comment",
+      "properties": [
+        {
+          "logical_type": "Int64",
+          "name": "creationdate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "deletiondate",
+          "nullable": true
+        },
+        {
+          "logical_type": "Boolean",
+          "name": "explicitlydeleted",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "locationip",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "browserused",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "content",
+          "nullable": true
+        },
+        {
+          "logical_type": "Int64",
+          "name": "length",
+          "nullable": true
+        }
+      ]
+    },
+    {
+      "file": {
+        "format": "csv",
+        "path": "country.csv"
+      },
+      "label": "country",
+      "properties": [
+        {
+          "logical_type": "String",
+          "name": "name",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "url",
+          "nullable": true
+        },
+        {
+          "logical_type": "String",
+          "name": "type",
+          "nullable": true
+        }
+      ]
+    }
+  ]
+}
