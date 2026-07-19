@@ -45,10 +45,10 @@ def _is_edge_table(name):
 
 
 def build_model(data_dir, model_dir, learning_algo="chow-liu", max_parents=1, sample_size=200000):
-    """Train BayesCard BN ensemble on LDBC tables.
+    """Train BayesCard BN ensemble on graph-wrapper CSV tables.
 
-    Only vertex tables get full BN training (for predicate selectivity).
-    Edge tables only store row counts (used for join cardinality).
+    Every non-empty CSV table, including edge tables, must get a full BN.
+    Edge row counts are stored only as audit metadata, not as an estimation fallback.
     """
     from Models.Bayescard_BN import Bayescard_BN
 
@@ -66,32 +66,34 @@ def build_model(data_dir, model_dir, learning_algo="chow-liu", max_parents=1, sa
 
         df = pd.read_csv(csv_path, sep=",")
         if len(df) == 0:
-            print(f"  SKIP {t_name} (empty)")
-            continue
+            raise ValueError(f"Cannot train BayesCard BN for empty table {t_name}")
 
-        # Edge tables: only need row count, skip expensive BN training
-        if _is_edge_table(t_name):
+        # Edge tables: only need row count, skip expensive BN training.
+        # LDBC names contain edge verbs; graph-converted IMDB tables expose src/dst columns.
+        lower_cols = {str(c).lower() for c in df.columns}
+        is_edge_table = _is_edge_table(t_name) or {"src", "dst"}.issubset(lower_cols)
+        if is_edge_table:
             edge_row_counts[t_name] = len(df)
-            print(f"  Edge table {t_name}: {len(df)} rows (row count only)")
-            continue
 
-        print(f"  Training BN for {t_name}...")
-        try:
-            bn = Bayescard_BN(t_name)
-            bn.build_from_data(df, algorithm=learning_algo, max_parents=max_parents,
-                               ignore_cols=["id"], sample_size=min(sample_size, len(df)))
-            bn.init_inference_method()
-            bn.infer_algo = "exact-jit"
-            all_bns[t_name] = bn
-            print(f"    OK ({len(df)} rows, {len(df.columns)} cols)")
-        except Exception as e:
-            print(f"    ERROR: {e}")
+        table_kind = "edge" if is_edge_table else "vertex"
+        print(f"  Training BN for {table_kind} table {t_name}...")
+        bn = Bayescard_BN(t_name)
+        bn.build_from_data(df, algorithm=learning_algo, max_parents=max_parents,
+                           ignore_cols=[], sample_size=min(sample_size, len(df)))
+        bn.init_inference_method()
+        bn.infer_algo = "exact"
+        all_bns[t_name] = bn
+        print(f"    OK ({len(df)} rows, {len(df.columns)} cols)")
 
     os.makedirs(model_dir, exist_ok=True)
     model_path = os.path.join(model_dir, "bayescard.pkl")
     with open(model_path, "wb") as f:
         pickle.dump({"bns": all_bns, "edge_row_counts": edge_row_counts}, f)
-    print(f"Saved: {model_path} ({len(all_bns)} BNs, {len(edge_row_counts)} edge tables)")
+    edge_bn_count = sum(1 for table in edge_row_counts if table in all_bns)
+    if edge_bn_count != len(edge_row_counts):
+        missing = sorted(set(edge_row_counts) - set(all_bns))
+        raise RuntimeError(f"Missing BayesCard edge BNs: {missing}")
+    print(f"Saved: {model_path} ({len(all_bns)} BNs, {len(edge_row_counts)} edge tables, {edge_bn_count} edge BNs)")
 
 
 def estimate_cardinality(model_dir, query_path):
@@ -115,7 +117,7 @@ def estimate_cardinality(model_dir, query_path):
 
     for bn in all_bns.values():
         bn.init_inference_method()
-        bn.infer_algo = "exact-jit"
+        bn.infer_algo = "exact"
 
     with open(query_path) as f:
         pattern = json.load(f)
@@ -130,12 +132,9 @@ def estimate_cardinality(model_dir, query_path):
     cardinality = 1.0
     for e in edges:
         t_name = e["label"].lower()
-        if t_name in edge_row_counts:
-            cardinality *= edge_row_counts[t_name]
-        elif t_name in all_bns:
-            cardinality *= all_bns[t_name].row_num
-        else:
-            cardinality *= 1000  # fallback
+        if t_name not in all_bns:
+            raise KeyError(f"Missing BayesCard BN for edge table {t_name}")
+        cardinality *= getattr(all_bns[t_name], "row_num", getattr(all_bns[t_name], "nrows", 1.0))
 
     # Apply selectivity from predicates
     for pred in predicates:
@@ -153,7 +152,7 @@ def estimate_cardinality(model_dir, query_path):
                 try:
                     from Evaluation.cardinality_estimation import parse_query_single_table
                     query_obj = parse_query_single_table(sql, bn)
-                    sel = bn.query(query_obj) / bn.row_num
+                    sel = bn.query(query_obj) / getattr(bn, "row_num", getattr(bn, "nrows", 1.0))
                     cardinality *= sel
                 except Exception:
                     pass
@@ -171,10 +170,9 @@ def estimate_cardinality(model_dir, query_path):
         if len(tables) > 1:
             # Each additional join on same vertex reduces by 1/max_table_size
             v_label = vertices[vid]
-            if v_label in all_bns:
-                domain_size = all_bns[v_label].row_num
-            else:
-                domain_size = 10000
+            if v_label not in all_bns:
+                raise KeyError(f"Missing BayesCard BN for vertex table {v_label}")
+            domain_size = getattr(all_bns[v_label], "row_num", getattr(all_bns[v_label], "nrows", 1.0))
             for _ in range(len(tables) - 1):
                 cardinality /= domain_size
 

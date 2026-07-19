@@ -11,7 +11,7 @@ fi
 pattern_dir=$(realpath "$pattern_dir")
 
 summary=$workspace/catalogs/aids_merged/color/aids_merged_mix_6_50000.obj
-log_dir=$workspace/result/color/estimate
+log_dir=$workspace/result/baselines/color/estimate
 log_file=$log_dir/aids_merged.log
 mkdir -p "$log_dir"
 touch "$log_file"

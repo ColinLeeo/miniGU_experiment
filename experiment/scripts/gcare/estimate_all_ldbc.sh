@@ -9,9 +9,9 @@ repeat=${4:-30}
 seed=${5:-0}
 
 workspace=$(realpath "$(dirname "$0")/../../")
-graph_dir=$workspace/datasets/ldbc/sf$sf
+graph_dir=$workspace/catalogs/ldbc/gcare/sf$sf
 pattern_dir=$workspace/patterns/gcare/lsqb
-log_file=$workspace/result/gcare/estimate/lsqb_sf${sf}_${method}.log
+log_file=$workspace/result/baselines/gcare/estimate/lsqb_sf${sf}_${method}.log
 mkdir -p "$(dirname "$log_file")"
 : > "$log_file"
 

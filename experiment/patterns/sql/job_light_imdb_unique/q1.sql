@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM "title" AS v2, "infoIdxVertex" AS v3, "title_movieCompanies_companyName" AS e1, "title_infoEdge_infoIdxVertex" AS e2 WHERE e1.src = v2.id AND e2.src = v2.id AND e2.dst = v3.id AND v3."info_type_id" = 112 AND e1."company_type_id" = 2;

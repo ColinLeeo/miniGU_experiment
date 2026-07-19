@@ -1,0 +1,72 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "castInfoVertex"
+    },
+    {
+      "id": 3,
+      "label": "keyword"
+    },
+    {
+      "id": 4,
+      "label": "infoIdxVertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_keywordEdge_keyword",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "castInfoVertex_castInfoEdge_title",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 3,
+      "label": "title_infoEdge_infoIdxVertex",
+      "src": 1,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 2005
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 1,
+      "property": "kind_id",
+      "op": "eq",
+      "value": {
+        "Int64": 1
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 4,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 101
+      }
+    }
+  ]
+}

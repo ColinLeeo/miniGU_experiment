@@ -13,7 +13,7 @@ dataset=$workspace/datasets/ldbc/sf$sf
 patterns=$workspace/patterns/sql/ldbc_with_pred_30
 output_dir=$workspace/catalogs/ldbc/safebound
 output=$output_dir/ldbc_with_pred_30_sf$sf.pkl
-log_dir=$workspace/results/safebound/build-logs
+log_dir=$workspace/result/baselines/safebound/build-logs
 log=$log_dir/ldbc_with_pred_30_sf$sf.log
 
 num_cores=${SAFEBOUND_NUM_CORES:-8}

@@ -6,11 +6,17 @@ set -o pipefail
 
 workspace=$(realpath $(dirname $0)/../../)
 source "$workspace/scripts/common/build_metrics.sh"
-graph=$workspace/datasets/aids_merged/aids_merged.txt
-graph_dir=$workspace/datasets/aids_merged
+dataset=$workspace/datasets/aids_merged
+schema=$workspace/schemas/aids_merged/aids_merged_pathce_schema.json
+graph=$workspace/catalogs/aids_merged/gcare/aids_merged.txt
+graph_dir=$workspace/catalogs/aids_merged/gcare/aids_merged
+mkdir -p "$(dirname "$graph_dir")"
+if [[ ! -f "$graph" ]]; then
+    python3 "$workspace/tools/convert_csv_to_gcare.py" -s "$schema" -d "$dataset" -o "$graph"
+fi
 method=$1
 threads=1
-log=$workspace/result/gcare/build-logs/aids_merged_"$method".log
+log=$workspace/result/baselines/gcare/build-logs/aids_merged_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

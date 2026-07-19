@@ -1,0 +1,42 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "companyName"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_movieCompanies_companyName",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "title_keywordEdge_keyword",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "edge",
+      "id": 2,
+      "property": "keyword_id",
+      "op": "eq",
+      "value": {
+        "Int64": 117
+      }
+    }
+  ]
+}

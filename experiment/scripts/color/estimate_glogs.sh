@@ -12,7 +12,7 @@ fi
 pattern_dir=$(realpath "$pattern_dir")
 
 summary=${GLOGS_COLOR_SUMMARY:-$workspace/catalogs/ldbc/color/ldbc_sf"$sf"_mix_6_50000.obj}
-log_dir=$workspace/result/color/estimate
+log_dir=$workspace/result/baselines/color/estimate
 log_file=$log_dir/glogs_sf${sf}.log
 mkdir -p "$log_dir"
 : > "$log_file"

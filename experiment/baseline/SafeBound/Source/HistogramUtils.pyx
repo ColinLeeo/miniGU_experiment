@@ -49,7 +49,7 @@ def getQuantiles(values, numBins, numVals, includeDuplicates = True, alreadySort
         binsToAdd = numBins - len(quantiles)
         valuesSeries = pd.Series(values)
         remainingValuesSeries = valuesSeries[~valuesSeries.isin(quantiles)]
-        topRemainingValues = remainingValuesSeries.value_counts().head(binsToAdd).reset_index()["index"]
+        topRemainingValues = remainingValuesSeries.value_counts().head(binsToAdd).reset_index().iloc[:, 0]
         if len(topRemainingValues) > 0 and binsToAdd > 0:
             quantiles = sorted(quantiles + list(topRemainingValues))
     return quantiles
@@ -240,7 +240,7 @@ class FilterColumnStats:
         numFilterValues = notNullTable[filterCol].nunique()
 
         filterOutlierValCounts = notNullTable[filterCol].value_counts().head(self.numEqualityOutliers).reset_index()
-        outlierVals = filterOutlierValCounts["index"]
+        outlierVals = filterOutlierValCounts.iloc[:, 0]
         outlierCounts = filterOutlierValCounts[filterCol]
         
         outlierFunctionDicts = []

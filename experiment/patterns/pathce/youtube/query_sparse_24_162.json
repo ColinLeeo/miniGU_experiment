@@ -1,0 +1,300 @@
+{
+  "vertices": [
+    {
+      "tag_id": 0,
+      "label_id": 22
+    },
+    {
+      "tag_id": 1,
+      "label_id": 12
+    },
+    {
+      "tag_id": 2,
+      "label_id": 3
+    },
+    {
+      "tag_id": 3,
+      "label_id": 17
+    },
+    {
+      "tag_id": 4,
+      "label_id": 6
+    },
+    {
+      "tag_id": 5,
+      "label_id": 22
+    },
+    {
+      "tag_id": 6,
+      "label_id": 20
+    },
+    {
+      "tag_id": 7,
+      "label_id": 22
+    },
+    {
+      "tag_id": 8,
+      "label_id": 15
+    },
+    {
+      "tag_id": 9,
+      "label_id": 17
+    },
+    {
+      "tag_id": 10,
+      "label_id": 24
+    },
+    {
+      "tag_id": 11,
+      "label_id": 10
+    },
+    {
+      "tag_id": 12,
+      "label_id": 0
+    },
+    {
+      "tag_id": 13,
+      "label_id": 23
+    },
+    {
+      "tag_id": 14,
+      "label_id": 24
+    },
+    {
+      "tag_id": 15,
+      "label_id": 12
+    },
+    {
+      "tag_id": 16,
+      "label_id": 14
+    },
+    {
+      "tag_id": 17,
+      "label_id": 2
+    },
+    {
+      "tag_id": 18,
+      "label_id": 13
+    },
+    {
+      "tag_id": 19,
+      "label_id": 21
+    },
+    {
+      "tag_id": 20,
+      "label_id": 16
+    },
+    {
+      "tag_id": 21,
+      "label_id": 7
+    },
+    {
+      "tag_id": 22,
+      "label_id": 11
+    },
+    {
+      "tag_id": 23,
+      "label_id": 8
+    }
+  ],
+  "edges": [
+    {
+      "tag_id": 0,
+      "src": 0,
+      "dst": 1,
+      "label_id": 562
+    },
+    {
+      "tag_id": 1,
+      "src": 0,
+      "dst": 3,
+      "label_id": 567
+    },
+    {
+      "tag_id": 2,
+      "src": 0,
+      "dst": 5,
+      "label_id": 572
+    },
+    {
+      "tag_id": 3,
+      "src": 1,
+      "dst": 4,
+      "label_id": 306
+    },
+    {
+      "tag_id": 4,
+      "src": 1,
+      "dst": 5,
+      "label_id": 322
+    },
+    {
+      "tag_id": 5,
+      "src": 1,
+      "dst": 6,
+      "label_id": 320
+    },
+    {
+      "tag_id": 6,
+      "src": 1,
+      "dst": 7,
+      "label_id": 322
+    },
+    {
+      "tag_id": 7,
+      "src": 1,
+      "dst": 8,
+      "label_id": 315
+    },
+    {
+      "tag_id": 8,
+      "src": 1,
+      "dst": 12,
+      "label_id": 300
+    },
+    {
+      "tag_id": 9,
+      "src": 2,
+      "dst": 11,
+      "label_id": 85
+    },
+    {
+      "tag_id": 10,
+      "src": 2,
+      "dst": 14,
+      "label_id": 99
+    },
+    {
+      "tag_id": 11,
+      "src": 2,
+      "dst": 16,
+      "label_id": 89
+    },
+    {
+      "tag_id": 12,
+      "src": 3,
+      "dst": 19,
+      "label_id": 446
+    },
+    {
+      "tag_id": 13,
+      "src": 4,
+      "dst": 7,
+      "label_id": 172
+    },
+    {
+      "tag_id": 14,
+      "src": 4,
+      "dst": 16,
+      "label_id": 164
+    },
+    {
+      "tag_id": 15,
+      "src": 5,
+      "dst": 21,
+      "label_id": 557
+    },
+    {
+      "tag_id": 16,
+      "src": 6,
+      "dst": 7,
+      "label_id": 522
+    },
+    {
+      "tag_id": 17,
+      "src": 6,
+      "dst": 9,
+      "label_id": 517
+    },
+    {
+      "tag_id": 18,
+      "src": 6,
+      "dst": 10,
+      "label_id": 524
+    },
+    {
+      "tag_id": 19,
+      "src": 6,
+      "dst": 11,
+      "label_id": 510
+    },
+    {
+      "tag_id": 20,
+      "src": 8,
+      "dst": 13,
+      "label_id": 398
+    },
+    {
+      "tag_id": 21,
+      "src": 8,
+      "dst": 14,
+      "label_id": 399
+    },
+    {
+      "tag_id": 22,
+      "src": 9,
+      "dst": 12,
+      "label_id": 425
+    },
+    {
+      "tag_id": 23,
+      "src": 9,
+      "dst": 15,
+      "label_id": 437
+    },
+    {
+      "tag_id": 24,
+      "src": 10,
+      "dst": 12,
+      "label_id": 600
+    },
+    {
+      "tag_id": 25,
+      "src": 13,
+      "dst": 17,
+      "label_id": 577
+    },
+    {
+      "tag_id": 26,
+      "src": 13,
+      "dst": 18,
+      "label_id": 588
+    },
+    {
+      "tag_id": 27,
+      "src": 14,
+      "dst": 16,
+      "label_id": 614
+    },
+    {
+      "tag_id": 28,
+      "src": 14,
+      "dst": 20,
+      "label_id": 616
+    },
+    {
+      "tag_id": 29,
+      "src": 16,
+      "dst": 21,
+      "label_id": 357
+    },
+    {
+      "tag_id": 30,
+      "src": 19,
+      "dst": 23,
+      "label_id": 533
+    },
+    {
+      "tag_id": 31,
+      "src": 20,
+      "dst": 21,
+      "label_id": 407
+    },
+    {
+      "tag_id": 32,
+      "src": 21,
+      "dst": 22,
+      "label_id": 186
+    }
+  ]
+}

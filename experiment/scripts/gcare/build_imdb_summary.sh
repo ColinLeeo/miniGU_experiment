@@ -6,11 +6,17 @@ set -o pipefail
 
 workspace=$(realpath $(dirname $0)/../../)
 source "$workspace/scripts/common/build_metrics.sh"
-graph=$workspace/datasets/imdb/imdb/imdb_gcare.txt
-graph_dir=$workspace/datasets/imdb/imdb
+dataset=$workspace/datasets/imdb/imdb
+schema=$workspace/schemas/imdb/imdb_pathce_schema.json
+graph=$workspace/catalogs/imdb/gcare/imdb.txt
+graph_dir=$workspace/catalogs/imdb/gcare/imdb
+mkdir -p "$(dirname "$graph_dir")"
+if [[ ! -f "$graph" ]]; then
+    python3 "$workspace/tools/convert_csv_to_gcare.py" -s "$schema" -d "$dataset" -o "$graph"
+fi
 method=$1
 threads=1
-log=$workspace/result/gcare/build-logs/imdb_"$method".log
+log=$workspace/result/baselines/gcare/build-logs/imdb_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

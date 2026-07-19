@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM "title" AS v2, "castInfoVertex_castInfoEdge_title" AS e1, "title_keywordEdge_keyword" AS e2, "title_movieCompanies_companyName" AS e3 WHERE e1.dst = v2.id AND e2.src = v2.id AND e3.src = v2.id AND e2."keyword_id" = 117;

@@ -106,10 +106,11 @@ TABLES = {
 }
 
 
-def prepare_data(source_dir: Path, target_dir: Path) -> None:
+def prepare_data(source_dir: Path, target_dir: Path) -> bool:
     marker = target_dir / ".prepared"
-    if marker.exists():
-        return
+    marker_text = "stats_time_relative_v2\n"
+    if marker.exists() and marker.read_text() == marker_text:
+        return False
     target_dir.mkdir(parents=True, exist_ok=True)
     for spec in TABLES.values():
         df = pd.read_csv(source_dir / spec["source"])
@@ -121,7 +122,8 @@ def prepare_data(source_dir: Path, target_dir: Path) -> None:
         df = df[expected]
         df.to_csv(target_dir / spec["target"], index=False)
     convert_time_to_int(str(target_dir))
-    marker.write_text("ok\n")
+    marker.write_text(marker_text)
+    return True
 
 
 def load_truth(truth_csv: Path) -> pd.DataFrame:
@@ -146,22 +148,29 @@ def estimate(model_path: Path, sql_dir: Path, truth: pd.DataFrame) -> pd.DataFra
     for row in truth.itertuples(index=False):
         query = row.query
         sql_path = sql_dir / f"{query}.sql"
-        sql = sql_path.read_text().strip()
-        start = time.time()
         status = "ok"
-        notes = ""
+        notes = "latency_scope=bound_inference_only"
+        start = None
         try:
+            sql = sql_path.read_text().strip()
+            start = time.perf_counter()
             pred = model.get_cardinality_bound_one(sql)
+            latency = time.perf_counter() - start
             if pred is None or not math.isfinite(float(pred)):
-                status = "fallback_one"
-                notes = f"non-finite prediction: {pred}"
+                status = "failed_non_finite"
+                notes += f"; non-finite prediction: {pred}"
                 pred = 1.0
-            pred = max(float(pred), 1.0)
+            elif float(pred) <= 0:
+                status = "failed_non_finite"
+                notes += f"; non-positive prediction: {pred}"
+                pred = 1.0
+            else:
+                pred = float(pred)
         except Exception as exc:
-            status = "error"
-            notes = repr(exc)
+            status = f"failed: {type(exc).__name__}"
+            notes += f"; {exc!r}"
             pred = 1.0
-        latency = time.time() - start
+            latency = time.perf_counter() - start if start is not None else math.nan
         true_card = float(row.truth_cardinality)
         rows.append(
             {
@@ -190,7 +199,7 @@ def write_distribution(df: pd.DataFrame, path: Path) -> None:
         ("(100,1000]", lambda s: (s > 100) & (s <= 1000)),
         (">1000", lambda s: s > 1000),
     ]
-    total = len(df)
+    total = int(df["qerror"].count())
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["bucket", "count", "fraction"])
         writer.writeheader()
@@ -212,7 +221,7 @@ def write_summary(df: pd.DataFrame, path: Path) -> None:
         "avg_latency_s": float(df["latency_s"].mean()),
         "total_latency_s": float(df["latency_s"].sum()),
         "ok": int((df["status"] == "ok").sum()),
-        "errors": int((df["status"] == "error").sum()),
+        "errors": int((df["status"] != "ok").sum()),
     }
     pd.DataFrame([summary]).to_csv(path, index=False)
 
@@ -247,7 +256,13 @@ def update_baseline_outputs(df: pd.DataFrame, baseline_csv: Path, summary_csv: P
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-data", type=Path, default=REPO_ROOT / "dataset" / "stats_ceb")
+    parser.add_argument(
+        "stage",
+        choices=["all", "prepare", "train", "evaluate"],
+        nargs="?",
+        default="all",
+    )
+    parser.add_argument("--source-data", type=Path, default=REPO_ROOT / "datasets" / "stats_ceb")
     parser.add_argument("--sql-dir", type=Path, default=REPO_ROOT / "patterns" / "sql" / "stats_ceb")
     parser.add_argument("--truth", type=Path, default=REPO_ROOT / "patterns" / "gcard" / "stats_ceb" / "truth.csv")
     parser.add_argument(
@@ -255,7 +270,7 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "result" / "sql_baselines" / "stats_ceb_factorjoin",
     )
-    parser.add_argument("--bins", type=int, default=200)
+    parser.add_argument("--bins", type=int, default=100)
     parser.add_argument("--bucket-method", default="greedy")
     parser.add_argument("--force-train", action="store_true")
     args = parser.parse_args()
@@ -266,9 +281,14 @@ def main() -> None:
     factorjoin_dir.mkdir(parents=True, exist_ok=True)
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    prepare_data(args.source_data, data_dir)
+    prepared_changed = prepare_data(args.source_data, data_dir)
+    if args.stage == "prepare":
+        return
+
     model_path = model_dir / f"model_stats_{args.bucket_method}_{args.bins}.pkl"
-    if args.force_train or not model_path.exists():
+    if args.stage in ("all", "train") and (
+        args.force_train or prepared_changed or not model_path.exists()
+    ):
         train_one_stats(
             "stats",
             str(data_dir),
@@ -278,6 +298,10 @@ def main() -> None:
             bucket_method=args.bucket_method,
             validate=False,
         )
+    if args.stage == "train":
+        return
+    if not model_path.exists():
+        raise FileNotFoundError(f"FactorJoin model not found: {model_path}")
 
     truth = load_truth(args.truth)
     estimates = estimate(model_path, args.sql_dir, truth)
@@ -288,8 +312,8 @@ def main() -> None:
 
     update_baseline_outputs(
         estimates,
-        Path("/home/zxz/miniGU/experiment/results/qerror_imdb_stats_k2_d5_latest/stats_ceb_k2_d5_qerror_baselines.csv"),
-        Path("/home/zxz/miniGU/experiment/results/qerror_imdb_stats_k2_d5_latest/stats_ceb_k2_d5_qerror_summary.csv"),
+        ROOT / "experiment/result/baselines/qerror_imdb_stats_k2_d5_latest/stats_ceb_k2_d5_qerror_baselines.csv",
+        ROOT / "experiment/result/baselines/qerror_imdb_stats_k2_d5_latest/stats_ceb_k2_d5_qerror_summary.csv",
     )
 
     print(estimates["status"].value_counts(dropna=False).to_string())

@@ -14,7 +14,7 @@ dataset=$workspace/datasets/aids_merged
 patterns=$workspace/patterns/sql/aids_merged
 output_dir=$workspace/catalogs/aids_merged/safebound
 output=$output_dir/aids_merged.pkl
-log=$workspace/results/safebound/build-logs/aids_merged.log
+log=$workspace/result/baselines/safebound/build-logs/aids_merged.log
 
 mkdir -p "$output_dir"
 

@@ -1,0 +1,140 @@
+{
+  "vertices": [
+    {
+      "tag_id": 0,
+      "label_id": 12
+    },
+    {
+      "tag_id": 1,
+      "label_id": 4
+    },
+    {
+      "tag_id": 2,
+      "label_id": 19
+    },
+    {
+      "tag_id": 3,
+      "label_id": 18
+    },
+    {
+      "tag_id": 4,
+      "label_id": 16
+    },
+    {
+      "tag_id": 5,
+      "label_id": 22
+    },
+    {
+      "tag_id": 6,
+      "label_id": 7
+    },
+    {
+      "tag_id": 7,
+      "label_id": 7
+    }
+  ],
+  "edges": [
+    {
+      "tag_id": 0,
+      "src": 0,
+      "dst": 1,
+      "label_id": 304
+    },
+    {
+      "tag_id": 1,
+      "src": 1,
+      "dst": 5,
+      "label_id": 122
+    },
+    {
+      "tag_id": 2,
+      "src": 2,
+      "dst": 3,
+      "label_id": 493
+    },
+    {
+      "tag_id": 3,
+      "src": 2,
+      "dst": 4,
+      "label_id": 491
+    },
+    {
+      "tag_id": 4,
+      "src": 2,
+      "dst": 5,
+      "label_id": 497
+    },
+    {
+      "tag_id": 5,
+      "src": 2,
+      "dst": 6,
+      "label_id": 482
+    },
+    {
+      "tag_id": 6,
+      "src": 2,
+      "dst": 7,
+      "label_id": 482
+    },
+    {
+      "tag_id": 7,
+      "src": 3,
+      "dst": 4,
+      "label_id": 466
+    },
+    {
+      "tag_id": 8,
+      "src": 3,
+      "dst": 5,
+      "label_id": 472
+    },
+    {
+      "tag_id": 9,
+      "src": 3,
+      "dst": 6,
+      "label_id": 457
+    },
+    {
+      "tag_id": 10,
+      "src": 3,
+      "dst": 7,
+      "label_id": 457
+    },
+    {
+      "tag_id": 11,
+      "src": 4,
+      "dst": 5,
+      "label_id": 422
+    },
+    {
+      "tag_id": 12,
+      "src": 4,
+      "dst": 6,
+      "label_id": 407
+    },
+    {
+      "tag_id": 13,
+      "src": 4,
+      "dst": 7,
+      "label_id": 407
+    },
+    {
+      "tag_id": 14,
+      "src": 5,
+      "dst": 6,
+      "label_id": 557
+    },
+    {
+      "tag_id": 15,
+      "src": 5,
+      "dst": 7,
+      "label_id": 557
+    },
+    {
+      "tag_id": 16,
+      "src": 6,
+      "dst": 7,
+      "label_id": 182
+    }
+  ]
+}

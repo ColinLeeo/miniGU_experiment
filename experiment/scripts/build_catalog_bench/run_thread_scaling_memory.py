@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-ROOT = Path("/home/zxz/miniGU_experiment_gcard-alley-sampling")
+ROOT = Path(__file__).resolve().parents[3]
 MINIGU = Path(os.environ.get("MINIGU_BIN", ROOT / "target/release/minigu"))
 RESULT_DIR = ROOT / "experiment/result/scalability"
 INPUT_DB = RESULT_DIR / "input_db"

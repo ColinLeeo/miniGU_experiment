@@ -11,7 +11,7 @@ fi
 pattern_dir=$(realpath "$pattern_dir")
 
 summary=$workspace/catalogs/imdb/color/imdb_mix_6_50000.obj
-log_dir=$workspace/result/color/estimate
+log_dir=$workspace/result/baselines/color/estimate
 log_file=$log_dir/imdb.log
 mkdir -p "$log_dir"
 : > "$log_file"

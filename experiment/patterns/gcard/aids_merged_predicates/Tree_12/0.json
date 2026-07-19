@@ -1,0 +1,122 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "vertex"
+    },
+    {
+      "id": 2,
+      "label": "vertex"
+    },
+    {
+      "id": 3,
+      "label": "vertex"
+    },
+    {
+      "id": 4,
+      "label": "vertex"
+    },
+    {
+      "id": 5,
+      "label": "vertex"
+    },
+    {
+      "id": 6,
+      "label": "vertex"
+    },
+    {
+      "id": 7,
+      "label": "vertex"
+    },
+    {
+      "id": 8,
+      "label": "vertex"
+    },
+    {
+      "id": 9,
+      "label": "vertex"
+    },
+    {
+      "id": 10,
+      "label": "vertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "0",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "0",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "0",
+      "src": 4,
+      "dst": 2
+    },
+    {
+      "id": 4,
+      "label": "0",
+      "src": 5,
+      "dst": 3
+    },
+    {
+      "id": 5,
+      "label": "0",
+      "src": 5,
+      "dst": 6
+    },
+    {
+      "id": 6,
+      "label": "0",
+      "src": 7,
+      "dst": 3
+    },
+    {
+      "id": 7,
+      "label": "0",
+      "src": 7,
+      "dst": 9
+    },
+    {
+      "id": 8,
+      "label": "0",
+      "src": 7,
+      "dst": 10
+    },
+    {
+      "id": 9,
+      "label": "0",
+      "src": 8,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 3,
+      "property": "v_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 4
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "edge",
+      "id": 1,
+      "property": "e_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 6
+      }
+    }
+  ]
+}

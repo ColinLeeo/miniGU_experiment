@@ -1,0 +1,42 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "castInfoVertex"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "castInfoVertex_castInfoEdge_title",
+      "src": 1,
+      "dst": 2
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 1980
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "lt",
+      "value": {
+        "Int64": 1995
+      }
+    }
+  ]
+}

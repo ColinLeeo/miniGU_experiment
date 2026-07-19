@@ -10,7 +10,7 @@ safebound_source=$workspace/baseline/SafeBound/Source
 runner=$workspace/scripts/safebound/run_safebound.py
 patterns=${GLOGS_SAFEBOUND_PATTERN_DIR:-$workspace/patterns/sql/glogs}
 stats=${GLOGS_SAFEBOUND_STATS_PATH:-$workspace/catalogs/ldbc/safebound/ldbc_sf$sf.pkl}
-output_dir=$workspace/results/safebound/estimate
+output_dir=$workspace/result/baselines/safebound/estimate
 output=$output_dir/glogs_sf$sf.csv
 
 mkdir -p "$output_dir"

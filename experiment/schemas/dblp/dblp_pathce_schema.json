@@ -1,0 +1,22 @@
+{
+  "vertex_labels": {
+    "vertex": 0
+  },
+  "edge_labels": {
+    "e0": 0
+  },
+  "vertices": [
+    {
+      "label": 0,
+      "discrete": false
+    }
+  ],
+  "edges": [
+    {
+      "card": "ManyToMany",
+      "from": 0,
+      "label": 0,
+      "to": 0
+    }
+  ]
+}

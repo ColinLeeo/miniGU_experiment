@@ -1,0 +1,105 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v16"
+    },
+    {
+      "id": 2,
+      "label": "v3"
+    },
+    {
+      "id": 3,
+      "label": "v3"
+    },
+    {
+      "id": 4,
+      "label": "v24"
+    },
+    {
+      "id": 5,
+      "label": "v7"
+    },
+    {
+      "id": 6,
+      "label": "v19"
+    },
+    {
+      "id": 7,
+      "label": "v19"
+    },
+    {
+      "id": 8,
+      "label": "v21"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v16_v3",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v16_v3",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v16_v19",
+      "src": 1,
+      "dst": 6
+    },
+    {
+      "id": 4,
+      "label": "e0_v16_v19",
+      "src": 1,
+      "dst": 7
+    },
+    {
+      "id": 5,
+      "label": "e0_v16_v21",
+      "src": 1,
+      "dst": 8
+    },
+    {
+      "id": 6,
+      "label": "e0_v3_v24",
+      "src": 2,
+      "dst": 4
+    },
+    {
+      "id": 7,
+      "label": "e0_v3_v19",
+      "src": 2,
+      "dst": 6
+    },
+    {
+      "id": 8,
+      "label": "e0_v3_v24",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 9,
+      "label": "e0_v24_v7",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 10,
+      "label": "e0_v7_v19",
+      "src": 5,
+      "dst": 7
+    },
+    {
+      "id": 11,
+      "label": "e0_v19_v19",
+      "src": 6,
+      "dst": 7
+    }
+  ],
+  "predicates": []
+}

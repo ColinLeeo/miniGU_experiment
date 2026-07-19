@@ -1,0 +1,41 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v23"
+    },
+    {
+      "id": 2,
+      "label": "v19"
+    },
+    {
+      "id": 3,
+      "label": "v2"
+    },
+    {
+      "id": 4,
+      "label": "v8"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v23_v19",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v19_v2",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v2_v8",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": []
+}

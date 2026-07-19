@@ -1,0 +1,152 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "vertex"
+    },
+    {
+      "id": 2,
+      "label": "vertex"
+    },
+    {
+      "id": 3,
+      "label": "vertex"
+    },
+    {
+      "id": 4,
+      "label": "vertex"
+    },
+    {
+      "id": 5,
+      "label": "vertex"
+    },
+    {
+      "id": 6,
+      "label": "vertex"
+    },
+    {
+      "id": 7,
+      "label": "vertex"
+    },
+    {
+      "id": 8,
+      "label": "vertex"
+    },
+    {
+      "id": 9,
+      "label": "vertex"
+    },
+    {
+      "id": 10,
+      "label": "vertex"
+    },
+    {
+      "id": 11,
+      "label": "vertex"
+    },
+    {
+      "id": 12,
+      "label": "vertex"
+    },
+    {
+      "id": 13,
+      "label": "vertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "0",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "0",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "1",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "0",
+      "src": 5,
+      "dst": 4
+    },
+    {
+      "id": 5,
+      "label": "0",
+      "src": 6,
+      "dst": 5
+    },
+    {
+      "id": 6,
+      "label": "0",
+      "src": 6,
+      "dst": 7
+    },
+    {
+      "id": 7,
+      "label": "0",
+      "src": 8,
+      "dst": 7
+    },
+    {
+      "id": 8,
+      "label": "0",
+      "src": 8,
+      "dst": 9
+    },
+    {
+      "id": 9,
+      "label": "0",
+      "src": 10,
+      "dst": 9
+    },
+    {
+      "id": 10,
+      "label": "3",
+      "src": 11,
+      "dst": 10
+    },
+    {
+      "id": 11,
+      "label": "0",
+      "src": 11,
+      "dst": 12
+    },
+    {
+      "id": 12,
+      "label": "0",
+      "src": 12,
+      "dst": 13
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "v_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 4
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "edge",
+      "id": 1,
+      "property": "e_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 6
+      }
+    }
+  ]
+}

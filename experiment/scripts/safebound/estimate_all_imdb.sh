@@ -8,7 +8,7 @@ safebound_source=$workspace/baseline/SafeBound/Source
 runner=$workspace/scripts/safebound/run_safebound.py
 patterns=$workspace/patterns/sql/imdb
 stats=$workspace/catalogs/imdb/safebound/imdb.pkl
-output_dir=$workspace/results/safebound/estimate
+output_dir=$workspace/result/baselines/safebound/estimate
 output=$output_dir/imdb.csv
 
 mkdir -p "$output_dir"

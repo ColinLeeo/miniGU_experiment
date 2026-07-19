@@ -31,7 +31,7 @@ fi
 
 SCHEMA="$EXPERIMENT_DIR/schemas/ldbc/ldbc_pathce_schema.json"
 GLOGS_SCHEMA="$EXPERIMENT_DIR/schemas/ldbc/ldbc_glogs_schema.json"
-DATASET_DIR="$EXPERIMENT_DIR/dataset/ldbc/sf${SF}"
+DATASET_DIR="$EXPERIMENT_DIR/datasets/ldbc/sf${SF}"
 THREADS=16
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -104,9 +104,10 @@ if should_run gcare; then
         (cd "$EXPERIMENT_DIR/baseline/gcare/build" && cmake .. && make -j)
     fi
 
-    GCARE_TXT="$EXPERIMENT_DIR/dataset/ldbc/sf${SF}.txt"
-    GCARE_DATA="$EXPERIMENT_DIR/dataset/ldbc/sf${SF}"
+    GCARE_TXT="$EXPERIMENT_DIR/catalogs/ldbc/gcare/sf${SF}.txt"
+    GCARE_DATA="$EXPERIMENT_DIR/catalogs/ldbc/gcare/sf${SF}"
     # gcare binary graph marker: <data_dir>.graph.meta
+    mkdir -p "$(dirname "$GCARE_DATA")"
     GCARE_BIN_MARKER="${GCARE_DATA}.graph.meta"
 
     # If binary graph doesn't exist, (re)generate txt and build everything
@@ -130,7 +131,7 @@ if should_run color; then
     mkdir -p "$CATALOG_DIR"
     SUMMARY="$CATALOG_DIR/ldbc_sf${SF}_mix_6_50000.obj"
 
-    GCARE_TXT="$EXPERIMENT_DIR/dataset/ldbc/sf${SF}.txt"
+    GCARE_TXT="$EXPERIMENT_DIR/catalogs/ldbc/gcare/sf${SF}.txt"
     if [[ ! -f "$GCARE_TXT" ]]; then
         log "color: SKIP - need G-CARE txt first (run: prepare_baselines.sh $SF gcare)"
     elif ! command -v julia &>/dev/null; then

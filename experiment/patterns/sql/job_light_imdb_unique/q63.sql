@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM "title" AS v1, "infoIdxVertex" AS v4, "title_keywordEdge_keyword" AS e1, "castInfoVertex_castInfoEdge_title" AS e2, "title_infoEdge_infoIdxVertex" AS e3 WHERE e1.src = v1.id AND e2.dst = v1.id AND e3.src = v1.id AND e3.dst = v4.id AND v1."production_year" > 2000 AND v1."kind_id" = 1 AND v4."info_type_id" = 101;

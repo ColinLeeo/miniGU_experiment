@@ -10,7 +10,7 @@ safebound_source=$workspace/baseline/SafeBound/Source
 runner=$workspace/scripts/safebound/run_safebound.py
 patterns=$workspace/patterns/sql/lsqb
 stats=$workspace/catalogs/ldbc/safebound/ldbc_sf$sf.pkl
-output_dir=$workspace/results/safebound/estimate
+output_dir=$workspace/result/baselines/safebound/estimate
 output=$output_dir/ldbc_sf$sf.csv
 
 mkdir -p "$output_dir"

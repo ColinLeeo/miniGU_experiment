@@ -1,0 +1,5 @@
+query,true_cardinality,time_s,status,error,pattern_path,sql
+q29,17490075844479,25.94,ok,,/home/zxz/miniGU_experiment_master/experiment/patterns/sql/imdb/q29.sql,factorized_exact
+q30,85829048145,19.21,ok,,/home/zxz/miniGU_experiment_master/experiment/patterns/sql/imdb/q30.sql,factorized_exact
+q31,2127734966462,23.33,ok,,/home/zxz/miniGU_experiment_master/experiment/patterns/sql/imdb/q31.sql,factorized_exact
+q32,288192,0.24,ok,,/home/zxz/miniGU_experiment_master/experiment/patterns/sql/imdb/q32.sql,direct

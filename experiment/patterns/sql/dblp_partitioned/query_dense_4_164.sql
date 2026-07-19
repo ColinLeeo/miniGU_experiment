@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM pe0_14_4 e1, pe0_14_13 e2, pe0_14_14 e3, pe0_4_13 e4, pe0_4_14 e5, pe0_13_14 e6 WHERE e2.src = e1.src AND e3.src = e1.src AND e4.src = e1.dst AND e4.dst = e2.dst AND e5.src = e1.dst AND e5.dst = e3.dst AND e6.src = e2.dst AND e6.dst = e3.dst

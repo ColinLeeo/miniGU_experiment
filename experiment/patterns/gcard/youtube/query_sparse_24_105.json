@@ -1,0 +1,301 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v19"
+    },
+    {
+      "id": 2,
+      "label": "v20"
+    },
+    {
+      "id": 3,
+      "label": "v9"
+    },
+    {
+      "id": 4,
+      "label": "v4"
+    },
+    {
+      "id": 5,
+      "label": "v14"
+    },
+    {
+      "id": 6,
+      "label": "v17"
+    },
+    {
+      "id": 7,
+      "label": "v20"
+    },
+    {
+      "id": 8,
+      "label": "v24"
+    },
+    {
+      "id": 9,
+      "label": "v23"
+    },
+    {
+      "id": 10,
+      "label": "v24"
+    },
+    {
+      "id": 11,
+      "label": "v6"
+    },
+    {
+      "id": 12,
+      "label": "v22"
+    },
+    {
+      "id": 13,
+      "label": "v5"
+    },
+    {
+      "id": 14,
+      "label": "v24"
+    },
+    {
+      "id": 15,
+      "label": "v9"
+    },
+    {
+      "id": 16,
+      "label": "v22"
+    },
+    {
+      "id": 17,
+      "label": "v4"
+    },
+    {
+      "id": 18,
+      "label": "v3"
+    },
+    {
+      "id": 19,
+      "label": "v14"
+    },
+    {
+      "id": 20,
+      "label": "v20"
+    },
+    {
+      "id": 21,
+      "label": "v17"
+    },
+    {
+      "id": 22,
+      "label": "v17"
+    },
+    {
+      "id": 23,
+      "label": "v24"
+    },
+    {
+      "id": 24,
+      "label": "v15"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v19_v9",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 2,
+      "label": "e0_v19_v4",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 3,
+      "label": "e0_v19_v14",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 4,
+      "label": "e0_v19_v17",
+      "src": 1,
+      "dst": 6
+    },
+    {
+      "id": 5,
+      "label": "e0_v19_v20",
+      "src": 1,
+      "dst": 7
+    },
+    {
+      "id": 6,
+      "label": "e0_v19_v24",
+      "src": 1,
+      "dst": 8
+    },
+    {
+      "id": 7,
+      "label": "e0_v19_v23",
+      "src": 1,
+      "dst": 9
+    },
+    {
+      "id": 8,
+      "label": "e0_v19_v24",
+      "src": 1,
+      "dst": 10
+    },
+    {
+      "id": 9,
+      "label": "e0_v20_v9",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 10,
+      "label": "e0_v20_v20",
+      "src": 2,
+      "dst": 7
+    },
+    {
+      "id": 11,
+      "label": "e0_v20_v22",
+      "src": 2,
+      "dst": 12
+    },
+    {
+      "id": 12,
+      "label": "e0_v9_v17",
+      "src": 3,
+      "dst": 6
+    },
+    {
+      "id": 13,
+      "label": "e0_v9_v24",
+      "src": 3,
+      "dst": 8
+    },
+    {
+      "id": 14,
+      "label": "e0_v9_v6",
+      "src": 3,
+      "dst": 11
+    },
+    {
+      "id": 15,
+      "label": "e0_v4_v24",
+      "src": 4,
+      "dst": 8
+    },
+    {
+      "id": 16,
+      "label": "e0_v4_v24",
+      "src": 4,
+      "dst": 14
+    },
+    {
+      "id": 17,
+      "label": "e0_v14_v4",
+      "src": 5,
+      "dst": 17
+    },
+    {
+      "id": 18,
+      "label": "e0_v14_v3",
+      "src": 5,
+      "dst": 18
+    },
+    {
+      "id": 19,
+      "label": "e0_v17_v5",
+      "src": 6,
+      "dst": 13
+    },
+    {
+      "id": 20,
+      "label": "e0_v20_v14",
+      "src": 7,
+      "dst": 19
+    },
+    {
+      "id": 21,
+      "label": "e0_v24_v22",
+      "src": 8,
+      "dst": 12
+    },
+    {
+      "id": 22,
+      "label": "e0_v24_v14",
+      "src": 8,
+      "dst": 19
+    },
+    {
+      "id": 23,
+      "label": "e0_v23_v22",
+      "src": 9,
+      "dst": 12
+    },
+    {
+      "id": 24,
+      "label": "e0_v24_v5",
+      "src": 10,
+      "dst": 13
+    },
+    {
+      "id": 25,
+      "label": "e0_v22_v3",
+      "src": 12,
+      "dst": 18
+    },
+    {
+      "id": 26,
+      "label": "e0_v5_v24",
+      "src": 13,
+      "dst": 14
+    },
+    {
+      "id": 27,
+      "label": "e0_v9_v22",
+      "src": 15,
+      "dst": 16
+    },
+    {
+      "id": 28,
+      "label": "e0_v9_v4",
+      "src": 15,
+      "dst": 17
+    },
+    {
+      "id": 29,
+      "label": "e0_v22_v15",
+      "src": 16,
+      "dst": 24
+    },
+    {
+      "id": 30,
+      "label": "e0_v20_v17",
+      "src": 20,
+      "dst": 21
+    },
+    {
+      "id": 31,
+      "label": "e0_v20_v17",
+      "src": 20,
+      "dst": 22
+    },
+    {
+      "id": 32,
+      "label": "e0_v17_v24",
+      "src": 21,
+      "dst": 23
+    },
+    {
+      "id": 33,
+      "label": "e0_v17_v15",
+      "src": 22,
+      "dst": 24
+    }
+  ],
+  "predicates": []
+}

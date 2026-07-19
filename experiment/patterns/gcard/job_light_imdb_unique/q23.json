@@ -1,0 +1,42 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "castInfoVertex"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "companyName"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "castInfoVertex_castInfoEdge_title",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_movieCompanies_companyName",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "role_id",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    }
+  ]
+}

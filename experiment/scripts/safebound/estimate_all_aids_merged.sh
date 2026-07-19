@@ -8,7 +8,7 @@ safebound_source=$workspace/baseline/SafeBound/Source
 runner=$workspace/scripts/safebound/run_safebound.py
 patterns=$workspace/patterns/sql/aids_merged
 stats=$workspace/catalogs/aids_merged/safebound/aids_merged.pkl
-output_dir=$workspace/results/safebound/estimate
+output_dir=$workspace/result/baselines/safebound/estimate
 output=$output_dir/aids_merged.csv
 
 mkdir -p "$output_dir"

@@ -8,10 +8,16 @@ workspace=$(realpath $(dirname $0)/../../)
 source "$workspace/scripts/common/build_metrics.sh"
 method=$1
 sf=${2:-1}
-graph=$workspace/datasets/ldbc/sf$sf/ldbc_sf${sf}_gcare.txt
-graph_dir=$workspace/datasets/ldbc/sf$sf
+dataset=$workspace/datasets/ldbc/sf$sf
+schema=$workspace/schemas/ldbc/ldbc_pathce_schema.json
+graph=$workspace/catalogs/ldbc/gcare/sf$sf.txt
+graph_dir=$workspace/catalogs/ldbc/gcare/sf$sf
+mkdir -p "$(dirname "$graph_dir")"
+if [[ ! -f "$graph" ]]; then
+    python3 "$workspace/tools/convert_csv_to_gcare.py" -s "$schema" -d "$dataset" -o "$graph"
+fi
 threads=1
-log=$workspace/result/gcare/build-logs/ldbc_sf"$sf"_"$method".log
+log=$workspace/result/baselines/gcare/build-logs/ldbc_sf"$sf"_"$method".log
 if [[ $method == "bsk" ]]; then
     summary_path=$graph_dir.$method.b4096.s0
 else

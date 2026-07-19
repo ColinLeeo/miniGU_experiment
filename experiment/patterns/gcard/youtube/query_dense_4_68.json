@@ -1,0 +1,47 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v8"
+    },
+    {
+      "id": 2,
+      "label": "v11"
+    },
+    {
+      "id": 3,
+      "label": "v1"
+    },
+    {
+      "id": 4,
+      "label": "v16"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v8_v11",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v8_v1",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v8_v16",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "e0_v1_v16",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": []
+}

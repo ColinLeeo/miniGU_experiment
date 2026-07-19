@@ -1,0 +1,141 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v23"
+    },
+    {
+      "id": 2,
+      "label": "v19"
+    },
+    {
+      "id": 3,
+      "label": "v2"
+    },
+    {
+      "id": 4,
+      "label": "v24"
+    },
+    {
+      "id": 5,
+      "label": "v6"
+    },
+    {
+      "id": 6,
+      "label": "v20"
+    },
+    {
+      "id": 7,
+      "label": "v5"
+    },
+    {
+      "id": 8,
+      "label": "v4"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v23_v19",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v23_v2",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v23_v24",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "e0_v23_v6",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "e0_v19_v2",
+      "src": 2,
+      "dst": 3
+    },
+    {
+      "id": 6,
+      "label": "e0_v19_v6",
+      "src": 2,
+      "dst": 5
+    },
+    {
+      "id": 7,
+      "label": "e0_v19_v20",
+      "src": 2,
+      "dst": 6
+    },
+    {
+      "id": 8,
+      "label": "e0_v19_v5",
+      "src": 2,
+      "dst": 7
+    },
+    {
+      "id": 9,
+      "label": "e0_v2_v6",
+      "src": 3,
+      "dst": 5
+    },
+    {
+      "id": 10,
+      "label": "e0_v2_v20",
+      "src": 3,
+      "dst": 6
+    },
+    {
+      "id": 11,
+      "label": "e0_v2_v5",
+      "src": 3,
+      "dst": 7
+    },
+    {
+      "id": 12,
+      "label": "e0_v2_v4",
+      "src": 3,
+      "dst": 8
+    },
+    {
+      "id": 13,
+      "label": "e0_v24_v6",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 14,
+      "label": "e0_v6_v20",
+      "src": 5,
+      "dst": 6
+    },
+    {
+      "id": 15,
+      "label": "e0_v6_v5",
+      "src": 5,
+      "dst": 7
+    },
+    {
+      "id": 16,
+      "label": "e0_v6_v4",
+      "src": 5,
+      "dst": 8
+    },
+    {
+      "id": 17,
+      "label": "e0_v5_v4",
+      "src": 7,
+      "dst": 8
+    }
+  ],
+  "predicates": []
+}

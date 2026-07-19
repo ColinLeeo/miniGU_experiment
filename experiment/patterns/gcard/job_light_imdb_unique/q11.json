@@ -1,0 +1,52 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "title"
+    },
+    {
+      "id": 2,
+      "label": "infoIdxVertex"
+    },
+    {
+      "id": 3,
+      "label": "keyword"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_infoEdge_infoIdxVertex",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "title_keywordEdge_keyword",
+      "src": 1,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 1,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 1990
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "vertex",
+      "id": 2,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 101
+      }
+    }
+  ]
+}

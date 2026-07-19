@@ -8,7 +8,7 @@ safebound_source=$workspace/baseline/SafeBound/Source
 runner=$workspace/scripts/safebound/run_safebound.py
 patterns=${JOB_LIGHT_SQL_PATTERN_DIR:-$workspace/patterns/sql/job_light}
 stats=${JOB_LIGHT_SAFEBOUND_STATS:-$workspace/catalogs/job_light/safebound/job_light.pkl}
-output_dir=$workspace/results/safebound/estimate
+output_dir=$workspace/result/baselines/safebound/estimate
 output=$output_dir/job_light.csv
 
 mkdir -p "$output_dir"

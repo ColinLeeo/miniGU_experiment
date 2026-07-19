@@ -1,0 +1,46 @@
+{
+  "vertices": [
+    {
+      "tag_id": 0,
+      "label_id": 2
+    },
+    {
+      "tag_id": 1,
+      "label_id": 24
+    },
+    {
+      "tag_id": 2,
+      "label_id": 2
+    },
+    {
+      "tag_id": 3,
+      "label_id": 5
+    }
+  ],
+  "edges": [
+    {
+      "tag_id": 0,
+      "src": 0,
+      "dst": 1,
+      "label_id": 74
+    },
+    {
+      "tag_id": 1,
+      "src": 0,
+      "dst": 2,
+      "label_id": 52
+    },
+    {
+      "tag_id": 2,
+      "src": 1,
+      "dst": 2,
+      "label_id": 602
+    },
+    {
+      "tag_id": 3,
+      "src": 1,
+      "dst": 3,
+      "label_id": 605
+    }
+  ]
+}

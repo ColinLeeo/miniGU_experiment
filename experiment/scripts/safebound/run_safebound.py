@@ -211,6 +211,27 @@ def sorted_sql_files(pattern_dir: Path) -> list[Path]:
     return files
 
 
+def build_dblp_partitioned_fk_to_k(table_names: list[str]) -> dict[str, list[list[str]]]:
+    fk_to_k = {}
+    available = {t.lower() for t in table_names}
+    edge_re = re.compile(r"^pe0_(\d+)_(\d+)$", flags=re.IGNORECASE)
+    for table in table_names:
+        m = edge_re.match(table)
+        if not m:
+            continue
+        src_label, dst_label = m.groups()
+        src_table = f"v{src_label}"
+        dst_table = f"v{dst_label}"
+        refs = []
+        if src_table.lower() in available:
+            refs.append(["src", "id", src_table])
+        if dst_table.lower() in available:
+            refs.append(["dst", "id", dst_table])
+        if refs:
+            fk_to_k[table] = refs
+    return fk_to_k
+
+
 def run_build(args):
     workspace = Path(args.workspace).resolve()
     append_safe_bound_source_to_path(workspace)
@@ -245,6 +266,11 @@ def run_build(args):
         join_cols.append(table_join_cols)
         filter_cols.append(table_filter_cols)
 
+    fk_to_k = {}
+    if args.dblp_partitioned_fk:
+        fk_to_k = build_dblp_partitioned_fk_to_k(table_names)
+        log(f"using DBLP partitioned FK/PK relationships for {len(fk_to_k)} edge tables")
+
     log(f"building SafeBound stats with {args.num_cores} cores")
     start = time.perf_counter()
     stats = SafeBound(
@@ -255,7 +281,7 @@ def run_build(args):
         filter_cols,
         args.num_buckets,
         args.num_equality_outliers,
-        {},
+        fk_to_k,
         args.num_outliers,
         args.track_nulls,
         args.track_trigrams,
@@ -326,6 +352,7 @@ def main():
     build.add_argument("--grouping-method", default="CompleteClustering")
     build.add_argument("--model-cdf", action="store_true", default=True)
     build.add_argument("--verbose", action="store_true", default=False)
+    build.add_argument("--dblp-partitioned-fk", action="store_true", default=False)
 
     query = sub.add_parser("query", help="Run SafeBound estimates for all SQL files.")
     query.add_argument("--workspace", required=True)

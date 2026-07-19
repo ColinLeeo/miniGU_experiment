@@ -4,12 +4,12 @@ set -o pipefail
 
 workspace=$(realpath "$(dirname "$0")/../../")
 source "$workspace/scripts/common/build_metrics.sh"
-graph=$workspace/datasets/aids_merged/aids_merged.txt
+graph=$workspace/catalogs/aids_merged/gcare/aids_merged.txt
 output_dir=$workspace/catalogs/aids_merged/color
 mkdir -p "$output_dir"
 output=$output_dir/aids_merged_mix_6_50000.obj
 threads=${JULIA_NUM_THREADS:-1}
-log=$workspace/result/color/build-logs/aids_merged.log
+log=$workspace/result/baselines/color/build-logs/aids_merged.log
 
 julia_bin="${JULIA_BIN:-julia}"
 if ! command -v "$julia_bin" >/dev/null 2>&1; then

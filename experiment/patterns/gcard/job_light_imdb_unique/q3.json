@@ -1,0 +1,62 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "companyName"
+    },
+    {
+      "id": 2,
+      "label": "title"
+    },
+    {
+      "id": 3,
+      "label": "infoIdxVertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "title_movieCompanies_companyName",
+      "src": 2,
+      "dst": 1
+    },
+    {
+      "id": 2,
+      "label": "title_infoEdge_infoIdxVertex",
+      "src": 2,
+      "dst": 3
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 3,
+      "property": "info_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 112
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "edge",
+      "id": 1,
+      "property": "company_type_id",
+      "op": "eq",
+      "value": {
+        "Int64": 2
+      }
+    },
+    {
+      "predicate_id": 3,
+      "target": "vertex",
+      "id": 2,
+      "property": "production_year",
+      "op": "gt",
+      "value": {
+        "Int64": 2010
+      }
+    }
+  ]
+}

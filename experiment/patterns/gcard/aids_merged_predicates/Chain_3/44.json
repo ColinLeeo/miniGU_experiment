@@ -1,0 +1,62 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "vertex"
+    },
+    {
+      "id": 2,
+      "label": "vertex"
+    },
+    {
+      "id": 3,
+      "label": "vertex"
+    },
+    {
+      "id": 4,
+      "label": "vertex"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "0",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "3",
+      "src": 3,
+      "dst": 2
+    },
+    {
+      "id": 3,
+      "label": "0",
+      "src": 3,
+      "dst": 4
+    }
+  ],
+  "predicates": [
+    {
+      "predicate_id": 1,
+      "target": "vertex",
+      "id": 2,
+      "property": "v_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 4
+      }
+    },
+    {
+      "predicate_id": 2,
+      "target": "edge",
+      "id": 1,
+      "property": "e_mod10",
+      "op": "le",
+      "value": {
+        "Int64": 6
+      }
+    }
+  ]
+}

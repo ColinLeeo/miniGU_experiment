@@ -17,7 +17,7 @@ workspace=$(realpath $(dirname $0)/../../)
 output_dir=$workspace/catalogs/ldbc/pathce
 mkdir -p $output_dir
 output=$output_dir/ldbc_"sf$sf"_"$k"_"$d"_"$m"
-log=$workspace/result/pathce/build-logs/ldbc_sf"$sf"_"$k"_"$d"_"$m".log
+log=$workspace/result/baselines/pathce/build-logs/ldbc_sf"$sf"_"$k"_"$d"_"$m".log
 mkdir -p "$(dirname "$log")"
 
 "$workspace/baseline/pathce/target/release/pathce" analyze \

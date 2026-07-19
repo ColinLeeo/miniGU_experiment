@@ -14,7 +14,7 @@ dataset=$workspace/datasets/imdb/imdb
 patterns=$workspace/patterns/sql/imdb
 output_dir=$workspace/catalogs/imdb/safebound
 output=$output_dir/imdb.pkl
-log=$workspace/results/safebound/build-logs/imdb.log
+log=$workspace/result/baselines/safebound/build-logs/imdb.log
 
 mkdir -p "$output_dir"
 

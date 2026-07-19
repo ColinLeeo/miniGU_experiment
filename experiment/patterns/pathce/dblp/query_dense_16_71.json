@@ -1,0 +1,262 @@
+{
+  "vertices": [
+    {
+      "tag_id": 0,
+      "label_id": 0
+    },
+    {
+      "tag_id": 1,
+      "label_id": 0
+    },
+    {
+      "tag_id": 2,
+      "label_id": 0
+    },
+    {
+      "tag_id": 3,
+      "label_id": 0
+    },
+    {
+      "tag_id": 4,
+      "label_id": 0
+    },
+    {
+      "tag_id": 5,
+      "label_id": 0
+    },
+    {
+      "tag_id": 6,
+      "label_id": 0
+    },
+    {
+      "tag_id": 7,
+      "label_id": 0
+    },
+    {
+      "tag_id": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 9,
+      "label_id": 0
+    },
+    {
+      "tag_id": 10,
+      "label_id": 0
+    },
+    {
+      "tag_id": 11,
+      "label_id": 0
+    },
+    {
+      "tag_id": 12,
+      "label_id": 0
+    },
+    {
+      "tag_id": 13,
+      "label_id": 0
+    },
+    {
+      "tag_id": 14,
+      "label_id": 0
+    },
+    {
+      "tag_id": 15,
+      "label_id": 0
+    }
+  ],
+  "edges": [
+    {
+      "tag_id": 0,
+      "src": 0,
+      "dst": 1,
+      "label_id": 0
+    },
+    {
+      "tag_id": 1,
+      "src": 0,
+      "dst": 2,
+      "label_id": 0
+    },
+    {
+      "tag_id": 2,
+      "src": 0,
+      "dst": 3,
+      "label_id": 0
+    },
+    {
+      "tag_id": 3,
+      "src": 0,
+      "dst": 4,
+      "label_id": 0
+    },
+    {
+      "tag_id": 4,
+      "src": 0,
+      "dst": 5,
+      "label_id": 0
+    },
+    {
+      "tag_id": 5,
+      "src": 0,
+      "dst": 6,
+      "label_id": 0
+    },
+    {
+      "tag_id": 6,
+      "src": 0,
+      "dst": 7,
+      "label_id": 0
+    },
+    {
+      "tag_id": 7,
+      "src": 0,
+      "dst": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 8,
+      "src": 1,
+      "dst": 2,
+      "label_id": 0
+    },
+    {
+      "tag_id": 9,
+      "src": 1,
+      "dst": 3,
+      "label_id": 0
+    },
+    {
+      "tag_id": 10,
+      "src": 1,
+      "dst": 9,
+      "label_id": 0
+    },
+    {
+      "tag_id": 11,
+      "src": 1,
+      "dst": 10,
+      "label_id": 0
+    },
+    {
+      "tag_id": 12,
+      "src": 2,
+      "dst": 3,
+      "label_id": 0
+    },
+    {
+      "tag_id": 13,
+      "src": 2,
+      "dst": 6,
+      "label_id": 0
+    },
+    {
+      "tag_id": 14,
+      "src": 2,
+      "dst": 7,
+      "label_id": 0
+    },
+    {
+      "tag_id": 15,
+      "src": 2,
+      "dst": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 16,
+      "src": 3,
+      "dst": 5,
+      "label_id": 0
+    },
+    {
+      "tag_id": 17,
+      "src": 3,
+      "dst": 11,
+      "label_id": 0
+    },
+    {
+      "tag_id": 18,
+      "src": 3,
+      "dst": 12,
+      "label_id": 0
+    },
+    {
+      "tag_id": 19,
+      "src": 4,
+      "dst": 13,
+      "label_id": 0
+    },
+    {
+      "tag_id": 20,
+      "src": 4,
+      "dst": 14,
+      "label_id": 0
+    },
+    {
+      "tag_id": 21,
+      "src": 4,
+      "dst": 15,
+      "label_id": 0
+    },
+    {
+      "tag_id": 22,
+      "src": 5,
+      "dst": 11,
+      "label_id": 0
+    },
+    {
+      "tag_id": 23,
+      "src": 5,
+      "dst": 12,
+      "label_id": 0
+    },
+    {
+      "tag_id": 24,
+      "src": 6,
+      "dst": 7,
+      "label_id": 0
+    },
+    {
+      "tag_id": 25,
+      "src": 6,
+      "dst": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 26,
+      "src": 6,
+      "dst": 11,
+      "label_id": 0
+    },
+    {
+      "tag_id": 27,
+      "src": 7,
+      "dst": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 28,
+      "src": 9,
+      "dst": 10,
+      "label_id": 0
+    },
+    {
+      "tag_id": 29,
+      "src": 11,
+      "dst": 12,
+      "label_id": 0
+    },
+    {
+      "tag_id": 30,
+      "src": 13,
+      "dst": 15,
+      "label_id": 0
+    },
+    {
+      "tag_id": 31,
+      "src": 14,
+      "dst": 15,
+      "label_id": 0
+    }
+  ]
+}

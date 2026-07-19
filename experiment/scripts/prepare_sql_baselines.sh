@@ -36,7 +36,7 @@ else
     TOOLS=("$@")
 fi
 
-DATASET_DIR="$EXPERIMENT_DIR/dataset/ldbc/sf${SF}"
+DATASET_DIR="$EXPERIMENT_DIR/datasets/ldbc/sf${SF}"
 SCHEMA="$EXPERIMENT_DIR/schemas/ldbc/ldbc_pathce_schema.json"
 WRAPPER_DIR="$EXPERIMENT_DIR/scripts/sql_baselines"
 

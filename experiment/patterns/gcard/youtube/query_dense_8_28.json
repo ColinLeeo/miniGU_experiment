@@ -1,0 +1,147 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v6"
+    },
+    {
+      "id": 2,
+      "label": "v3"
+    },
+    {
+      "id": 3,
+      "label": "v5"
+    },
+    {
+      "id": 4,
+      "label": "v19"
+    },
+    {
+      "id": 5,
+      "label": "v15"
+    },
+    {
+      "id": 6,
+      "label": "v24"
+    },
+    {
+      "id": 7,
+      "label": "v17"
+    },
+    {
+      "id": 8,
+      "label": "v24"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v6_v3",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v6_v5",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v6_v19",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "e0_v6_v15",
+      "src": 1,
+      "dst": 5
+    },
+    {
+      "id": 5,
+      "label": "e0_v6_v24",
+      "src": 1,
+      "dst": 6
+    },
+    {
+      "id": 6,
+      "label": "e0_v6_v17",
+      "src": 1,
+      "dst": 7
+    },
+    {
+      "id": 7,
+      "label": "e0_v6_v24",
+      "src": 1,
+      "dst": 8
+    },
+    {
+      "id": 8,
+      "label": "e0_v3_v24",
+      "src": 2,
+      "dst": 6
+    },
+    {
+      "id": 9,
+      "label": "e0_v3_v24",
+      "src": 2,
+      "dst": 8
+    },
+    {
+      "id": 10,
+      "label": "e0_v5_v19",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 11,
+      "label": "e0_v5_v15",
+      "src": 3,
+      "dst": 5
+    },
+    {
+      "id": 12,
+      "label": "e0_v5_v24",
+      "src": 3,
+      "dst": 6
+    },
+    {
+      "id": 13,
+      "label": "e0_v5_v17",
+      "src": 3,
+      "dst": 7
+    },
+    {
+      "id": 14,
+      "label": "e0_v5_v24",
+      "src": 3,
+      "dst": 8
+    },
+    {
+      "id": 15,
+      "label": "e0_v19_v15",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 16,
+      "label": "e0_v19_v24",
+      "src": 4,
+      "dst": 6
+    },
+    {
+      "id": 17,
+      "label": "e0_v19_v17",
+      "src": 4,
+      "dst": 7
+    },
+    {
+      "id": 18,
+      "label": "e0_v19_v24",
+      "src": 4,
+      "dst": 8
+    }
+  ],
+  "predicates": []
+}

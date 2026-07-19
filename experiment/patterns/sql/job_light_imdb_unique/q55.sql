@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM "title" AS v1, "title_keywordEdge_keyword" AS e1, "title_movieCompanies_companyName" AS e2, "title_infoEdge_infoVertex" AS e3 WHERE e1.src = v1.id AND e2.src = v1.id AND e3.src = v1.id AND e1."keyword_id" = 398 AND e2."company_type_id" = 2 AND v1."production_year" > 1950 AND v1."production_year" < 2010;

@@ -1,0 +1,274 @@
+{
+  "vertices": [
+    {
+      "tag_id": 0,
+      "label_id": 3
+    },
+    {
+      "tag_id": 1,
+      "label_id": 13
+    },
+    {
+      "tag_id": 2,
+      "label_id": 3
+    },
+    {
+      "tag_id": 3,
+      "label_id": 21
+    },
+    {
+      "tag_id": 4,
+      "label_id": 9
+    },
+    {
+      "tag_id": 5,
+      "label_id": 15
+    },
+    {
+      "tag_id": 6,
+      "label_id": 21
+    },
+    {
+      "tag_id": 7,
+      "label_id": 13
+    },
+    {
+      "tag_id": 8,
+      "label_id": 0
+    },
+    {
+      "tag_id": 9,
+      "label_id": 12
+    },
+    {
+      "tag_id": 10,
+      "label_id": 7
+    },
+    {
+      "tag_id": 11,
+      "label_id": 12
+    },
+    {
+      "tag_id": 12,
+      "label_id": 21
+    },
+    {
+      "tag_id": 13,
+      "label_id": 11
+    },
+    {
+      "tag_id": 14,
+      "label_id": 16
+    },
+    {
+      "tag_id": 15,
+      "label_id": 0
+    }
+  ],
+  "edges": [
+    {
+      "tag_id": 0,
+      "src": 0,
+      "dst": 1,
+      "label_id": 88
+    },
+    {
+      "tag_id": 1,
+      "src": 0,
+      "dst": 2,
+      "label_id": 78
+    },
+    {
+      "tag_id": 2,
+      "src": 0,
+      "dst": 3,
+      "label_id": 96
+    },
+    {
+      "tag_id": 3,
+      "src": 0,
+      "dst": 4,
+      "label_id": 84
+    },
+    {
+      "tag_id": 4,
+      "src": 0,
+      "dst": 5,
+      "label_id": 90
+    },
+    {
+      "tag_id": 5,
+      "src": 0,
+      "dst": 6,
+      "label_id": 96
+    },
+    {
+      "tag_id": 6,
+      "src": 0,
+      "dst": 7,
+      "label_id": 88
+    },
+    {
+      "tag_id": 7,
+      "src": 0,
+      "dst": 8,
+      "label_id": 75
+    },
+    {
+      "tag_id": 8,
+      "src": 0,
+      "dst": 9,
+      "label_id": 87
+    },
+    {
+      "tag_id": 9,
+      "src": 0,
+      "dst": 10,
+      "label_id": 82
+    },
+    {
+      "tag_id": 10,
+      "src": 0,
+      "dst": 11,
+      "label_id": 87
+    },
+    {
+      "tag_id": 11,
+      "src": 0,
+      "dst": 12,
+      "label_id": 96
+    },
+    {
+      "tag_id": 12,
+      "src": 1,
+      "dst": 8,
+      "label_id": 325
+    },
+    {
+      "tag_id": 13,
+      "src": 1,
+      "dst": 13,
+      "label_id": 336
+    },
+    {
+      "tag_id": 14,
+      "src": 2,
+      "dst": 3,
+      "label_id": 96
+    },
+    {
+      "tag_id": 15,
+      "src": 2,
+      "dst": 10,
+      "label_id": 82
+    },
+    {
+      "tag_id": 16,
+      "src": 3,
+      "dst": 4,
+      "label_id": 534
+    },
+    {
+      "tag_id": 17,
+      "src": 3,
+      "dst": 7,
+      "label_id": 538
+    },
+    {
+      "tag_id": 18,
+      "src": 3,
+      "dst": 8,
+      "label_id": 525
+    },
+    {
+      "tag_id": 19,
+      "src": 3,
+      "dst": 10,
+      "label_id": 532
+    },
+    {
+      "tag_id": 20,
+      "src": 4,
+      "dst": 5,
+      "label_id": 240
+    },
+    {
+      "tag_id": 21,
+      "src": 4,
+      "dst": 10,
+      "label_id": 232
+    },
+    {
+      "tag_id": 22,
+      "src": 5,
+      "dst": 9,
+      "label_id": 387
+    },
+    {
+      "tag_id": 23,
+      "src": 5,
+      "dst": 12,
+      "label_id": 396
+    },
+    {
+      "tag_id": 24,
+      "src": 5,
+      "dst": 14,
+      "label_id": 391
+    },
+    {
+      "tag_id": 25,
+      "src": 6,
+      "dst": 15,
+      "label_id": 525
+    },
+    {
+      "tag_id": 26,
+      "src": 7,
+      "dst": 8,
+      "label_id": 325
+    },
+    {
+      "tag_id": 27,
+      "src": 7,
+      "dst": 11,
+      "label_id": 337
+    },
+    {
+      "tag_id": 28,
+      "src": 8,
+      "dst": 11,
+      "label_id": 12
+    },
+    {
+      "tag_id": 29,
+      "src": 8,
+      "dst": 13,
+      "label_id": 11
+    },
+    {
+      "tag_id": 30,
+      "src": 9,
+      "dst": 10,
+      "label_id": 307
+    },
+    {
+      "tag_id": 31,
+      "src": 9,
+      "dst": 14,
+      "label_id": 316
+    },
+    {
+      "tag_id": 32,
+      "src": 10,
+      "dst": 14,
+      "label_id": 191
+    },
+    {
+      "tag_id": 33,
+      "src": 12,
+      "dst": 15,
+      "label_id": 525
+    }
+  ]
+}

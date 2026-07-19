@@ -1,0 +1,141 @@
+{
+  "vertices": [
+    {
+      "id": 1,
+      "label": "v19"
+    },
+    {
+      "id": 2,
+      "label": "v12"
+    },
+    {
+      "id": 3,
+      "label": "v9"
+    },
+    {
+      "id": 4,
+      "label": "v12"
+    },
+    {
+      "id": 5,
+      "label": "v3"
+    },
+    {
+      "id": 6,
+      "label": "v11"
+    },
+    {
+      "id": 7,
+      "label": "v11"
+    },
+    {
+      "id": 8,
+      "label": "v22"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "label": "e0_v19_v12",
+      "src": 1,
+      "dst": 2
+    },
+    {
+      "id": 2,
+      "label": "e0_v19_v9",
+      "src": 1,
+      "dst": 3
+    },
+    {
+      "id": 3,
+      "label": "e0_v19_v12",
+      "src": 1,
+      "dst": 4
+    },
+    {
+      "id": 4,
+      "label": "e0_v9_v12",
+      "src": 3,
+      "dst": 4
+    },
+    {
+      "id": 5,
+      "label": "e0_v9_v3",
+      "src": 3,
+      "dst": 5
+    },
+    {
+      "id": 6,
+      "label": "e0_v9_v11",
+      "src": 3,
+      "dst": 6
+    },
+    {
+      "id": 7,
+      "label": "e0_v9_v11",
+      "src": 3,
+      "dst": 7
+    },
+    {
+      "id": 8,
+      "label": "e0_v9_v22",
+      "src": 3,
+      "dst": 8
+    },
+    {
+      "id": 9,
+      "label": "e0_v12_v3",
+      "src": 4,
+      "dst": 5
+    },
+    {
+      "id": 10,
+      "label": "e0_v12_v11",
+      "src": 4,
+      "dst": 6
+    },
+    {
+      "id": 11,
+      "label": "e0_v12_v11",
+      "src": 4,
+      "dst": 7
+    },
+    {
+      "id": 12,
+      "label": "e0_v12_v22",
+      "src": 4,
+      "dst": 8
+    },
+    {
+      "id": 13,
+      "label": "e0_v3_v11",
+      "src": 5,
+      "dst": 6
+    },
+    {
+      "id": 14,
+      "label": "e0_v3_v22",
+      "src": 5,
+      "dst": 8
+    },
+    {
+      "id": 15,
+      "label": "e0_v11_v11",
+      "src": 6,
+      "dst": 7
+    },
+    {
+      "id": 16,
+      "label": "e0_v11_v22",
+      "src": 6,
+      "dst": 8
+    },
+    {
+      "id": 17,
+      "label": "e0_v11_v22",
+      "src": 7,
+      "dst": 8
+    }
+  ],
+  "predicates": []
+}

@@ -15,7 +15,7 @@ dataset=$workspace/datasets/ldbc/sf$sf
 patterns=$workspace/patterns/sql/lsqb
 output_dir=$workspace/catalogs/ldbc/safebound
 output=$output_dir/ldbc_sf$sf.pkl
-log=$workspace/results/safebound/build-logs/ldbc_sf"$sf".log
+log=$workspace/result/baselines/safebound/build-logs/ldbc_sf"$sf".log
 
 mkdir -p "$output_dir"
 
