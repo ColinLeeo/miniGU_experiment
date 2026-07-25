@@ -50,7 +50,6 @@ fn decomp_trace_multiline(text: impl AsRef<str>) {
 use dashmap::DashMap;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
-use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
@@ -61,7 +60,7 @@ use crate::procedures::gcard_query::catalog::{
 };
 use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
-use crate::procedures::gcard_query::flat_graph::FlatGraph;
+use crate::procedures::gcard_query::flat_graph::{FlatGraph, sample_without_replacement};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{
     AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef,
@@ -100,6 +99,7 @@ mod tests {
     use super::*;
     use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
     use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
+    use crate::procedures::gcard_query::flat_graph::FlatGraphBuilder;
 
     fn vertex(id: VertexId, label: &str) -> crate::procedures::gcard_query::types::VertexDef {
         crate::procedures::gcard_query::types::VertexDef {
@@ -120,6 +120,118 @@ mod tests {
             src,
             dst,
         }
+    }
+
+    #[test]
+    fn single_vertex_query_uses_label_cardinality() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.add_vertex(1, "person", vec![]);
+        builder.add_vertex(2, "person", vec![]);
+        builder.add_vertex(3, "person", vec![]);
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                100,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.get_es().unwrap(), 3.0);
+    }
+
+    #[test]
+    fn single_vertex_query_applies_predicate_selectivity() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![crate::procedures::gcard_query::types::PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "age".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::Int64(Some(20)),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["age".to_string()]);
+        builder.add_vertex(1, "person", vec![ScalarValue::Int64(Some(20))]);
+        builder.add_vertex(2, "person", vec![ScalarValue::Int64(Some(20))]);
+        builder.add_vertex(3, "person", vec![ScalarValue::Int64(Some(30))]);
+        builder.add_vertex(4, "person", vec![ScalarValue::Int64(Some(30))]);
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                100,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.get_es().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn single_edge_query_builds_and_reduces_directly() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "a"), vertex(2, "b")],
+            edges: vec![edge(10, "e", 1, 2)],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+        let path_key = make_alt_key(&["a".to_string(), "b".to_string()], &["e".to_string()]);
+        let mut endpoints = HashMap::new();
+        endpoints.insert(
+            "a".to_string(),
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(&[2, 1], 0.01, false)
+                    .unwrap(),
+            },
+        );
+        endpoints.insert(
+            "b".to_string(),
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(&[1, 1, 1], 0.01, false)
+                    .unwrap(),
+            },
+        );
+        let mut catalog = DegreeSeqGraphCompressed::new();
+        catalog.edge_set_to_endpoints.insert(path_key, endpoints);
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &catalog,
+                None,
+                100,
+                &PredicateApplyType::IGNORE,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].0.get_es().unwrap(), 3.0);
     }
 
     #[test]
@@ -2941,6 +3053,54 @@ impl QueryGraph {
             DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
         > = GLOBAL_FILTERED_POOL_CACHE.clone();
 
+        // A one-vertex query has no path to decompose. Represent its label
+        // cardinality (and optional predicate selectivity) as a unary PCF so
+        // it can use the same AbstractGraph reduction/result-selection path
+        // as larger queries.
+        if self.inner.edges.is_empty() {
+            if self.inner.vertices.len() != 1 {
+                return Err(GCardError::InvalidState(format!(
+                    "edge-free query must contain exactly one vertex, found {}",
+                    self.inner.vertices.len()
+                )));
+            }
+            let vertex = self.inner.vertices.values().next().unwrap();
+            let flat_graph = flat_graph.ok_or_else(|| {
+                GCardError::InvalidState(
+                    "single-vertex query requires FlatGraph statistics".to_string(),
+                )
+            })?;
+            let base = flat_graph.vertex_count_by_label(&vertex.label) as f64;
+            let selectivity = if matches!(predicate_apply_type, PredicateApplyType::IGNORE) {
+                1.0
+            } else {
+                vertex.predicates.iter().fold(1.0, |acc, predicate| {
+                    acc * Self::estimate_selectivity_from_stats(
+                        flat_graph.vertex_column_stats(&vertex.label, &predicate.property),
+                        &predicate.op,
+                        &predicate.value,
+                    )
+                })
+            };
+            let estimated = (base * selectivity).ceil() as u64;
+            let local_pcf = if estimated == 0 {
+                // `Pcf::empty()` is a safe algebra placeholder with one
+                // cumulative row, so use an actual zero-row unary factor for
+                // a label/predicate combination estimated to be empty.
+                Pcf {
+                    constants: vec![0.0],
+                    right_interval_edges: vec![0.0],
+                    cumulative_rows: vec![0.0],
+                }
+            } else {
+                Pcf::from_degree_sequence(&[estimated], 0.01, false)?
+            };
+            let mut abstract_graph = AbstractGraph::new();
+            abstract_graph.add_vertex(vertex.clone());
+            abstract_graph.add_local_pcf(vertex.id, local_pcf);
+            return Ok(vec![(abstract_graph, 0)]);
+        }
+
         if decomp_trace_enabled() {
             decomp_trace_line("==== GCARD decomposition trace begin ====");
             decomp_trace_line(format!(
@@ -4438,14 +4598,7 @@ impl QueryGraph {
                 (0.0, 0, 0.0, 0.0, 0.0, 0, true, true)
             } else {
                 let mut rng = rand::thread_rng();
-                let starts = if pool.len() <= sample_size {
-                    pool.as_ref().clone()
-                } else {
-                    let mut buf = pool.as_ref().clone();
-                    buf.partial_shuffle(&mut rng, sample_size);
-                    buf.truncate(sample_size);
-                    buf
-                };
+                let starts = sample_without_replacement(pool.as_ref(), sample_size, &mut rng);
                 let stage2 = self.run_walk_batch(flat_graph, compiled, &starts, pred_cache);
                 let cond = if stage2.sum_struct_weight > 0.0 {
                     stage2.sum_pred_weight / stage2.sum_struct_weight
@@ -5728,10 +5881,8 @@ impl QueryGraph {
                 let chosen_indices: Vec<usize> = if k == degree {
                     (0..degree).collect()
                 } else {
-                    let mut idx: Vec<usize> = (0..degree).collect();
-                    idx.partial_shuffle(rng, k);
-                    idx.truncate(k);
-                    idx
+                    let indices: Vec<usize> = (0..degree).collect();
+                    sample_without_replacement(&indices, k, rng)
                 };
 
                 let mut sum_s = 0.0;

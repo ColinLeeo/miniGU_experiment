@@ -41,6 +41,19 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use update::{PendingChanges, PendingEdge};
 
+pub(crate) fn sample_without_replacement<T: Clone, R: Rng + ?Sized>(
+    values: &[T],
+    amount: usize,
+    rng: &mut R,
+) -> Vec<T> {
+    if values.len() <= amount {
+        return values.to_vec();
+    }
+    let mut buf = values.to_vec();
+    let (selected, _) = buf.partial_shuffle(rng, amount);
+    selected.to_vec()
+}
+
 // ── Reverse-lookup metadata stored per edge ───────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,13 +298,7 @@ impl FlatGraph {
         rng: &mut R,
     ) -> Vec<VertexId> {
         let vids = self.all_vertex_ids_by_label(label);
-        if vids.len() <= n {
-            return vids.to_vec();
-        }
-        let mut buf = vids.to_vec();
-        buf.partial_shuffle(rng, n);
-        buf.truncate(n);
-        buf
+        sample_without_replacement(vids, n, rng)
     }
 
     /// Label name for a vertex, or `None` if the vertex is unknown.
@@ -878,6 +885,9 @@ impl FlatGraph {
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
     use tempfile::tempdir;
 
     use super::FlatGraphBuilder;
@@ -902,5 +912,25 @@ mod tests {
             restored.edge_endpoints(10),
             Some((1, "person", 2, "person", "knows"))
         );
+    }
+
+    #[test]
+    fn sample_vertices_uses_partial_shuffle_selected_partition() {
+        let mut builder = FlatGraphBuilder::new();
+        for vid in 0..1_000 {
+            builder.add_vertex(vid, "person", vec![]);
+        }
+        let graph = builder.build();
+
+        let mut expected_buf: Vec<u64> = (0..1_000).collect();
+        let mut expected_rng = StdRng::seed_from_u64(42);
+        let (selected, _) = expected_buf.partial_shuffle(&mut expected_rng, 10);
+        let expected = selected.to_vec();
+
+        let mut actual_rng = StdRng::seed_from_u64(42);
+        let actual = graph.sample_vertices_by_label("person", 10, &mut actual_rng);
+
+        assert_eq!(actual, expected);
+        assert_ne!(actual, (0..10).collect::<Vec<_>>());
     }
 }

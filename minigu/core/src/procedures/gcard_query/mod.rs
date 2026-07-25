@@ -525,7 +525,10 @@ pub fn build_procedure() -> Procedure {
                             functional_tag,
                         );
                     }
-                    if es > 1.0 {
+                    // Cardinality one is a valid result for singleton and
+                    // highly selective single-edge queries. Only discard the
+                    // zero-PCF placeholder and other non-positive estimates.
+                    if es >= 1.0 {
                         if es < min_nonzero_es {
                             min_nonzero_es = es;
                             score_of_min_es = Some(score);
