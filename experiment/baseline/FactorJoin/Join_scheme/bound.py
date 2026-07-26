@@ -244,7 +244,7 @@ class Bound_ensemble:
                         break
             cardinalities[group] = np.asarray(cardinalities[group])
 
-        optimal_order = list(equivalent_group.keys())
+        optimal_order = sorted(equivalent_group.keys())
         for i in range(len(optimal_order)):
             min_idx = i
             for j in range(i + 1, len(optimal_order)):
@@ -427,7 +427,7 @@ class Bound_ensemble:
         right_variables = right_bound_factor.variables
         new_variables = copy.deepcopy(right_variables)
         res = right_bound_factor.tables_size
-        for key_group in equivalent_key_group:
+        for key_group in sorted(equivalent_key_group):
             all_pdfs = [self._factor_key_pdf(cond_factor_left, key) * cond_factor_left.table_len * self._factor_key_na(cond_factor_left, key)
                         for key in equivalent_key_group[key_group]["left"]]
             all_bin_modes = [bin_mode_left[key] for key in equivalent_key_group[key_group]["left"]]
@@ -455,7 +455,7 @@ class Bound_ensemble:
             new_union_key_group[key_group] = [key_group]
             new_na_values[key_group] = 1
 
-        for group in union_key_group:
+        for group in sorted(union_key_group):
             if group not in new_union_key_group:
                 new_union_key_group[group] = []
             for table, keys in union_key_group[group]:
@@ -481,7 +481,7 @@ class Bound_ensemble:
         """
 
         actual_join_cond = []
-        for cond in join_cond[left_table]:
+        for cond in sorted(join_cond[left_table]):
             if cond in right_bound_factor.join_cond:
                 actual_join_cond.append(cond)
         equivalent_key_group = dict()
@@ -528,7 +528,7 @@ class Bound_ensemble:
                     else:
                         equivalent_key_group[key_group]["right"] = [key_right]
 
-            for group in union_key_group_set:
+            for group in sorted(union_key_group_set):
                 if group in equivalent_key_group:
                     new_left_key = []
                     for key in table_key_equivalent_group[left_table][group]:
@@ -560,8 +560,8 @@ class Bound_ensemble:
 
         else:
             common_key_group = table_equivalent_group[left_table].intersection(right_bound_factor.equivalent_groups)
-            common_key_group = list(common_key_group)[0]
-            for group in union_key_group_set:
+            common_key_group = sorted(common_key_group)[0]
+            for group in sorted(union_key_group_set):
                 if group == common_key_group:
                     equivalent_key_group[group] = dict()
                     equivalent_key_group[group]["left"] = table_key_equivalent_group[left_table][group]
@@ -587,7 +587,7 @@ class Bound_ensemble:
         union_key_group_set = table_equivalent_group[left_table].union(set(right_union_key_group.keys()))
         union_key_group = copy.deepcopy(right_union_key_group)
         all_join_predicates = []
-        for group in union_key_group_set:
+        for group in sorted(union_key_group_set):
             if group in common_key_group:
                 left_key = table_key_equivalent_group[left_table][group][0]
                 left_key = left_table + "." + left_key.split(".")[-1]
@@ -622,7 +622,7 @@ class Bound_ensemble:
         res = cond_factor_right.table_len
         new_na_values = dict()
         new_variables = dict()
-        for key_group in equivalent_key_group:
+        for key_group in sorted(equivalent_key_group):
             #if len(equivalent_key_group[key_group][left_table]) > 1:
              #   print(len(equivalent_key_group[key_group][left_table]), sub_plan_query_str)
             #if len(equivalent_key_group[key_group][right_table]) > 1:
@@ -642,7 +642,7 @@ class Bound_ensemble:
             new_union_key_group[key_group] = [key_group]
             new_na_values[key_group] = 1.0
 
-        for group in union_key_group:
+        for group in sorted(union_key_group):
             if group not in new_union_key_group:
                 new_union_key_group[group] = []
             for table, keys in union_key_group[group]:
@@ -662,7 +662,7 @@ class Bound_ensemble:
             Get the join keys between two tables
         """
         actual_join_cond = []
-        for cond in join_cond[left_table]:
+        for cond in sorted(join_cond[left_table]):
             if cond in join_cond[right_table]:
                 actual_join_cond.append(cond)
         equivalent_key_group = dict()
@@ -709,7 +709,7 @@ class Bound_ensemble:
                     else:
                         equivalent_key_group[key_group][right_table] = [key_right]
 
-            for group in union_key_group_set:
+            for group in sorted(union_key_group_set):
                 if group in equivalent_key_group:
                     new_left_key = []
                     for key in table_key_equivalent_group[left_table][group]:
@@ -740,8 +740,8 @@ class Bound_ensemble:
 
         else:
             common_key_group = table_equivalent_group[left_table].intersection(table_equivalent_group[right_table])
-            common_key_group = list(common_key_group)[0]
-            for group in union_key_group_set:
+            common_key_group = sorted(common_key_group)[0]
+            for group in sorted(union_key_group_set):
                 if group == common_key_group:
                     equivalent_key_group[group] = dict()
                     equivalent_key_group[group][left_table] = table_key_equivalent_group[left_table][group]
@@ -765,7 +765,7 @@ class Bound_ensemble:
         union_key_group_set = table_equivalent_group[left_table].union(table_equivalent_group[right_table])
         union_key_group = dict()
         all_join_predicates = []
-        for group in union_key_group_set:
+        for group in sorted(union_key_group_set):
             if group in common_key_group:
                 left_key = table_key_equivalent_group[left_table][group][0]
                 left_key = left_table + "." + left_key.split(".")[-1]

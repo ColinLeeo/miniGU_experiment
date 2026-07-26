@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 REPRO_DIR="$ROOT/experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1"
-VENV="${VENV:-/home/zxz/miniGU/experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/env}"
+VENV="${VENV:-$REPRO_DIR/env}"
 
 if [[ ! -f "$VENV/bin/activate" ]]; then
   echo "BayesCard venv not found: $VENV" >&2

@@ -13,7 +13,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 FACTORJOIN_DIR = ROOT / "experiment/baseline/FactorJoin"
-DEFAULT_DATA_PATH = "/home/zxz/miniGU/experiment/datasets/ldbc/sf1/{}.csv"
+DEFAULT_DATA_PATH = str(ROOT / "experiment/datasets/ldbc/sf1/{}.csv")
+DEFAULT_PATTERN_DIR = ROOT / "experiment/patterns/gcard/lsqb_glogs_with_pred_10"
 
 sys.path.insert(0, str(FACTORJOIN_DIR))
 
@@ -51,7 +52,24 @@ def _alias_sort_key(name):
 
 
 def _joined_name(names):
-    return " ".join(sorted(names, key=_alias_sort_key))
+    # FactorJoin sorts subplan table names lexicographically before cache lookup.
+    return " ".join(sorted(names))
+
+
+def _partitioned_edge_table(edge, vertices):
+    label = edge["label"].lower()
+    src_table = vertices[edge["src"]]
+    dst_table = vertices[edge["dst"]]
+    if not (
+        label.startswith("e")
+        and label[1:].isdigit()
+        and src_table.startswith("v")
+        and src_table[1:].isdigit()
+        and dst_table.startswith("v")
+        and dst_table[1:].isdigit()
+    ):
+        raise ValueError(f"Cannot derive partitioned edge table for {edge}")
+    return f"p{label}_{src_table[1:]}_{dst_table[1:]}"
 
 
 def build_left_deep_subplans(aliases, adjacency):
@@ -79,7 +97,7 @@ def build_left_deep_subplans(aliases, adjacency):
     return subplans
 
 
-def build_factorjoin_query(pattern_path):
+def build_factorjoin_query(pattern_path, partitioned_edges=False):
     pattern = json.loads(Path(pattern_path).read_text(encoding="utf-8"))
     vertices = {v["id"]: v["label"].lower() for v in pattern["vertices"]}
     edges = pattern["edges"]
@@ -95,6 +113,8 @@ def build_factorjoin_query(pattern_path):
     for edge in edges:
         alias = f"e{edge['id']}"
         table = edge["label"].lower()
+        if partitioned_edges:
+            table = _partitioned_edge_table(edge, vertices)
         alias_to_table[alias] = table
         adjacency.setdefault(alias, set())
         from_terms.append(f"{table} AS {alias}")
@@ -176,9 +196,13 @@ class AliasBN:
         return self._bn.init_inference_method()
 
     def query_id_prob(self, query, id_attrs, *args, **kwargs):
-        physical_query = {
-            _physical_attr(self.physical_table, attr): value for attr, value in query.items()
-        }
+        physical_query = {}
+        attr_types = getattr(self._bn, "attr_type", {})
+        for attr, value in query.items():
+            physical_attr = _physical_attr(self.physical_table, attr)
+            if attr_types.get(physical_attr) == "continuous" and isinstance(value, list) and len(value) == 1:
+                value = value[0]
+            physical_query[physical_attr] = value
         physical_ids = [_physical_attr(self.physical_table, attr) for attr in id_attrs]
         returned_ids, probs = self._bn.query_id_prob(physical_query, physical_ids, *args, **kwargs)
         alias_ids = [_alias_attr(self.alias, attr) for attr in returned_ids]
@@ -270,10 +294,18 @@ def make_alias_model(model, context):
     return alias_model
 
 
-def estimate_factorjoin_query(model, context):
-    alias_model = make_alias_model(model, context)
+def prepare_factorjoin_query(model, context):
+    return make_alias_model(model, context)
+
+
+def estimate_prepared_factorjoin_query(alias_model, context):
     bounds = alias_model.get_cardinality_bound_all(context["sql"], context["subplans"])
     return bounds[-1] if bounds else None
+
+
+def estimate_factorjoin_query(model, context):
+    alias_model = prepare_factorjoin_query(model, context)
+    return estimate_prepared_factorjoin_query(alias_model, context)
 
 
 def read_truth(path):
@@ -282,6 +314,10 @@ def read_truth(path):
         for row in csv.DictReader(f):
             rows.append(row)
     return rows
+
+
+def resolve_pattern_path(row, pattern_dir):
+    return Path(pattern_dir) / row["group"] / f"{row['variant']}.json"
 
 
 def model_path(model_dir, bucket_method, n_bins):
@@ -328,23 +364,28 @@ def query(args):
         writer.writerow(["query_file", "prediction", "latency_s", "status", "notes"])
         for row in truth_rows:
             query_file = Path(row["sql_path"]).name
+            started = None
             try:
-                context = build_factorjoin_query(row["gcard_path"])
+                context = build_factorjoin_query(resolve_pattern_path(row, args.pattern_dir))
+                alias_model = prepare_factorjoin_query(model, context)
                 started = time.perf_counter()
-                pred = estimate_factorjoin_query(model, context)
-                note_prefix = "alias_subplan_self_join" if context["has_self_join"] else "alias_subplan"
+                pred = estimate_prepared_factorjoin_query(alias_model, context)
                 elapsed = time.perf_counter() - started
+                note_prefix = "alias_subplan_self_join" if context["has_self_join"] else "alias_subplan"
+                note_prefix += f";catalog={Path(args.model_path).name}"
+                note_prefix += ";latency_scope=bound_inference_only"
                 if pred is None:
-                    writer.writerow([query_file, 1.0, f"{elapsed:.6f}", "ok_floor", f"{note_prefix}: FactorJoin returned None; floored to 1.0"])
+                    writer.writerow([query_file, "1", f"{elapsed:.6f}", "failed_non_finite", f"{note_prefix}: FactorJoin returned None; accuracy fallback=1"])
                 elif not math.isfinite(float(pred)):
-                    writer.writerow([query_file, 1.0, f"{elapsed:.6f}", "ok_floor", f"{note_prefix}: FactorJoin returned {pred}; floored to 1.0"])
+                    writer.writerow([query_file, "1", f"{elapsed:.6f}", "failed_non_finite", f"{note_prefix}: FactorJoin returned {pred}; accuracy fallback=1"])
                 elif pred <= 0:
-                    writer.writerow([query_file, 1.0, f"{elapsed:.6f}", "ok_floor", f"{note_prefix}: FactorJoin returned {pred}; floored to 1.0"])
+                    writer.writerow([query_file, "1", f"{elapsed:.6f}", "failed_non_finite", f"{note_prefix}: FactorJoin returned {pred}; accuracy fallback=1"])
                 else:
                     writer.writerow([query_file, pred, f"{elapsed:.6f}", "ok", note_prefix])
             except Exception as exc:
-                elapsed = time.perf_counter() - started if 'started' in locals() else 0.0
-                writer.writerow([query_file, "", f"{elapsed:.6f}", f"failed: {type(exc).__name__}: {exc}", ""])
+                elapsed = time.perf_counter() - started if started is not None else ""
+                latency = f"{elapsed:.6f}" if elapsed != "" else ""
+                writer.writerow([query_file, "1", latency, f"failed: {type(exc).__name__}: {exc}", "accuracy fallback=1"])
     print(f"Saved FactorJoin estimates: {output}")
     print(f"Queries: {len(truth_rows)}")
 
@@ -357,8 +398,8 @@ def main():
     b.add_argument("--data-path", default=DEFAULT_DATA_PATH)
     b.add_argument("--model-dir", required=True)
     b.add_argument("--n-dim-dist", type=int, default=2)
-    b.add_argument("--n-bins", type=int, default=200)
-    b.add_argument("--bucket-method", default="fixed_start_key")
+    b.add_argument("--n-bins", type=int, default=100)
+    b.add_argument("--bucket-method", default="greedy")
     b.add_argument("--save-bucket-bins", action="store_true")
     b.add_argument("--get-bin-means", action="store_true")
     b.add_argument("--seed", type=int, default=0)
@@ -366,6 +407,7 @@ def main():
 
     q = sub.add_parser("query")
     q.add_argument("--truth", required=True)
+    q.add_argument("--pattern-dir", default=str(DEFAULT_PATTERN_DIR))
     q.add_argument("--model-path", required=True)
     q.add_argument("--output-csv", required=True)
 

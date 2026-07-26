@@ -17,6 +17,12 @@ baseline/**/target/
 baseline/**/logs/
 baseline/**/env/
 baseline/**/repro_*/
+
+# Keep the BayesCard LDBC repro code tracked; generated artifacts stay ignored.
+!baseline/SafeBound/repro_bayescard_ldbc_sf1/
+!baseline/SafeBound/repro_bayescard_ldbc_sf1/README.md
+!baseline/SafeBound/repro_bayescard_ldbc_sf1/scripts/
+!baseline/SafeBound/repro_bayescard_ldbc_sf1/scripts/*.py
 baseline/**/Data/
 baseline/**/StatObjects/
 baseline/**/models/
@@ -32,6 +38,8 @@ baseline/**/.git/
 ._*
 *.py[cod]
 *.ipynb_checkpoints
+
+
 
 # large generated data/model files
 *.csv
