@@ -32,17 +32,6 @@ target/
 **/.checkpoint/
 *.wal
 
-# Large local experiment data and generated runtime catalogs
-experiment/dataset/
-experiment/datasets/
-experiment/run_tmp/
-
-# BayesCard LDBC repro generated artifacts
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/env/
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/prepared_csv/
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/hdf_*/
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/models_*/
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/logs/
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/results/*.csv
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/results/*.pkl
-experiment/baseline/SafeBound/repro_bayescard_ldbc_sf1/results/*.log
+# Paper experiment orchestration lives in the top-level Gcard Artifact repo.
+# Keep local historical files available without publishing them from miniGU.
+/experiment/

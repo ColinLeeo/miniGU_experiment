@@ -1,1 +1,0 @@
-select count(*) from Person v0, Person v1, Person v2, Tag v3, Person_knows_Person e0, Person_knows_Person e1, Person_hasInterest_Tag e2, Person_knows_Person e3 where e0.src = v0.id and e0.dst = v1.id and e1.src = v1.id and e1.dst = v2.id and e2.src = v2.id and e2.dst = v3.id and e3.src = v0.id and e3.dst = v2.id

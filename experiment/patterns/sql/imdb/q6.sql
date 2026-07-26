@@ -1,1 +1,0 @@
-select count(*) from person v0, castInfoVertex v1, title v2, keyword v3, castInfoVertex_castInfoEdge_person e0, castInfoVertex_castInfoEdge_title e1, title_keywordEdge_keyword e2 where e0.src = v1.id and e0.dst = v0.id and e1.src = v1.id and e1.dst = v2.id and e2.src = v2.id and e2.dst = v3.id

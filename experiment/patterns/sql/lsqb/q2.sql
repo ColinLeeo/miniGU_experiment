@@ -1,1 +1,0 @@
-select count(*) from Person v0, Person v1, Post v2, Comment v3, Comment_hasCreator_Person e0, Person_knows_Person e1, Post_hasCreator_Person e2, Comment_replyOf_Post e3 where e0.src = v3.id and e0.dst = v0.id and e1.src = v0.id and e1.dst = v1.id and e2.src = v2.id and e2.dst = v1.id and e3.src = v3.id and e3.dst = v2.id

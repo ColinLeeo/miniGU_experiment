@@ -1,1 +1,0 @@
-select count(*) from Person v0, Person v1, Comment v2, City v3, Person_isLocatedIn_City e0, Person_isLocatedIn_City e1, Person_likes_Comment e2, Comment_hasCreator_Person e3 where e0.src = v0.id and e0.dst = v3.id and e1.src = v1.id and e1.dst = v3.id and e2.src = v1.id and e2.dst = v2.id and e3.src = v2.id and e3.dst = v0.id

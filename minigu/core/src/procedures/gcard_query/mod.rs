@@ -339,6 +339,7 @@ pub fn build_procedure() -> Procedure {
             .gcard_flat_graph()
             .and_then(|arc| std::sync::Arc::downcast::<FlatGraphType>(arc).ok());
 
+        let inference_nanos: u128;
         let build_start = Instant::now();
         let flat_graph_ref = flat_graph_arc.as_deref().ok_or_else(|| {
             ExecutionError::Custom(Box::new(io::Error::new(
@@ -386,6 +387,8 @@ pub fn build_procedure() -> Procedure {
                     || decomp_trace_log_path.is_some();
                 let print_alpha_beta =
                     print_plan || std::env::var_os("GCARD_PRINT_ALPHA_BETA").is_some();
+                let suppress_candidate_logs =
+                    std::env::var_os("GCARD_SUPPRESS_CANDIDATE_LOGS").is_some();
                 let mut min_es_alpha_beta_counts: Option<AlphaBetaCallCounts> = None;
                 let cand_query_stem = Path::new(query_json_path.as_str())
                     .file_stem()
@@ -436,44 +439,45 @@ pub fn build_procedure() -> Procedure {
                     if GCARD_VERBOSE.load(Ordering::Relaxed) {
                         println!("es: {}", es);
                     }
-                    // Per-candidate abstract graph dump so the experiment can see what
-                    // each spanning tree contributes (including ones pruned by the min).
-                    let total_ae = abs.edges.len();
-                    let n1_ae = abs
-                        .edges
-                        .values()
-                        .filter(|e| {
-                            e.functional
+                    if !suppress_candidate_logs {
+                        // Per-candidate abstract graph dump so diagnostics can inspect every
+                        // spanning tree. Formal inference timing suppresses this output.
+                        let total_ae = abs.edges.len();
+                        let n1_ae = abs
+                            .edges
+                            .values()
+                            .filter(|e| {
+                                e.functional
                                 != crate::procedures::gcard_query::types::FunctionalDirection::None
-                        })
-                        .count();
-                    println!(
-                        "[gcard-cand] query={} idx={}/{} score={} card={} raw_card={} closure_factor={:.9} n1_edges={}/{}",
-                        cand_query_stem,
-                        idx + 1,
-                        total_count,
-                        score,
-                        es.ceil(),
-                        raw_es.ceil(),
-                        closure_factor,
-                        n1_ae,
-                        total_ae
-                    );
-                    let mut ae_ids: Vec<_> = abs.edges.keys().copied().collect();
-                    ae_ids.sort_unstable();
-                    for ae_id in ae_ids {
-                        let edge = &abs.edges[&ae_id];
-                        let src_label = abs
-                            .vertices
-                            .get(&edge.src)
-                            .map(|v| v.label.as_str())
-                            .unwrap_or("?");
-                        let dst_label = abs
-                            .vertices
-                            .get(&edge.dst)
-                            .map(|v| v.label.as_str())
-                            .unwrap_or("?");
-                        let functional_tag = match edge.functional {
+                            })
+                            .count();
+                        println!(
+                            "[gcard-cand] query={} idx={}/{} score={} card={} raw_card={} closure_factor={:.9} n1_edges={}/{}",
+                            cand_query_stem,
+                            idx + 1,
+                            total_count,
+                            score,
+                            es.ceil(),
+                            raw_es.ceil(),
+                            closure_factor,
+                            n1_ae,
+                            total_ae
+                        );
+                        let mut ae_ids: Vec<_> = abs.edges.keys().copied().collect();
+                        ae_ids.sort_unstable();
+                        for ae_id in ae_ids {
+                            let edge = &abs.edges[&ae_id];
+                            let src_label = abs
+                                .vertices
+                                .get(&edge.src)
+                                .map(|v| v.label.as_str())
+                                .unwrap_or("?");
+                            let dst_label = abs
+                                .vertices
+                                .get(&edge.dst)
+                                .map(|v| v.label.as_str())
+                                .unwrap_or("?");
+                            let functional_tag = match edge.functional {
                             crate::procedures::gcard_query::types::FunctionalDirection::None => {
                                 "none"
                             }
@@ -487,43 +491,44 @@ pub fn build_procedure() -> Procedure {
                                 "both"
                             }
                         };
-                        let n1 = edge.functional
-                            != crate::procedures::gcard_query::types::FunctionalDirection::None;
-                        // Interleave path_vertices and original_edge_ids so intermediate
-                        // hops are visible, resolving each id to its query-graph label.
-                        let mut chain = String::new();
-                        for (i, vid) in edge.path_vertices.iter().enumerate() {
-                            if i > 0 {
-                                let edge_label = edge
-                                    .original_edge_ids
-                                    .get(i - 1)
-                                    .and_then(|eid| query_graph.inner.edges.get(eid))
-                                    .map(|e| e.label.as_str())
+                            let n1 = edge.functional
+                                != crate::procedures::gcard_query::types::FunctionalDirection::None;
+                            // Interleave path_vertices and original_edge_ids so intermediate
+                            // hops are visible, resolving each id to its query-graph label.
+                            let mut chain = String::new();
+                            for (i, vid) in edge.path_vertices.iter().enumerate() {
+                                if i > 0 {
+                                    let edge_label = edge
+                                        .original_edge_ids
+                                        .get(i - 1)
+                                        .and_then(|eid| query_graph.inner.edges.get(eid))
+                                        .map(|e| e.label.as_str())
+                                        .unwrap_or("?");
+                                    chain.push_str(&format!(" -[{}]-> ", edge_label));
+                                }
+                                let vlabel = query_graph
+                                    .inner
+                                    .vertices
+                                    .get(vid)
+                                    .map(|v| v.label.as_str())
                                     .unwrap_or("?");
-                                chain.push_str(&format!(" -[{}]-> ", edge_label));
+                                chain.push_str(vlabel);
                             }
-                            let vlabel = query_graph
-                                .inner
-                                .vertices
-                                .get(vid)
-                                .map(|v| v.label.as_str())
-                                .unwrap_or("?");
-                            chain.push_str(vlabel);
+                            println!(
+                                "  ae{}: {}({}) -> {}({}) chain={} sel={:.4} src_rows={:.0} dst_rows={:.0} n1={} functional={}",
+                                ae_id,
+                                edge.src,
+                                src_label,
+                                edge.dst,
+                                dst_label,
+                                chain,
+                                edge.selectivity,
+                                edge.src_pcf.get_num_rows(),
+                                edge.dst_pcf.get_num_rows(),
+                                n1,
+                                functional_tag,
+                            );
                         }
-                        println!(
-                            "  ae{}: {}({}) -> {}({}) chain={} sel={:.4} src_rows={:.0} dst_rows={:.0} n1={} functional={}",
-                            ae_id,
-                            edge.src,
-                            src_label,
-                            edge.dst,
-                            dst_label,
-                            chain,
-                            edge.selectivity,
-                            edge.src_pcf.get_num_rows(),
-                            edge.dst_pcf.get_num_rows(),
-                            n1,
-                            functional_tag,
-                        );
                     }
                     // Cardinality one is a valid result for singleton and
                     // highly selective single-edge queries. Only discard the
@@ -559,23 +564,25 @@ pub fn build_procedure() -> Procedure {
                     }
                     None => (0, 0),
                 };
-                println!(
-                    "[gcard-cand-min] query={} selected={} score={} card={} total_candidates={} \
-                     selected_n1_edges={}/{} n1_fast_path={} closure_factor={:.9}",
-                    cand_query_stem,
-                    index_of_min_es
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "none".to_string()),
-                    score_of_min_es
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "0".to_string()),
-                    cardinality_value.ceil(),
-                    total_count,
-                    sel_n1,
-                    sel_total,
-                    sel_n1 > 0,
-                    closure_factor_of_min_es.unwrap_or(1.0),
-                );
+                if !suppress_candidate_logs {
+                    println!(
+                        "[gcard-cand-min] query={} selected={} score={} card={} total_candidates={} \
+                         selected_n1_edges={}/{} n1_fast_path={} closure_factor={:.9}",
+                        cand_query_stem,
+                        index_of_min_es
+                            .map(|i| i.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        score_of_min_es
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "0".to_string()),
+                        cardinality_value.ceil(),
+                        total_count,
+                        sel_n1,
+                        sel_total,
+                        sel_n1 > 0,
+                        closure_factor_of_min_es.unwrap_or(1.0),
+                    );
+                }
                 if let (Some(abs), Some(log_path)) =
                     (&min_es_abstract_graph, decomp_trace_log_path.clone())
                 {
@@ -682,6 +689,8 @@ pub fn build_procedure() -> Procedure {
                     }
                 }
                 let estimate_elapsed = estimate_start.elapsed();
+                // File loading and query parsing happen before this interval.
+                inference_nanos = build_start.elapsed().as_nanos();
                 let is_highest = score_of_min_es.map(|s| s == max_score).unwrap_or(false);
                 let display_index = if is_highest { Some(1) } else { index_of_min_es };
                 let prof_calls = SAMPLING_CALLS.load(Ordering::Relaxed);
@@ -744,6 +753,7 @@ pub fn build_procedure() -> Procedure {
                 cardinality_value
             }
             Err(e) => {
+                inference_nanos = build_start.elapsed().as_nanos();
                 eprintln!(
                     "GCard: unsupported predicate or error, returning 0.0: {}",
                     e
@@ -751,6 +761,14 @@ pub fn build_procedure() -> Procedure {
                 0.0
             }
         };
+        let query_name = Path::new(query_json_path.as_str())
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown");
+        eprintln!(
+            "[gcard-inference] query={}, nanos={}",
+            query_name, inference_nanos
+        );
 
         #[cfg(feature = "profiling")]
         {

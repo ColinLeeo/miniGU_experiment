@@ -1,1 +1,0 @@
-select count(*) from title v0, companyName v1, keyword v2, infoVertex v3, akaTitle v4, title_movieCompanies_companyName e0, title_keywordEdge_keyword e1, title_infoEdge_infoVertex e2, title_akaTitleEdge_akaTitle e3 where e0.src = v0.id and e0.dst = v1.id and e1.src = v0.id and e1.dst = v2.id and e2.src = v0.id and e2.dst = v3.id and e3.src = v0.id and e3.dst = v4.id

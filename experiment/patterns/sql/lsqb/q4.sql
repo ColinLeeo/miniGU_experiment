@@ -1,1 +1,0 @@
-select count(*) from Post v0, Tag v1, Person v2, Comment v3, Person v4, Post_hasTag_Tag e0, Post_hasCreator_Person e1, Comment_replyOf_Post e2, Person_likes_Post e3 where e0.src = v0.id and e0.dst = v1.id and e1.src = v0.id and e1.dst = v2.id and e2.src = v3.id and e2.dst = v0.id and e3.src = v4.id and e3.dst = v0.id
