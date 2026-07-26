@@ -60,6 +60,7 @@ use crate::procedures::gcard_query::catalog::{
 };
 use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
+use crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid;
 use crate::procedures::gcard_query::flat_graph::{FlatGraph, sample_without_replacement};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{
@@ -375,6 +376,46 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].0.get_es().unwrap(), 3.0);
+    }
+
+    #[test]
+    fn compiled_walk_plan_resolves_forward_and_reverse_csr_handles() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.add_vertex(1, "a", vec![]);
+        builder.add_vertex(2, "b", vec![]);
+        builder.add_edge(100, 1, "a", 2, "b", "e", vec![]);
+        let flat_graph = builder.build();
+        let path_query = PathQuery {
+            path_elements: vec![
+                PathElement::Vertex {
+                    label: "a".to_string(),
+                    position: 0,
+                },
+                PathElement::Edge {
+                    label: "e".to_string(),
+                    position: 0,
+                    direction: EdgeDirection::Outgoing,
+                },
+                PathElement::Vertex {
+                    label: "b".to_string(),
+                    position: 1,
+                },
+            ],
+            vertex_predicates: HashMap::new(),
+            edge_predicates: HashMap::new(),
+        };
+
+        let plans = FlatCompiledPathQuery::compile_all(&path_query, &flat_graph).unwrap();
+
+        let FlatCompiledStep::Edge { csr, .. } = &plans[0].right_segment[0] else {
+            panic!("right segment must begin with an edge");
+        };
+        assert_eq!(csr.unwrap().neighbors_slice(1), &[(2, 100)]);
+
+        let FlatCompiledStep::Edge { csr, .. } = &plans[1].left_segment[0] else {
+            panic!("left segment must begin with an edge");
+        };
+        assert_eq!(csr.unwrap().neighbors_slice(2), &[(1, 100)]);
     }
 
     #[test]
@@ -2080,13 +2121,6 @@ impl QueryGraph {
         Ok(queries)
     }
 
-    fn flush_local_cache(local: &HashMap<(u32, u64), bool>, shared: &DashMap<(u32, u64), bool>) {
-        // 线程本地缓存先积累，再批量合并进共享缓存，减少 DashMap 热点竞争。
-        for (&k, &v) in local {
-            shared.entry(k).or_insert(v);
-        }
-    }
-
     fn compare_values(
         &self,
         value: &ScalarValue,
@@ -2999,15 +3033,20 @@ impl QueryGraph {
 ///
 /// Uses string labels instead of numeric `LabelId`s.
 #[derive(Clone)]
-enum FlatCompiledStep {
+enum FlatCompiledStep<'graph> {
     Vertex {
         /// Vertex label (lowercased), used to look up vertex properties.
         label: String,
         predicates: Vec<ResolvedPredicate>,
     },
     Edge {
+        /// Unique within one compiled plan; used as an allocation-free
+        /// neighbor-cache key together with the current vertex ID.
+        cache_slot: usize,
+        /// Pre-resolved immutable adjacency bucket. `None` represents a hop
+        /// absent from the current FlatGraph and therefore an empty row.
+        csr: Option<&'graph CsrAdjWithEid>,
         edge_label: String,
-        direction: EdgeDirection,
         predicates: Vec<ResolvedPredicate>,
     },
 }
@@ -3032,7 +3071,7 @@ enum FlatCompiledStep {
 /// the FlatGraph was built without properties), the predicate is silently
 /// dropped — the walk treats the step as always-passing, giving selectivity
 /// 1.0 for that predicate.
-struct FlatCompiledPathQuery {
+struct FlatCompiledPathQuery<'graph> {
     start_idx: usize,
     /// Label of the start vertex, used for sampling start vertices.
     start_label: String,
@@ -3040,16 +3079,19 @@ struct FlatCompiledPathQuery {
     start_predicates: Vec<ResolvedPredicate>,
     /// Steps for the left segment, alternating Edge, Vertex, Edge, Vertex,
     /// ending at the leftmost vertex on the path.  Empty when `start_idx == 0`.
-    left_segment: Vec<FlatCompiledStep>,
+    left_segment: Vec<FlatCompiledStep<'graph>>,
     /// Steps for the right segment, alternating Edge, Vertex, Edge, Vertex,
     /// ending at the rightmost vertex on the path.  Empty when
     /// `start_idx == k_edges`.
-    right_segment: Vec<FlatCompiledStep>,
+    right_segment: Vec<FlatCompiledStep<'graph>>,
 }
 
-impl FlatCompiledPathQuery {
+impl<'graph> FlatCompiledPathQuery<'graph> {
     /// Build all `k_edges + 1` plans for the given path query.
-    fn compile_all(path_query: &PathQuery, flat_graph: &FlatGraph) -> GCardResult<Vec<Self>> {
+    fn compile_all(
+        path_query: &PathQuery,
+        flat_graph: &'graph FlatGraph,
+    ) -> GCardResult<Vec<Self>> {
         // 1) Extract a linear list of vertices and edges with resolved predicates.
         let mut vertex_infos: Vec<(String, Vec<ResolvedPredicate>)> = Vec::new();
         let mut edge_infos: Vec<(String, EdgeDirection, Vec<ResolvedPredicate>)> = Vec::new();
@@ -3112,21 +3154,23 @@ impl FlatCompiledPathQuery {
 
         for start_idx in 0..=k {
             let (start_label, start_predicates) = vertex_infos[start_idx].clone();
+            let mut next_cache_slot = 0;
 
             // Left segment: walk from start_idx down to 0.  Each edge is
             // traversed against its original direction.
             let mut left_segment = Vec::new();
             for i in (0..start_idx).rev() {
                 let (edge_label, dir, edge_preds) = edge_infos[i].clone();
-                let flipped = match dir {
-                    EdgeDirection::Outgoing => EdgeDirection::Incoming,
-                    EdgeDirection::Incoming => EdgeDirection::Outgoing,
-                };
+                let outgoing = matches!(dir, EdgeDirection::Incoming);
+                let csr =
+                    flat_graph.hop_csr_for_label(&vertex_infos[i + 1].0, &edge_label, outgoing);
                 left_segment.push(FlatCompiledStep::Edge {
+                    cache_slot: next_cache_slot,
+                    csr,
                     edge_label,
-                    direction: flipped,
                     predicates: edge_preds,
                 });
+                next_cache_slot += 1;
                 let (v_label, v_preds) = vertex_infos[i].clone();
                 left_segment.push(FlatCompiledStep::Vertex {
                     label: v_label,
@@ -3139,11 +3183,15 @@ impl FlatCompiledPathQuery {
             let mut right_segment = Vec::new();
             for i in start_idx..k {
                 let (edge_label, dir, edge_preds) = edge_infos[i].clone();
+                let outgoing = matches!(dir, EdgeDirection::Outgoing);
+                let csr = flat_graph.hop_csr_for_label(&vertex_infos[i].0, &edge_label, outgoing);
                 right_segment.push(FlatCompiledStep::Edge {
+                    cache_slot: next_cache_slot,
+                    csr,
                     edge_label,
-                    direction: dir,
                     predicates: edge_preds,
                 });
+                next_cache_slot += 1;
                 let (v_label, v_preds) = vertex_infos[i + 1].clone();
                 right_segment.push(FlatCompiledStep::Vertex {
                     label: v_label,
@@ -4895,22 +4943,25 @@ impl QueryGraph {
             selectivity
         };
 
-        eprintln!(
-            "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, conditional={:.6}, start_filter_ratio={:.6}, sel={:.6}, result={:.6}, stage2={}, pool_empty={}",
-            path_desc,
-            compiled.start_idx,
-            compiled.start_label,
-            final_starts_len,
-            final_struct_success,
-            final_sum_struct,
-            final_sum_pred,
-            final_conditional,
-            start_filter_ratio,
-            selectivity,
-            result,
-            stage2_used,
-            pool_empty,
-        );
+        if crate::procedures::gcard_query::GCARD_VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!(
+                "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, conditional={:.6}, start_filter_ratio={:.6}, sel={:.6}, result={:.6}, stage2={}, pool_empty={}",
+                path_desc,
+                compiled.start_idx,
+                compiled.start_label,
+                final_starts_len,
+                final_struct_success,
+                final_sum_struct,
+                final_sum_pred,
+                final_conditional,
+                start_filter_ratio,
+                selectivity,
+                result,
+                stage2_used,
+                pool_empty,
+            );
+        }
 
         Ok(result)
     }
@@ -4922,9 +4973,9 @@ impl QueryGraph {
     fn run_walk_batch(
         &self,
         flat_graph: &FlatGraph,
-        compiled: &FlatCompiledPathQuery,
+        compiled: &FlatCompiledPathQuery<'_>,
         sampled_starts: &[VertexId],
-        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
+        _pred_cache: &Arc<DashMap<(u32, u64), bool>>,
     ) -> WalkBatchResult {
         const PILOT_WALKS: usize = 5;
         const MAX_WALKS: usize = 50;
@@ -4973,132 +5024,159 @@ impl QueryGraph {
         for batch in sampled_starts.chunks(BATCH_SIZE) {
             let batch_results: Vec<(Option<(f64, f64)>, WalkProf)> = batch
                 .par_iter()
-                .map(|&start_vid| {
-                    let mut rng = rand::thread_rng();
-                    let mut nbr_cache: HashMap<
-                        (String, VertexId, String, bool),
-                        Vec<(VertexId, EdgeId)>,
-                    > = HashMap::new();
-                    let mut prof = WalkProf::default();
-                    let mut local_cache: HashMap<(u32, u64), bool> = HashMap::new();
-
-                    // One BFS per start, reused by every PILOT walk.  When the
-                    // segment isn't predicate-free we leave the hint as `None`
-                    // and the walk handles it normally.
-                    let left_hint: Option<f64> = if left_is_pred_free {
-                        Self::compute_segment_reachable_count(
-                            flat_graph,
-                            start_vid,
-                            &compiled.start_label,
-                            &compiled.left_segment,
-                            &mut nbr_cache,
-                            &mut prof,
+                .map_init(
+                    || {
+                        (
+                            HashMap::<(usize, VertexId), (usize, usize)>::new(),
+                            HashMap::<(u32, u64), bool>::new(),
                         )
-                    } else {
-                        None
-                    };
-                    let right_hint: Option<f64> = if right_is_pred_free {
-                        Self::compute_segment_reachable_count(
+                    },
+                    |(nbr_cache, local_cache), &start_vid| {
+                        // Rayon workers retain the allocated buckets across starts
+                        // within this batch. Logical contents remain per-start.
+                        nbr_cache.clear();
+                        local_cache.clear();
+                        let mut rng = rand::thread_rng();
+                        let mut prof = WalkProf::default();
+
+                        // One BFS per start, reused by every PILOT walk.  When the
+                        // segment isn't predicate-free we leave the hint as `None`
+                        // and the walk handles it normally.
+                        let left_hint: Option<f64> = if left_is_pred_free {
+                            Self::compute_segment_reachable_count(
+                                start_vid,
+                                &compiled.left_segment,
+                                &mut prof,
+                            )
+                        } else {
+                            None
+                        };
+                        let right_hint: Option<f64> = if right_is_pred_free {
+                            Self::compute_segment_reachable_count(
+                                start_vid,
+                                &compiled.right_segment,
+                                &mut prof,
+                            )
+                        } else {
+                            None
+                        };
+
+                        // The start vertex is fixed across every pilot/adaptive
+                        // walk for this sampled start. Evaluate its predicates
+                        // once and pass the result through, instead of repeatedly
+                        // probing the local predicate HashMap 5-50 times.
+                        let start_pred_ok = match self.evaluate_start_vertex_predicates(
                             flat_graph,
                             start_vid,
-                            &compiled.start_label,
-                            &compiled.right_segment,
-                            &mut nbr_cache,
+                            &compiled.start_predicates,
                             &mut prof,
-                        )
-                    } else {
-                        None
-                    };
-
-                    let mut walk_struct: Vec<f64> = Vec::with_capacity(walks_per_start);
-                    let mut walk_pred: Vec<f64> = Vec::with_capacity(walks_per_start);
-
-                    for _ in 0..walks_per_start {
-                        prof.walk_count += 1;
-                        let r = self.execute_flat_walk(
-                            flat_graph,
-                            compiled,
-                            start_vid,
-                            &mut rng,
-                            &mut nbr_cache,
-                            &mut prof,
-                            &mut local_cache,
-                            left_hint,
-                            right_hint,
-                        );
-                        let (sw, pw) = match r {
-                            Ok(v) => v,
+                            local_cache,
+                        ) {
+                            Ok(result) => result,
                             Err(_) => {
-                                Self::flush_local_cache(&local_cache, pred_cache);
+                                // Preserve the legacy accounting where the first
+                                // attempted walk observes the evaluation error.
+                                prof.walk_count += 1;
                                 return (None, prof);
                             }
                         };
-                        walk_struct.push(sw);
-                        walk_pred.push(pw);
-                    }
 
-                    let pilot_mean = walk_struct.iter().sum::<f64>() / walk_struct.len() as f64;
-                    if pilot_mean == 0.0 {
-                        Self::flush_local_cache(&local_cache, pred_cache);
-                        return (None, prof);
-                    }
-                    if !plan_is_deterministic && pilot_mean > 0.0 {
-                        let variance = walk_struct
-                            .iter()
-                            .map(|&w| (w - pilot_mean) * (w - pilot_mean))
-                            .sum::<f64>()
-                            / (walk_struct.len() as f64 - 1.0).max(1.0);
-                        let cv = variance.sqrt() / pilot_mean;
-                        if cv > CV_THRESHOLD && cv <= CV_UPPER_BOUND {
-                            for _ in 0..(MAX_WALKS - PILOT_WALKS) {
-                                prof.walk_count += 1;
-                                let r = self.execute_flat_walk(
-                                    flat_graph,
-                                    compiled,
-                                    start_vid,
-                                    &mut rng,
-                                    &mut nbr_cache,
-                                    &mut prof,
-                                    &mut local_cache,
-                                    left_hint,
-                                    right_hint,
-                                );
-                                let (sw, pw) = match r {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        Self::flush_local_cache(&local_cache, pred_cache);
-                                        return (None, prof);
-                                    }
-                                };
-                                walk_struct.push(sw);
-                                walk_pred.push(pw);
+                        // At most MAX_WALKS observations are retained for the per-start
+                        // CV calculation. Fixed-size stack buffers avoid two heap
+                        // allocations for every sampled start while preserving the
+                        // original accumulation order exactly.
+                        let mut walk_struct = [0.0f64; MAX_WALKS];
+                        let mut walk_pred = [0.0f64; MAX_WALKS];
+                        let mut walk_len = 0usize;
+
+                        for _ in 0..walks_per_start {
+                            prof.walk_count += 1;
+                            let r = self.execute_flat_walk(
+                                flat_graph,
+                                compiled,
+                                start_vid,
+                                &mut rng,
+                                nbr_cache,
+                                &mut prof,
+                                local_cache,
+                                start_pred_ok,
+                                left_hint,
+                                right_hint,
+                            );
+                            let (sw, pw) = match r {
+                                Ok(v) => v,
+                                Err(_) => return (None, prof),
+                            };
+                            walk_struct[walk_len] = sw;
+                            walk_pred[walk_len] = pw;
+                            walk_len += 1;
+                        }
+
+                        let pilot_mean =
+                            walk_struct[..walk_len].iter().sum::<f64>() / walk_len as f64;
+                        if pilot_mean == 0.0 {
+                            return (None, prof);
+                        }
+                        if !plan_is_deterministic && pilot_mean > 0.0 {
+                            let variance = walk_struct[..walk_len]
+                                .iter()
+                                .map(|&w| (w - pilot_mean) * (w - pilot_mean))
+                                .sum::<f64>()
+                                / (walk_len as f64 - 1.0).max(1.0);
+                            let cv = variance.sqrt() / pilot_mean;
+                            if cv > CV_THRESHOLD && cv <= CV_UPPER_BOUND {
+                                for _ in 0..(MAX_WALKS - PILOT_WALKS) {
+                                    prof.walk_count += 1;
+                                    let r = self.execute_flat_walk(
+                                        flat_graph,
+                                        compiled,
+                                        start_vid,
+                                        &mut rng,
+                                        nbr_cache,
+                                        &mut prof,
+                                        local_cache,
+                                        start_pred_ok,
+                                        left_hint,
+                                        right_hint,
+                                    );
+                                    let (sw, pw) = match r {
+                                        Ok(v) => v,
+                                        Err(_) => return (None, prof),
+                                    };
+                                    walk_struct[walk_len] = sw;
+                                    walk_pred[walk_len] = pw;
+                                    walk_len += 1;
+                                }
                             }
                         }
-                    }
 
-                    Self::flush_local_cache(&local_cache, pred_cache);
-
-                    let total_walks = walk_struct.len() as f64;
-                    let struct_weight = walk_struct.iter().sum::<f64>() / total_walks;
-                    let pred_weight = walk_pred.iter().sum::<f64>() / total_walks;
-                    let result = if struct_weight > 0.0 {
-                        Some((struct_weight, pred_weight))
-                    } else {
-                        None
-                    };
-                    (result, prof)
-                })
+                        let total_walks = walk_len as f64;
+                        let struct_weight =
+                            walk_struct[..walk_len].iter().sum::<f64>() / total_walks;
+                        let pred_weight = walk_pred[..walk_len].iter().sum::<f64>() / total_walks;
+                        let result = if struct_weight > 0.0 {
+                            Some((struct_weight, pred_weight))
+                        } else {
+                            None
+                        };
+                        (result, prof)
+                    },
+                )
                 .collect();
 
             total_vertices_visited += batch_results.len();
-            for (_, prof) in &batch_results {
-                crate::procedures::gcard_query::SAMPLING_TOTAL_WALKS
-                    .fetch_add(prof.walk_count, std::sync::atomic::Ordering::Relaxed);
-                crate::procedures::gcard_query::SAMPLING_NBR_NANOS
-                    .fetch_add(prof.nbr_nanos, std::sync::atomic::Ordering::Relaxed);
-                crate::procedures::gcard_query::SAMPLING_PROP_NANOS
-                    .fetch_add(prof.prop_nanos, std::sync::atomic::Ordering::Relaxed);
-            }
+            // Publish profiling counters once per batch rather than once per
+            // sampled start. This removes three contended atomic writes from
+            // every Rayon result without changing the accumulated values.
+            let batch_walk_count = batch_results.iter().map(|(_, prof)| prof.walk_count).sum();
+            let batch_nbr_nanos = batch_results.iter().map(|(_, prof)| prof.nbr_nanos).sum();
+            let batch_prop_nanos = batch_results.iter().map(|(_, prof)| prof.prop_nanos).sum();
+            crate::procedures::gcard_query::SAMPLING_TOTAL_WALKS
+                .fetch_add(batch_walk_count, std::sync::atomic::Ordering::Relaxed);
+            crate::procedures::gcard_query::SAMPLING_NBR_NANOS
+                .fetch_add(batch_nbr_nanos, std::sync::atomic::Ordering::Relaxed);
+            crate::procedures::gcard_query::SAMPLING_PROP_NANOS
+                .fetch_add(batch_prop_nanos, std::sync::atomic::Ordering::Relaxed);
 
             for (result, _) in &batch_results {
                 let &Some((struct_weight, pred_weight)) = result else {
@@ -5237,7 +5315,7 @@ impl QueryGraph {
     /// multiplier analytically rather than collapsing the estimate to zero.
     fn static_fallback_selectivity(
         flat_graph: &FlatGraph,
-        compiled: &FlatCompiledPathQuery,
+        compiled: &FlatCompiledPathQuery<'_>,
     ) -> f64 {
         let mut sel = Self::stats_predicate_selectivity(
             flat_graph,
@@ -5591,7 +5669,7 @@ impl QueryGraph {
         &self,
         flat_graph: &FlatGraph,
         degree_seq_graph: &DegreeSeqGraphCompressed,
-        plans: &[FlatCompiledPathQuery],
+        plans: &[FlatCompiledPathQuery<'_>],
         node_labels: &[String],
         edge_labels: &[String],
         sample_size: usize,
@@ -5703,9 +5781,9 @@ impl QueryGraph {
     }
 
     /// Execute a single Wander Join walk over [`FlatGraph`] using the given
-    /// compiled plan.  The walker starts at `start_vertex`, optionally checks
-    /// the start vertex predicates, then walks the left and right segments
-    /// independently from the same starting point.
+    /// compiled plan. The caller evaluates the start vertex predicates once,
+    /// then the walker traverses the left and right segments independently
+    /// from the same starting point.
     ///
     /// Returns `(struct_weight, pred_weight)` — the structural weight and the
     /// predicate-filtered weight for this walk.  `(0.0, 0.0)` means the walk
@@ -5714,12 +5792,13 @@ impl QueryGraph {
     fn execute_flat_walk(
         &self,
         flat_graph: &FlatGraph,
-        compiled: &FlatCompiledPathQuery,
+        compiled: &FlatCompiledPathQuery<'_>,
         start_vertex: VertexId,
         rng: &mut impl rand::Rng,
-        nbr_cache: &mut HashMap<(String, VertexId, String, bool), Vec<(VertexId, EdgeId)>>,
+        nbr_cache: &mut HashMap<(usize, VertexId), (usize, usize)>,
         prof: &mut WalkProf,
         local_pred_cache: &mut HashMap<(u32, u64), bool>,
+        start_pred_ok: Option<bool>,
         // Pre-computed reachable counts for the predicate-free segments of
         // this plan.  `Some(c)` means "the BFS short-circuit returned `c`,
         // reuse it for free"; `None` means "compute it (or fall back to a
@@ -5728,31 +5807,15 @@ impl QueryGraph {
         left_count_hint: Option<f64>,
         right_count_hint: Option<f64>,
     ) -> GCardResult<(f64, f64)> {
+        let Some(start_pred_ok) = start_pred_ok else {
+            return Ok((0.0, 0.0));
+        };
+
         // Single-vertex query (no edges): only the start vertex matters.
         if compiled.left_segment.is_empty() && compiled.right_segment.is_empty() {
-            let start_pred_ok = match self.evaluate_start_vertex_predicates(
-                flat_graph,
-                start_vertex,
-                &compiled.start_predicates,
-                prof,
-                local_pred_cache,
-            )? {
-                Some(ok) => ok,
-                None => return Ok((0.0, 0.0)),
-            };
             return Ok((1.0, if start_pred_ok { 1.0 } else { 0.0 }));
         }
 
-        let start_pred_ok = match self.evaluate_start_vertex_predicates(
-            flat_graph,
-            start_vertex,
-            &compiled.start_predicates,
-            prof,
-            local_pred_cache,
-        )? {
-            Some(ok) => ok,
-            None => return Ok((0.0, 0.0)),
-        };
         let start_factor = if start_pred_ok { 1.0 } else { 0.0 };
 
         let mut struct_weight: f64 = 1.0;
@@ -5763,11 +5826,8 @@ impl QueryGraph {
                 (c, c)
             } else if Self::segment_is_predicate_free(&compiled.left_segment) {
                 match Self::compute_segment_reachable_count(
-                    flat_graph,
                     start_vertex,
-                    &compiled.start_label,
                     &compiled.left_segment,
-                    nbr_cache,
                     prof,
                 ) {
                     Some(c) => (c, c),
@@ -5776,7 +5836,6 @@ impl QueryGraph {
                         &compiled.left_segment,
                         0,
                         start_vertex,
-                        &compiled.start_label,
                         rng,
                         nbr_cache,
                         prof,
@@ -5789,7 +5848,6 @@ impl QueryGraph {
                     &compiled.left_segment,
                     0,
                     start_vertex,
-                    &compiled.start_label,
                     rng,
                     nbr_cache,
                     prof,
@@ -5808,11 +5866,8 @@ impl QueryGraph {
                 (c, c)
             } else if Self::segment_is_predicate_free(&compiled.right_segment) {
                 match Self::compute_segment_reachable_count(
-                    flat_graph,
                     start_vertex,
-                    &compiled.start_label,
                     &compiled.right_segment,
-                    nbr_cache,
                     prof,
                 ) {
                     Some(c) => (c, c),
@@ -5821,7 +5876,6 @@ impl QueryGraph {
                         &compiled.right_segment,
                         0,
                         start_vertex,
-                        &compiled.start_label,
                         rng,
                         nbr_cache,
                         prof,
@@ -5834,7 +5888,6 @@ impl QueryGraph {
                     &compiled.right_segment,
                     0,
                     start_vertex,
-                    &compiled.start_label,
                     rng,
                     nbr_cache,
                     prof,
@@ -5911,7 +5964,7 @@ impl QueryGraph {
     /// (empty) predicate set trivially — so we can replace the random walk
     /// with a deterministic reachable-count enumeration and get zero
     /// estimation variance for that segment "for free".
-    fn segment_is_predicate_free(segment: &[FlatCompiledStep]) -> bool {
+    fn segment_is_predicate_free(segment: &[FlatCompiledStep<'_>]) -> bool {
         segment.iter().all(|step| match step {
             FlatCompiledStep::Vertex { predicates, .. } => predicates.is_empty(),
             FlatCompiledStep::Edge { predicates, .. } => predicates.is_empty(),
@@ -5924,15 +5977,9 @@ impl QueryGraph {
     /// endpoint frontier).  Returns `None` when an intermediate frontier
     /// would exceed `MAX_FRONTIER` — in that case the caller should fall
     /// back to a random walk to keep memory bounded.
-    ///
-    /// Reuses `nbr_cache` so subsequent walks from the same start that
-    /// touch the same edges hit warm cache lines.
     fn compute_segment_reachable_count(
-        flat_graph: &FlatGraph,
         start_vertex: VertexId,
-        start_label: &str,
-        segment: &[FlatCompiledStep],
-        _nbr_cache: &mut HashMap<(String, VertexId, String, bool), Vec<(VertexId, EdgeId)>>,
+        segment: &[FlatCompiledStep<'_>],
         prof: &mut WalkProf,
     ) -> Option<f64> {
         const MAX_FRONTIER: usize = 200_000;
@@ -5945,41 +5992,19 @@ impl QueryGraph {
             return Some(1.0);
         }
 
-        // Look the hop CSR map up once, then index into it per Edge step.
-        // We *do not* go through `nbr_cache` here: that cache is keyed by
-        // `(String, VertexId, String, bool)`, so each inner-loop probe would
-        // allocate two `String`s — which on a 50-fanout frontier dwarfs the
-        // actual `binary_search` lookup inside the CSR.  By skipping the
-        // cache and reaching into `hop_csrs` directly we keep the inner
-        // loop pure: no allocation, no hashing, just a CSR `neighbors_slice`
-        // call per frontier vertex.
-        let hop_csrs = flat_graph.hop_csrs();
-
         let mut frontier: Vec<VertexId> = vec![start_vertex];
-        let mut current_label: &str = start_label;
         let mut edge_idx: usize = 0;
 
         for step in segment {
             match step {
-                FlatCompiledStep::Vertex { label, .. } => {
-                    current_label = label.as_str();
-                }
-                FlatCompiledStep::Edge {
-                    edge_label,
-                    direction,
-                    ..
-                } => {
-                    let outgoing = matches!(direction, EdgeDirection::Outgoing);
+                FlatCompiledStep::Vertex { .. } => {}
+                FlatCompiledStep::Edge { csr, .. } => {
                     let is_last = edge_idx == num_edges - 1;
-
-                    // One `(String, String, bool)` key per *edge step* — not
-                    // per frontier vertex.
-                    let csr_key = (current_label.to_string(), edge_label.clone(), outgoing);
-                    let csr_opt = hop_csrs.get(&csr_key);
+                    let csr = *csr;
 
                     let t0 = std::time::Instant::now();
                     if is_last {
-                        let total: usize = match csr_opt {
+                        let total: usize = match csr {
                             Some(csr) => frontier
                                 .iter()
                                 .map(|&vid| csr.neighbors_slice(vid).len())
@@ -5991,7 +6016,7 @@ impl QueryGraph {
                     }
 
                     let mut next: Vec<VertexId> = Vec::with_capacity(frontier.len() * 4);
-                    if let Some(csr) = csr_opt {
+                    if let Some(csr) = csr {
                         for &vid in &frontier {
                             for &(nbr, _eid) in csr.neighbors_slice(vid) {
                                 next.push(nbr);
@@ -6030,12 +6055,11 @@ impl QueryGraph {
     fn walk_segment_branched(
         &self,
         flat_graph: &FlatGraph,
-        segment: &[FlatCompiledStep],
+        segment: &[FlatCompiledStep<'_>],
         depth: usize,
         current_vid: VertexId,
-        current_label: &str,
         rng: &mut impl rand::Rng,
-        nbr_cache: &mut HashMap<(String, VertexId, String, bool), Vec<(VertexId, EdgeId)>>,
+        nbr_cache: &mut HashMap<(usize, VertexId), (usize, usize)>,
         prof: &mut WalkProf,
         local_pred_cache: &mut HashMap<(u32, u64), bool>,
     ) -> GCardResult<(f64, f64)> {
@@ -6050,7 +6074,7 @@ impl QueryGraph {
         }
 
         match &segment[depth] {
-            FlatCompiledStep::Vertex { label, predicates } => {
+            FlatCompiledStep::Vertex { predicates, .. } => {
                 let pred_pass = if predicates.is_empty() {
                     true
                 } else {
@@ -6071,7 +6095,6 @@ impl QueryGraph {
                     segment,
                     depth + 1,
                     current_vid,
-                    label.as_str(),
                     rng,
                     nbr_cache,
                     prof,
@@ -6080,33 +6103,26 @@ impl QueryGraph {
                 Ok((s, p * pred_factor))
             }
             FlatCompiledStep::Edge {
-                edge_label,
-                direction,
+                cache_slot,
+                csr,
                 predicates,
+                ..
             } => {
-                let outgoing = matches!(direction, EdgeDirection::Outgoing);
-                let cache_key = (
-                    current_label.to_string(),
-                    current_vid,
-                    edge_label.clone(),
-                    outgoing,
-                );
+                let Some(csr) = *csr else {
+                    return Ok((0.0, 0.0));
+                };
+                let cache_key = (*cache_slot, current_vid);
 
-                if !nbr_cache.contains_key(&cache_key) {
-                    let t0 = std::time::Instant::now();
-                    let slice = flat_graph.neighbors_with_eid_for_label(
-                        current_label,
-                        current_vid,
-                        edge_label,
-                        outgoing,
-                    );
-                    prof.nbr_nanos += t0.elapsed().as_nanos() as u64;
-                    nbr_cache.insert(cache_key.clone(), slice.to_vec());
-                }
-                // Clone for the duration of this call so we can re-borrow
-                // `nbr_cache` mutably in the recursive descent.
-                let nbrs = nbr_cache.get(&cache_key).cloned().unwrap_or_default();
-
+                let bounds = match nbr_cache.entry(cache_key) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let t0 = std::time::Instant::now();
+                        let bounds = csr.neighbor_bounds(current_vid);
+                        prof.nbr_nanos += t0.elapsed().as_nanos() as u64;
+                        *entry.insert(bounds)
+                    }
+                };
+                let nbrs = csr.neighbors_slice_by_bounds(bounds);
                 let degree = nbrs.len();
                 if degree == 0 {
                     return Ok((0.0, 0.0));
@@ -6114,47 +6130,63 @@ impl QueryGraph {
 
                 let k = ((BRANCH_FACTOR_B * degree as f64).ceil() as usize).clamp(1, degree);
 
-                // Sample `k` neighbors without replacement.
-                let chosen_indices: Vec<usize> = if k == degree {
-                    (0..degree).collect()
-                } else {
-                    let indices: Vec<usize> = (0..degree).collect();
-                    sample_without_replacement(&indices, k, rng)
-                };
-
                 let mut sum_s = 0.0;
                 let mut sum_p = 0.0;
-                for &i in &chosen_indices {
-                    let (chosen_nbr, chosen_eid) = nbrs[i];
-                    let edge_pass = if predicates.is_empty() {
-                        true
-                    } else {
-                        match self.evaluate_step_edge_predicates(
-                            flat_graph,
-                            chosen_eid,
-                            predicates,
-                            prof,
-                            local_pred_cache,
-                        )? {
-                            Some(b) => b,
-                            None => false,
-                        }
-                    };
-                    let edge_factor = if edge_pass { 1.0 } else { 0.0 };
 
-                    let (s, p) = self.walk_segment_branched(
+                if k == 1 {
+                    // This is the common case for degree <= 32. Sampling one
+                    // index directly avoids allocating an index or tuple Vec.
+                    let (chosen_nbr, chosen_eid) = nbrs[rng.gen_range(0..degree)];
+                    (sum_s, sum_p) = self.walk_sampled_branch(
                         flat_graph,
                         segment,
                         depth + 1,
                         chosen_nbr,
-                        current_label,
+                        chosen_eid,
+                        predicates,
                         rng,
                         nbr_cache,
                         prof,
                         local_pred_cache,
                     )?;
-                    sum_s += s;
-                    sum_p += p * edge_factor;
+                } else if k == degree {
+                    // Exhaustive branching needs no sampling buffer at all.
+                    for &(chosen_nbr, chosen_eid) in nbrs {
+                        let (s, p) = self.walk_sampled_branch(
+                            flat_graph,
+                            segment,
+                            depth + 1,
+                            chosen_nbr,
+                            chosen_eid,
+                            predicates,
+                            rng,
+                            nbr_cache,
+                            prof,
+                            local_pred_cache,
+                        )?;
+                        sum_s += s;
+                        sum_p += p;
+                    }
+                } else {
+                    // For a true subset, retain only O(k) compact indices;
+                    // neighbor tuples remain borrowed from the immutable CSR.
+                    for idx in rand::seq::index::sample(rng, degree, k) {
+                        let (chosen_nbr, chosen_eid) = nbrs[idx];
+                        let (s, p) = self.walk_sampled_branch(
+                            flat_graph,
+                            segment,
+                            depth + 1,
+                            chosen_nbr,
+                            chosen_eid,
+                            predicates,
+                            rng,
+                            nbr_cache,
+                            prof,
+                            local_pred_cache,
+                        )?;
+                        sum_s += s;
+                        sum_p += p;
+                    }
                 }
 
                 let avg_s = sum_s / k as f64;
@@ -6162,6 +6194,49 @@ impl QueryGraph {
                 Ok((degree as f64 * avg_s, degree as f64 * avg_p))
             }
         }
+    }
+
+    /// Evaluate the edge predicate for one selected branch and recurse into
+    /// the remainder of the compiled segment.
+    #[allow(clippy::too_many_arguments)]
+    fn walk_sampled_branch(
+        &self,
+        flat_graph: &FlatGraph,
+        segment: &[FlatCompiledStep<'_>],
+        next_depth: usize,
+        chosen_nbr: VertexId,
+        chosen_eid: EdgeId,
+        predicates: &[ResolvedPredicate],
+        rng: &mut impl rand::Rng,
+        nbr_cache: &mut HashMap<(usize, VertexId), (usize, usize)>,
+        prof: &mut WalkProf,
+        local_pred_cache: &mut HashMap<(u32, u64), bool>,
+    ) -> GCardResult<(f64, f64)> {
+        let edge_pass = if predicates.is_empty() {
+            true
+        } else {
+            self.evaluate_step_edge_predicates(
+                flat_graph,
+                chosen_eid,
+                predicates,
+                prof,
+                local_pred_cache,
+            )?
+            .unwrap_or_default()
+        };
+        let edge_factor = if edge_pass { 1.0 } else { 0.0 };
+
+        let (struct_weight, pred_weight) = self.walk_segment_branched(
+            flat_graph,
+            segment,
+            next_depth,
+            chosen_nbr,
+            rng,
+            nbr_cache,
+            prof,
+            local_pred_cache,
+        )?;
+        Ok((struct_weight, pred_weight * edge_factor))
     }
 
     /// Evaluate `predicates` against a vertex's properties.  Returns

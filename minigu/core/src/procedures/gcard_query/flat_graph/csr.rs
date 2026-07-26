@@ -44,10 +44,25 @@ impl CsrAdjWithEid {
 
     #[inline]
     pub fn neighbors_slice(&self, vid: VertexId) -> &[(VertexId, EdgeId)] {
+        self.neighbors_slice_by_bounds(self.neighbor_bounds(vid))
+    }
+
+    /// Resolve a vertex to its packed-neighbor bounds. The returned pair is
+    /// cheap to cache and can be reused across repeated walks without copying
+    /// the adjacency row itself.
+    #[inline]
+    pub fn neighbor_bounds(&self, vid: VertexId) -> (usize, usize) {
         match self.verts.binary_search(&vid) {
-            Ok(pos) => &self.neighbors[self.offsets[pos]..self.offsets[pos + 1]],
-            Err(_) => &[],
+            Ok(pos) => (self.offsets[pos], self.offsets[pos + 1]),
+            Err(_) => (0, 0),
         }
+    }
+
+    /// Borrow a neighbor row using bounds previously returned by
+    /// [`Self::neighbor_bounds`].
+    #[inline]
+    pub fn neighbors_slice_by_bounds(&self, (start, end): (usize, usize)) -> &[(VertexId, EdgeId)] {
+        &self.neighbors[start..end]
     }
 
     /// Returns `true` if `vid` has at least one outgoing entry in this CSR.
@@ -89,5 +104,24 @@ impl CsrAdjWithEid {
     /// Extract only the neighbor vertex IDs (dropping edge IDs).
     pub fn neighbors_vids(&self) -> Vec<VertexId> {
         self.neighbors.iter().map(|&(vid, _)| vid).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CsrAdjWithEid;
+
+    #[test]
+    fn cached_neighbor_bounds_reuse_the_same_zero_copy_row() {
+        let csr = CsrAdjWithEid::build(vec![(10, 20, 1), (10, 21, 2), (30, 40, 3)]);
+
+        let bounds = csr.neighbor_bounds(10);
+        assert_eq!(bounds, (0, 2));
+        assert_eq!(csr.neighbors_slice_by_bounds(bounds), &[(20, 1), (21, 2)]);
+        assert_eq!(csr.neighbors_slice(10), &[(20, 1), (21, 2)]);
+
+        let missing_bounds = csr.neighbor_bounds(99);
+        assert_eq!(missing_bounds, (0, 0));
+        assert!(csr.neighbors_slice_by_bounds(missing_bounds).is_empty());
     }
 }

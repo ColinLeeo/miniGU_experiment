@@ -36,7 +36,7 @@ use csr::CsrAdjWithEid;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
 use rand::Rng;
-use rand::seq::SliceRandom;
+use rand::seq::index;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use update::{PendingChanges, PendingEdge};
@@ -49,9 +49,10 @@ pub(crate) fn sample_without_replacement<T: Clone, R: Rng + ?Sized>(
     if values.len() <= amount {
         return values.to_vec();
     }
-    let mut buf = values.to_vec();
-    let (selected, _) = buf.partial_shuffle(rng, amount);
-    selected.to_vec()
+    index::sample(rng, values.len(), amount)
+        .into_iter()
+        .map(|idx| values[idx].clone())
+        .collect()
 }
 
 // ── Reverse-lookup metadata stored per edge ───────────────────────────────────
@@ -349,6 +350,20 @@ impl FlatGraph {
             .get(&(vertex_label.to_string(), edge_label.to_string(), outgoing))
             .map(|csr| csr.neighbors_slice(vid))
             .unwrap_or(&[])
+    }
+
+    /// Resolve a compiled hop to its immutable CSR once, before entering the
+    /// random-walk hot path. The string-key lookup is intentionally kept at
+    /// plan compilation time so individual walk steps can use the returned
+    /// handle directly.
+    pub(crate) fn hop_csr_for_label(
+        &self,
+        vertex_label: &str,
+        edge_label: &str,
+        outgoing: bool,
+    ) -> Option<&CsrAdjWithEid> {
+        self.hop_csrs
+            .get(&(vertex_label.to_string(), edge_label.to_string(), outgoing))
     }
 
     pub fn hop_bucket_edge_count(
@@ -885,12 +900,15 @@ impl FlatGraph {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use rand::SeedableRng;
     use rand::rngs::StdRng;
-    use rand::seq::SliceRandom;
     use tempfile::tempdir;
 
-    use super::FlatGraphBuilder;
+    use super::{FlatGraphBuilder, sample_without_replacement};
 
     #[test]
     fn flat_graph_bincode_roundtrip() {
@@ -915,22 +933,54 @@ mod tests {
     }
 
     #[test]
-    fn sample_vertices_uses_partial_shuffle_selected_partition() {
+    fn sample_vertices_without_replacement_is_distinct_and_reproducible() {
         let mut builder = FlatGraphBuilder::new();
         for vid in 0..1_000 {
             builder.add_vertex(vid, "person", vec![]);
         }
         let graph = builder.build();
 
-        let mut expected_buf: Vec<u64> = (0..1_000).collect();
-        let mut expected_rng = StdRng::seed_from_u64(42);
-        let (selected, _) = expected_buf.partial_shuffle(&mut expected_rng, 10);
-        let expected = selected.to_vec();
+        let mut rng_a = StdRng::seed_from_u64(42);
+        let actual = graph.sample_vertices_by_label("person", 10, &mut rng_a);
+        let mut rng_b = StdRng::seed_from_u64(42);
+        let repeated = graph.sample_vertices_by_label("person", 10, &mut rng_b);
 
-        let mut actual_rng = StdRng::seed_from_u64(42);
-        let actual = graph.sample_vertices_by_label("person", 10, &mut actual_rng);
+        assert_eq!(actual, repeated);
+        assert_eq!(actual.len(), 10);
+        assert_eq!(actual.iter().copied().collect::<HashSet<_>>().len(), 10);
+        assert!(actual.iter().all(|&vid| vid < 1_000));
+    }
 
-        assert_eq!(actual, expected);
-        assert_ne!(actual, (0..10).collect::<Vec<_>>());
+    #[test]
+    fn sample_without_replacement_only_clones_selected_values() {
+        #[derive(Debug)]
+        struct CloneCounted {
+            value: usize,
+            clone_count: Arc<AtomicUsize>,
+        }
+
+        impl Clone for CloneCounted {
+            fn clone(&self) -> Self {
+                self.clone_count.fetch_add(1, Ordering::Relaxed);
+                Self {
+                    value: self.value,
+                    clone_count: Arc::clone(&self.clone_count),
+                }
+            }
+        }
+
+        let clone_count = Arc::new(AtomicUsize::new(0));
+        let values: Vec<_> = (0..10_000)
+            .map(|value| CloneCounted {
+                value,
+                clone_count: Arc::clone(&clone_count),
+            })
+            .collect();
+        let mut rng = StdRng::seed_from_u64(42);
+
+        let sampled = sample_without_replacement(&values, 32, &mut rng);
+
+        assert_eq!(sampled.len(), 32);
+        assert_eq!(clone_count.load(Ordering::Relaxed), 32);
     }
 }
