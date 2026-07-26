@@ -192,6 +192,149 @@ mod tests {
     }
 
     #[test]
+    fn single_vertex_query_samples_inclusive_boundary_predicate() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![crate::procedures::gcard_query::types::PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "downvotes".to_string(),
+                op: ComparisonOp::Le,
+                value: ScalarValue::Int64(Some(0)),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["downvotes".to_string()]);
+        for vid in 0..98 {
+            builder.add_vertex(vid, "person", vec![ScalarValue::Int64(Some(0))]);
+        }
+        builder.add_vertex(98, "person", vec![ScalarValue::Int64(Some(1))]);
+        builder.add_vertex(99, "person", vec![ScalarValue::Int64(Some(1920))]);
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                100,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates[0].0.get_es().unwrap(), 98.0);
+    }
+
+    #[test]
+    fn single_vertex_query_samples_predicates_jointly() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![
+                crate::procedures::gcard_query::types::PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "age".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(20)),
+                },
+                crate::procedures::gcard_query::types::PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "downvotes".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(0)),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["age".to_string(), "downvotes".to_string()]);
+        for vid in 0..9 {
+            let group = vid / 3;
+            builder.add_vertex(
+                vid,
+                "person",
+                vec![
+                    ScalarValue::Int64(Some(20 + group as i64 * 10)),
+                    ScalarValue::Int64(Some(group as i64)),
+                ],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                9,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates[0].0.get_es().unwrap(), 3.0);
+    }
+
+    #[test]
+    fn single_vertex_partial_sample_zero_hit_uses_upper_bound() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![crate::procedures::gcard_query::types::PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "age".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::Int64(Some(20)),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["age".to_string()]);
+        for vid in 0..100 {
+            builder.add_vertex(vid, "person", vec![ScalarValue::Int64(Some(30))]);
+        }
+        let flat_graph = builder.build();
+
+        let mut partial = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                10,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+        let mut exhaustive = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                100,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert!(partial[0].0.get_es().unwrap() > 0.0);
+        assert_eq!(exhaustive[0].0.get_es().unwrap(), 0.0);
+    }
+
+    #[test]
     fn single_edge_query_builds_and_reduces_directly() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![vertex(1, "a"), vertex(2, "b")],
@@ -3026,6 +3169,103 @@ impl FlatCompiledPathQuery {
 impl QueryGraph {
     // ── Public entry point ────────────────────────────────────────────────────
 
+    fn single_vertex_sample_seed(label: &str, predicates: &[PredicateDef]) -> u64 {
+        // Stable FNV-1a makes repeated provider generation reproducible.
+        let mut hash = 0xcbf29ce484222325u64;
+        for byte in format!("{}:{:?}", label, predicates).bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    fn single_vertex_upper_selectivity(hits: usize, samples: usize) -> f64 {
+        debug_assert!(samples > 0 && hits <= samples);
+        if hits == 0 {
+            // Exact one-sided Clopper-Pearson upper bound for zero successes
+            // at 95% confidence (approximately the rule of three).
+            return 1.0 - 0.05f64.powf(1.0 / samples as f64);
+        }
+
+        // One-sided 95% Wilson upper bound. GCard is an upper estimator, so
+        // use the confidence bound rather than the raw hit ratio.
+        const Z: f64 = 1.644_853_626_951_472_2;
+        let n = samples as f64;
+        let p = hits as f64 / n;
+        let z2 = Z * Z;
+        let denominator = 1.0 + z2 / n;
+        let center = p + z2 / (2.0 * n);
+        let margin = Z * ((p * (1.0 - p) / n) + z2 / (4.0 * n * n)).sqrt();
+        ((center + margin) / denominator).clamp(0.0, 1.0)
+    }
+
+    fn estimate_single_vertex_cardinality(
+        &self,
+        flat_graph: &FlatGraph,
+        label: &str,
+        predicates: &[PredicateDef],
+        sample_size: usize,
+    ) -> GCardResult<u64> {
+        const MIN_HITS: usize = 3;
+        const MAX_SAMPLE_MULTIPLIER: usize = 8;
+
+        let total = flat_graph.vertex_count_by_label(label);
+        if total == 0 || predicates.is_empty() {
+            return Ok(total as u64);
+        }
+
+        let resolved = predicates
+            .iter()
+            .map(|predicate| {
+                let prop_index = flat_graph
+                    .vertex_prop_index(label, &predicate.property)
+                    .ok_or_else(|| {
+                        GCardError::InvalidState(format!(
+                            "property {} is missing from FlatGraph label {}",
+                            predicate.property, label
+                        ))
+                    })?;
+                Ok(ResolvedPredicate {
+                    predicate_id: predicate.predicate_id,
+                    prop_index,
+                    op: predicate.op,
+                    value: predicate.value.clone(),
+                })
+            })
+            .collect::<GCardResult<Vec<_>>>()?;
+
+        let initial_samples = sample_size.max(1).min(total);
+        let max_samples = sample_size
+            .max(1)
+            .saturating_mul(MAX_SAMPLE_MULTIPLIER)
+            .min(total);
+        let mut rng =
+            rand::rngs::StdRng::seed_from_u64(Self::single_vertex_sample_seed(label, predicates));
+        let sampled = flat_graph.sample_vertices_by_label(label, max_samples, &mut rng);
+
+        let mut evaluated = 0usize;
+        let mut hits = 0usize;
+        let mut target = initial_samples;
+        loop {
+            hits += sampled[evaluated..target]
+                .iter()
+                .filter(|&&vid| self.vertex_passes_predicates_uncached(flat_graph, vid, &resolved))
+                .count();
+            evaluated = target;
+            if hits >= MIN_HITS || evaluated == max_samples {
+                break;
+            }
+            target = evaluated.saturating_mul(2).min(max_samples);
+        }
+
+        if evaluated == total {
+            return Ok(hits as u64);
+        }
+
+        let selectivity = Self::single_vertex_upper_selectivity(hits, evaluated);
+        Ok(((total as f64) * selectivity).ceil().min(total as f64) as u64)
+    }
+
     /// Build abstract graphs using [`FlatGraph`] for Wander Join sampling.
     ///
     /// This is a drop-in replacement for [`build_abstract_graph`] that does not
@@ -3070,19 +3310,16 @@ impl QueryGraph {
                     "single-vertex query requires FlatGraph statistics".to_string(),
                 )
             })?;
-            let base = flat_graph.vertex_count_by_label(&vertex.label) as f64;
-            let selectivity = if matches!(predicate_apply_type, PredicateApplyType::IGNORE) {
-                1.0
+            let estimated = if matches!(predicate_apply_type, PredicateApplyType::IGNORE) {
+                flat_graph.vertex_count_by_label(&vertex.label) as u64
             } else {
-                vertex.predicates.iter().fold(1.0, |acc, predicate| {
-                    acc * Self::estimate_selectivity_from_stats(
-                        flat_graph.vertex_column_stats(&vertex.label, &predicate.property),
-                        &predicate.op,
-                        &predicate.value,
-                    )
-                })
+                self.estimate_single_vertex_cardinality(
+                    flat_graph,
+                    &vertex.label,
+                    &vertex.predicates,
+                    sample_size,
+                )?
             };
-            let estimated = (base * selectivity).ceil() as u64;
             let local_pcf = if estimated == 0 {
                 // `Pcf::empty()` is a safe algebra placeholder with one
                 // cumulative row, so use an actual zero-row unary factor for
