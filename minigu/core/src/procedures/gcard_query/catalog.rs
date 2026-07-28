@@ -20,6 +20,8 @@ use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::utils::StarStatKey;
 use crate::procedures::gcard_query::{functional_refine_enabled, max_bucket_enabled};
 
+mod compact_persistence;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeCardinality {
     ManyToMany,
