@@ -236,7 +236,8 @@ impl TableStats {
     /// Record one row.  `props` must align with `prop_names`.
     pub fn observe_row(&mut self, prop_names: &[String], props: &[ScalarValue]) {
         self.cardinality += 1;
-        for (name, value) in prop_names.iter().zip(props.iter()) {
+        for (index, name) in prop_names.iter().enumerate() {
+            let value = props.get(index).unwrap_or(&ScalarValue::Null);
             self.columns.entry(name.clone()).or_default().observe(value);
         }
     }

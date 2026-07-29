@@ -205,7 +205,7 @@ fn write_vertex_csv(fg: &FlatGraph, output_dir: &Path, label: &str) -> anyhow::R
     // Rows
     for &vid in vids {
         let mut line = vid.to_string();
-        if let Some(props) = fg.vertex_props(vid) {
+        if let Some(props) = fg.vertex_props(label, vid) {
             for (i, _) in prop_names.iter().enumerate() {
                 line.push(',');
                 if i < props.len() {

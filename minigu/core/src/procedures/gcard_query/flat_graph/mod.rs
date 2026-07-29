@@ -85,8 +85,11 @@ pub struct FlatGraph {
     hop_csrs: HashMap<(String, String, bool), CsrAdjWithEid>,
 
     // ── Properties ────────────────────────────────────────────────────────────
-    /// vertex_id → property values indexed by schema position.
-    vertex_props: HashMap<VertexId, Vec<ScalarValue>>,
+    /// label_name → vertex_id → property values indexed by schema position.
+    ///
+    /// Vertex IDs are label-local in LDBC, so the label must be part of the
+    /// key. Every stored row is padded to the label schema width with NULLs.
+    vertex_props: HashMap<String, HashMap<VertexId, Vec<ScalarValue>>>,
     /// label_name → ordered property names (position = column index).
     vertex_prop_schema: HashMap<String, Vec<String>>,
     /// edge_id → property values indexed by schema position.
@@ -123,7 +126,7 @@ pub struct FlatGraph {
 pub struct FlatGraphBuilder {
     vertices_by_label: HashMap<String, Vec<VertexId>>,
     vertex_label_map: HashMap<VertexId, String>,
-    vertex_props: HashMap<VertexId, Vec<ScalarValue>>,
+    vertex_props: HashMap<String, HashMap<VertexId, Vec<ScalarValue>>>,
     vertex_prop_schema: HashMap<String, Vec<String>>,
     edge_props: HashMap<EdgeId, Vec<ScalarValue>>,
     edge_prop_schema: HashMap<String, Vec<String>>,
@@ -143,13 +146,13 @@ impl FlatGraphBuilder {
     /// Declare the property schema for a vertex label (column order matters).
     pub fn set_vertex_prop_schema(&mut self, label: &str, prop_names: Vec<String>) {
         self.vertex_prop_schema
-            .insert(label.to_string(), prop_names);
+            .insert(label.to_lowercase(), prop_names);
     }
 
     /// Declare the property schema for an edge label.
     pub fn set_edge_prop_schema(&mut self, edge_label: &str, prop_names: Vec<String>) {
         self.edge_prop_schema
-            .insert(edge_label.to_string(), prop_names);
+            .insert(edge_label.to_lowercase(), prop_names);
     }
 
     /// Register an edge type: which src/dst vertex labels it connects.
@@ -161,7 +164,7 @@ impl FlatGraphBuilder {
     }
 
     /// Add a vertex.
-    pub fn add_vertex(&mut self, vid: VertexId, label: &str, props: Vec<ScalarValue>) {
+    pub fn add_vertex(&mut self, vid: VertexId, label: &str, mut props: Vec<ScalarValue>) {
         let label_lc = label.to_lowercase();
         self.vertices_by_label
             .entry(label_lc.clone())
@@ -169,14 +172,24 @@ impl FlatGraphBuilder {
             .push(vid);
         self.vertex_label_map.insert(vid, label_lc.clone());
 
-        // Collect column stats.
+        // A row is positional: pad missing trailing values so every schema
+        // column retains its index. Interior missing values must already be
+        // represented by ScalarValue::Null by the loader.
         if let Some(schema) = self.vertex_prop_schema.get(&label_lc) {
-            let table = self.graph_stats.vertex_stats.entry(label_lc).or_default();
+            props.resize(schema.len(), ScalarValue::Null);
+            let table = self
+                .graph_stats
+                .vertex_stats
+                .entry(label_lc.clone())
+                .or_default();
             table.observe_row(schema, &props);
         }
 
         if !props.is_empty() {
-            self.vertex_props.insert(vid, props);
+            self.vertex_props
+                .entry(label_lc)
+                .or_default()
+                .insert(vid, props);
         }
     }
 
@@ -189,7 +202,7 @@ impl FlatGraphBuilder {
         dst: VertexId,
         dst_label: &str,
         edge_label: &str,
-        props: Vec<ScalarValue>,
+        mut props: Vec<ScalarValue>,
     ) {
         // 这里同时写 outgoing / incoming 两套 bucket，
         // 因为后续查询图遍历经常需要双向看邻居。
@@ -222,6 +235,7 @@ impl FlatGraphBuilder {
 
         // Collect column stats.
         if let Some(schema) = self.edge_prop_schema.get(&el_lc) {
+            props.resize(schema.len(), ScalarValue::Null);
             let table = self.graph_stats.edge_stats.entry(el_lc).or_default();
             table.observe_row(schema, &props);
         }
@@ -452,8 +466,9 @@ impl FlatGraph {
     // ── Property queries ──────────────────────────────────────────────────────
 
     /// Property values for a vertex (indexed by schema position), or `None`.
-    pub fn vertex_props(&self, vid: VertexId) -> Option<&[ScalarValue]> {
-        self.vertex_props.get(&vid).map(Vec::as_slice)
+    /// The label is required because LDBC vertex IDs are label-local.
+    pub fn vertex_props(&self, label: &str, vid: VertexId) -> Option<&[ScalarValue]> {
+        self.vertex_props.get(label)?.get(&vid).map(Vec::as_slice)
     }
 
     /// Property values for an edge (indexed by schema position), or `None`.
@@ -611,11 +626,20 @@ impl FlatGraph {
 
         // ── 1. Apply vertex insertions ────────────────────────────────────────
         let t_phase = std::time::Instant::now();
-        for (vid, label, props) in pending.inserted_vertices {
+        for (vid, label, mut props) in pending.inserted_vertices {
             self.vertex_label_map.insert(vid, label.clone());
-            self.vertices_by_label.entry(label).or_default().push(vid);
+            self.vertices_by_label
+                .entry(label.clone())
+                .or_default()
+                .push(vid);
+            if let Some(schema) = self.vertex_prop_schema.get(&label) {
+                props.resize(schema.len(), ScalarValue::Null);
+            }
             if !props.is_empty() {
-                self.vertex_props.insert(vid, props);
+                self.vertex_props
+                    .entry(label)
+                    .or_default()
+                    .insert(vid, props);
             }
         }
 
@@ -633,7 +657,9 @@ impl FlatGraph {
                     vids.retain(|&v| v != *vid);
                 }
             }
-            self.vertex_props.remove(vid);
+            for props_by_id in self.vertex_props.values_mut() {
+                props_by_id.remove(vid);
+            }
         }
 
         // Re-sort vertex lists after insertions/deletions.
@@ -750,8 +776,12 @@ impl FlatGraph {
                     edge_label: pe.edge_label.clone(),
                 },
             );
-            if !pe.props.is_empty() {
-                self.edge_props.insert(pe.edge_id, pe.props.clone());
+            let mut props = pe.props.clone();
+            if let Some(schema) = self.edge_prop_schema.get(&pe.edge_label) {
+                props.resize(schema.len(), ScalarValue::Null);
+            }
+            if !props.is_empty() {
+                self.edge_props.insert(pe.edge_id, props);
             }
         }
         for &eid in &pending.deleted_edge_ids {
@@ -904,6 +934,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use minigu_common::value::ScalarValue;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use tempfile::tempdir;
@@ -982,5 +1013,87 @@ mod tests {
 
         assert_eq!(sampled.len(), 32);
         assert_eq!(clone_count.load(Ordering::Relaxed), 32);
+    }
+
+    #[test]
+    fn property_rows_are_schema_aligned_and_label_scoped() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema(
+            "person",
+            vec!["name".to_string(), "middle".to_string(), "city".to_string()],
+        );
+        builder.set_vertex_prop_schema("forum", vec!["title".to_string()]);
+        builder.set_edge_prop_schema("knows", vec!["since".to_string(), "until".to_string()]);
+        builder.set_edge_type_schema("knows", "person", "person");
+
+        // The same label-local ID belongs to two labels. The explicit NULL in
+        // the middle must not shift `city`, and the short second row must be
+        // padded to the schema width.
+        builder.add_vertex(
+            1,
+            "person",
+            vec![
+                ScalarValue::String(Some("Alice".to_string())),
+                ScalarValue::Null,
+                ScalarValue::String(Some("Beijing".to_string())),
+            ],
+        );
+        builder.add_vertex(
+            2,
+            "person",
+            vec![ScalarValue::String(Some("Bob".to_string()))],
+        );
+        builder.add_vertex(
+            1,
+            "forum",
+            vec![ScalarValue::String(Some("Graph".to_string()))],
+        );
+        builder.add_edge(
+            10,
+            1,
+            "person",
+            2,
+            "person",
+            "knows",
+            vec![ScalarValue::Int64(Some(2020))],
+        );
+        let graph = builder.build();
+
+        assert_eq!(
+            graph.vertex_props("person", 1),
+            Some(
+                [
+                    ScalarValue::String(Some("Alice".to_string())),
+                    ScalarValue::Null,
+                    ScalarValue::String(Some("Beijing".to_string())),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            graph.vertex_props("forum", 1),
+            Some([ScalarValue::String(Some("Graph".to_string()))].as_slice())
+        );
+        assert_eq!(
+            graph.vertex_props("person", 2),
+            Some(
+                [
+                    ScalarValue::String(Some("Bob".to_string())),
+                    ScalarValue::Null,
+                    ScalarValue::Null,
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            graph.edge_props(10),
+            Some([ScalarValue::Int64(Some(2020)), ScalarValue::Null].as_slice())
+        );
+
+        let person_stats = graph.vertex_table_stats("person").unwrap();
+        assert_eq!(person_stats.columns["middle"].total_count, 2);
+        assert_eq!(person_stats.columns["middle"].null_count, 2);
+        assert_eq!(person_stats.columns["city"].total_count, 2);
+        assert_eq!(person_stats.columns["city"].null_count, 1);
     }
 }

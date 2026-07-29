@@ -439,6 +439,7 @@ pub(super) fn build_flat_graph(manifest: &Manifest, dataset_dir: &std::path::Pat
         let path = dataset_dir.join(&vs.file.path);
         let mut rdr = match ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true)
             .delimiter(b',')
             .from_path(&path)
         {
@@ -462,12 +463,17 @@ pub(super) fn build_flat_graph(manifest: &Manifest, dataset_dir: &std::path::Pat
                 Some(v) => v,
                 None => continue,
             };
+            // Build a schema-width positional row. `zip` would silently
+            // truncate short CSV records, causing later property indexes and
+            // column null counts to diverge from the label schema.
             let props: Vec<ScalarValue> = vs
                 .properties
                 .iter()
-                .zip(record.iter().skip(1))
-                .map(|(prop_def, val)| {
-                    property_to_scalar_value(prop_def, val).unwrap_or(ScalarValue::Null)
+                .enumerate()
+                .map(|(property_index, prop_def)| {
+                    property_to_scalar_value(prop_def, record.get(property_index + 1).unwrap_or(""))
+                        .ok()
+                        .unwrap_or(ScalarValue::Null)
                 })
                 .collect();
             builder.add_vertex(vid, &label, props);
@@ -488,6 +494,7 @@ pub(super) fn build_flat_graph(manifest: &Manifest, dataset_dir: &std::path::Pat
         let path = dataset_dir.join(&es.file.path);
         let mut rdr = match ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true)
             .delimiter(b',')
             .from_path(&path)
         {
@@ -523,9 +530,11 @@ pub(super) fn build_flat_graph(manifest: &Manifest, dataset_dir: &std::path::Pat
             let props: Vec<ScalarValue> = es
                 .properties
                 .iter()
-                .zip(record.iter().skip(2))
-                .map(|(prop_def, val)| {
-                    property_to_scalar_value(prop_def, val).unwrap_or(ScalarValue::Null)
+                .enumerate()
+                .map(|(property_index, prop_def)| {
+                    property_to_scalar_value(prop_def, record.get(property_index + 2).unwrap_or(""))
+                        .ok()
+                        .unwrap_or(ScalarValue::Null)
                 })
                 .collect();
             builder.add_edge(eid, src, &src_label, dst, &dst_label, &edge_label, props);
@@ -759,4 +768,66 @@ pub fn build_procedure() -> Procedure {
 
         Ok(vec![])
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::str::FromStr;
+
+    use minigu_common::value::ScalarValue;
+    use tempfile::tempdir;
+
+    use super::build_flat_graph;
+    use crate::procedures::common::Manifest;
+
+    #[test]
+    fn flat_graph_loader_preserves_middle_and_trailing_null_positions() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("person.csv"),
+            "id,name,age,city\n1,Alice,,Beijing\n2,Bob\n",
+        )
+        .unwrap();
+
+        let manifest = Manifest::from_str(
+            r#"{
+                "vertices": [{
+                    "label": "person",
+                    "file": {"path": "person.csv", "format": "csv"},
+                    "properties": [
+                        {"name": "name", "logical_type": "String", "nullable": true},
+                        {"name": "age", "logical_type": "Int64", "nullable": true},
+                        {"name": "city", "logical_type": "String", "nullable": true}
+                    ]
+                }],
+                "edges": []
+            }"#,
+        )
+        .unwrap();
+
+        let graph = build_flat_graph(&manifest, dir.path());
+        assert_eq!(
+            graph.vertex_props("person", 1),
+            Some(
+                [
+                    ScalarValue::String(Some("Alice".to_string())),
+                    ScalarValue::Int64(None),
+                    ScalarValue::String(Some("Beijing".to_string())),
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(
+            graph.vertex_props("person", 2),
+            Some(
+                [
+                    ScalarValue::String(Some("Bob".to_string())),
+                    ScalarValue::Int64(None),
+                    ScalarValue::String(None),
+                ]
+                .as_slice()
+            )
+        );
+    }
 }

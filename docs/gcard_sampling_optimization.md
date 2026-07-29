@@ -4,6 +4,10 @@
 > `2da9283c`（`Fix GCard sampling and singleton estimates`）。当前尚未提交的性能修改
 > 作为“当前优化”单独介绍。
 
+> 当前实现状态：原始 Stage 2 仅在第 1、2 节作为历史逻辑和瓶颈保留。当前执行路径
+> 已取消全标签过滤池扫描，改为 Stage 1 加权选择率的单侧 95% 统计置信上界，详见
+> 第 4.7 节。
+
 ## 1. 原始采样逻辑
 
 GCard 的主体基数由 PCF（Piecewise Constant Function）估计。采样并不重新计算
@@ -431,7 +435,7 @@ handle。处理完后又把本地谓词结果逐项写入共享 DashMap。起点
 | 起点谓词只计算一次 | 在 per-start walk 循环外求值并传入每次 walk | 去掉同一起点 5–50 次局部 HashMap 探测 | 必须保持 missing-property 的结构失败语义 | 已实现 |
 | 删除无读取方的共享 predicate flush | Stage 1 只保留每起点局部谓词缓存 | 去掉每个起点结束时的 DashMap 插入与竞争 | 若未来恢复跨起点读取，需要重新评估 | 已实现 |
 | 聚合 profiling 原子更新 | 每个 batch 汇总后对三个计数器各更新一次 | 原子写从每起点三次降到每批次三次 | profiling 统计值保持不变 | 已实现 |
-| 分离 Stage 2 触发信号 | 分别统计结构 dead-end、起点谓词失败、下游谓词失败，只让起点谓词稀疏触发过滤池 | 避免无效全标签扫描 | 需要重新定义并验证估计器语义 | 待实现 |
+| 取消 Stage 2，使用统计置信上界 | 只运行均匀 Stage 1；基于结构权重的 Kish 有效样本数计算单侧 95% 上界 | 完全消除查询期全标签扫描和过滤池物化 | 这是统计上界而非无假设的确定性上界 | 已实现 |
 | 分阶段 per-start 自适应 | 5→10→20→50 次逐级检查，而不是 5→50 | 高方差边界场景减少无效 walk | 停止规则必须避免偏差 | 待实现 |
 | 自适应全局 batch | 前期大 batch，接近收敛后缩小到 16/32 | 减少最多 127 个起点的收敛 overshoot | Rayon 小任务调度成本需一起衡量 | 待实现 |
 
@@ -468,11 +472,14 @@ downstream predicate fail= 95%
 | 概率化 pre-walk guard | 使用 `P(no hit)=(1-p)^n` 和目标成功数代替固定 `<1` 阈值 | 更稳定地跳过 doomed walk | participation 本身是估计值 |
 | 谓词执行顺序优化 | 先执行便宜且高淘汰率的谓词 | 更早终止属性判断 | 需要谓词成本/选择率统计 |
 
-### 3.3 P1：Stage 2 与缓存优化
+### 3.3 P1：如果未来重新引入谓词索引
+
+当前查询执行已经不再使用过滤池。下表保留为未来需要精确谓词支持度时的备选设计，
+不属于当前运行路径。
 
 | 优化项 | 方法 | 主要收益 | 风险/注意事项 |
 |---|---|---|---|
-| 谓词 bitmap/索引 | 为常用等值和范围谓词构建 bitmap、倒排或排序列索引 | Stage 2 从全标签扫描变为索引求交 | 建索引时间、更新维护和内存成本 |
+| 谓词 bitmap/索引 | 为常用等值和范围谓词构建 bitmap、倒排或排序列索引 | 未来可提供比置信上界更精确的谓词支持度，不需要全标签扫描 | 建索引时间、更新维护和内存成本 |
 | 过滤池 single-flight | 用 entry + OnceLock/初始化状态保证同一 key 只扫描一次 | 避免并发 cache miss 重复工作 | 失败传播和锁粒度 |
 | 有界且版本化的过滤池缓存 | LRU/容量上限，并把 graph/catalog version 放入 key | 控制内存并保证更新后正确失效 | eviction 策略会影响命中率 |
 | typed predicate key | 使用结构化 hash key 和预计算 predicate signature，避免格式化、重复排序和深拷贝 | 降低 cache key 构建成本 | `ScalarValue` 的 Hash/Eq 语义要统一 |
@@ -511,10 +518,10 @@ country_CN_bitmap AND age_ge_30_bitmap
 
 建议按以下顺序推进（前四项中的工程热路径部分已经完成）：
 
-1. 完成 P0 的日志开关和无语义变化的容器优化；Stage 2 触发拆分和多阶段停止暂缓，
-   因为它们会改变采样控制逻辑。
+1. 完成 P0 的日志开关和容器优化；取消 Stage 2，以加权单侧置信上界处理低命中和
+   零命中（已完成）。
 2. 增加端到端 profiling 字段：起点抽样、RNG、cache key、邻居缓存、predicate cache
-   flush、Rayon、Stage 2 scan、日志分别计时。
+   flush、Rayon 和日志分别计时；确认过滤池 scan 在当前路径中恒为零。
 3. 预解析 CSR handle，并让邻居缓存保存 row range/handle，消除剩余字符串和完整邻居复制（已完成）。
 4. 引入 worker-local buffer/RNG 复用和流式聚合（HashMap 容量复用已完成，其余待评估）。
 5. 根据真实 workload 决定是否值得建设 predicate bitmap/索引。
@@ -537,7 +544,7 @@ index::sample(rng, values.len(), amount)
 这项修改覆盖：
 
 - Stage 1 的 label 顶点采样；
-- Stage 2 的过滤池采样。
+- 单顶点谓词估计的候选抽样。
 
 当 `k << N` 时，元素复制和结果内存从 `O(N + k)` 降为近似 `O(k)`。当
 `k >= N` 时仍返回完整副本，保持原有 API 行为。
@@ -635,8 +642,8 @@ missing property 仍然产生 `(0, 0)` 结构失败，谓词通过或失败时�
 计算均保持不变。
 
 原实现每个起点结束后把 `local_pred_cache` 全部写入共享 `DashMap`，但 Stage 1 热路径
-没有对应的共享读取，Stage 2 全量过滤也显式使用无缓存判断。当前删除这次 flush，
-仍保留每起点局部缓存，以复用同一起点多次 walk 中访问到的下游实体谓词结果。
+没有对应的共享读取。当前删除这次 flush，仍保留每起点局部缓存，以复用同一起点
+多次 walk 中访问到的下游实体谓词结果；Stage 2 取消后也不再存在过滤池消费方。
 
 ### 4.6 固定 walk 缓冲、批量计数与日志开关
 
@@ -647,7 +654,93 @@ missing property 仍然产生 `(0, 0)` 结构失败，谓词通过或失败时�
 profiling 的 walk、邻居和属性计数先在 batch 内求和，再分别执行一次 atomic update；
 默认的 `[selectivity-debug]` 输出则只在 `GCARD_VERBOSE` 打开时执行。
 
-### 4.7 测试与微基准
+### 4.7 取消 Stage 2，使用加权单侧置信上界
+
+当前查询路径只执行均匀 Stage 1，不再根据 `failure_rate > 0.9` 触发过滤池扫描，也不
+物化或写入全局 filtered-pool cache。对每个结构成功起点，记平均 structural weight 为
+`w_i`、predicate weight 为 `x_i`，点估计仍是：
+
+```text
+p_hat = Σx_i / Σw_i
+```
+
+起点方案也不再优先选择“起点谓词最稀疏”的节点。该排序原本服务于 Stage 2 的小过滤
+池，取消 Stage 2 后会主动制造零命中。当前改为最大化预期有效证据：
+
+```text
+expected_evidence = sample_size × structural_participation × start_predicate_selectivity
+```
+
+达到至少 5 个预期有效起点的方案视为 viable；方案之间优先选择
+`expected_evidence` 更高者。
+
+由于不同起点的结构权重可能差异很大，不能直接把结构成功起点数当作等质量样本。
+当前使用 Kish effective sample size：
+
+```text
+n_eff = (Σw_i)² / Σ(w_i²)
+```
+
+`n_eff` 最大不超过结构成功起点数。某一个高权重起点占据大部分总权重时，`n_eff`
+会明显下降，从而自动放宽上界。
+
+当 `Σx_i = 0` 时，零命中并不等于真实选择率为零。代码使用零成功
+Clopper–Pearson 形式的单侧 95% 上界：
+
+```text
+upper = 1 - 0.05^(1 / n_eff)
+```
+
+等权独立 Bernoulli 样本时这是精确的零成功上界；代入 Kish `n_eff` 后，它是面向当前
+加权采样的保守近似。存在非零命中时，则用 `p_hat` 和 `n_eff` 计算单侧 95% Wilson
+上界。最终 PCF 结构基数乘这个上界，而不是乘零或触发 Stage 2。
+
+原 Delta-method 停止规则在零命中时会同时得到零方差，容易把“没有观察到成功”误判
+成“精确收敛”。当前零命中不会在 300 个结构成功样本处提前停止，而是继续消费调用方
+已经提供的 Stage 1 起点，直到样本耗尽或达到原有 4,000 个结构成功上限。
+
+#### 示例：300 个结构样本全部谓词零命中
+
+若 300 个结构成功起点权重相同：
+
+```text
+n_eff = 300
+upper = 1 - 0.05^(1/300) ≈ 0.009936
+```
+
+若 PCF 给出的无谓词结构基数为 1,200,000，则返回的谓词后基数上界约为：
+
+```text
+1,200,000 × 0.009936 ≈ 11,923
+```
+
+这比零估计安全，也不需要扫描一百万个 `person`。如果结构权重极不均匀，例如 100
+个成功起点中一个权重为 100、其余 99 个权重为 1，则 `n_eff ≈ 3.92`，零命中上界
+会扩大到约 `0.534`，明确反映“有效证据很少”。
+
+如果 Stage 1 连结构样本都没有，则无法从 walk 识别条件谓词选择率，当前直接使用
+无假设的确定性选择率上界 `1.0`。预采样 guard 判断预期结构命中数小于 1 时也返回
+`1.0`，不再把列统计点估计当成上界。这里的分层语义是：有结构证据时使用带明确
+置信水平和采样假设的统计上界；没有结构证据时退化到确定性的平凡上界。
+
+#### 属性 NULL 与 label schema 对齐
+
+FlatGraph 属性行现在严格按 label schema 的位置解释。CSV 加载不再用 `zip` 截断短行，
+而是逐个 schema 位置读取；中间空值保留在原下标，缺失的尾部列补为对应的 NULL。
+Builder 和增量 apply 也会把短属性行补到 schema 宽度，列统计会将缺失位置计入
+`total_count` 和 `null_count`。
+
+LDBC 顶点 ID 是 label-local，因此顶点属性不再仅以 `VertexId` 为 key，而是先按 label
+分区再按 ID 查询。这样 `person:1` 和 `forum:1` 不会互相覆盖，也不会拿一个 label 的
+属性向量套用另一个 label 的 schema。NULL 与任意普通值的比较（包括 `Ne`）均视为
+谓词不通过，但结构 weight 继续计算；已知结构顶点缺少属性行也按谓词失败处理，不再
+从结构分母中删除。查询引用 schema 中不存在的属性时直接报错，不再静默丢弃谓词。
+
+列统计驱动的采样计划选择也乘入 `non_null / total_count`，避免 NULL 比例高的列被误判
+为高命中起点。由于 FlatGraph bincode 的顶点属性 key 结构发生变化，已有 FlatGraph
+缓存需要通过 `load_ldbc` 或 `load_flatgraph` 重新构建。
+
+### 4.8 测试与微基准
 
 新增测试验证：
 
@@ -655,7 +748,14 @@ profiling 的 walk、邻居和属性计数先在 batch 内求和，再分别执�
 - 采样结果无重复且均在输入范围内；
 - 从 10,000 个对象抽 32 个时只发生 32 次元素 clone，防止以后退回整池复制；
 - 缓存的 CSR row range 与直接邻居查询返回同一结果，缺失顶点返回空范围；
-- compiled plan 对同一条有向边的正向和反向起点分别预解析到正确 CSR。
+- compiled plan 对同一条有向边的正向和反向起点分别预解析到正确 CSR；
+- 等权零命中得到 Clopper–Pearson 形式的 95% 上界；
+- 结构权重不均会降低 `n_eff` 并扩大零命中上界；
+- 非零加权选择率使用单侧 Wilson 上界。
+- 无结构证据时返回确定性选择率上界 `1.0`。
+- 中间 NULL 和短 CSV 行保持 schema 位置并补齐尾部 NULL；
+- label-local 的相同顶点 ID 不会覆盖属性；
+- NULL 的 `Ne` 谓词不会被误判为 true，未知属性不会被静默忽略。
 
 上一轮实现（尚未包含本轮 CSR 零复制和 worker-local 容量复用）的 release-mode 隔离
 微基准结果：
@@ -667,15 +767,15 @@ profiling 的 walk、邻居和属性计数先在 batch 内求和，再分别执�
 | 2,000,000 次邻居缓存 key 命中 | 75–79ms | 15–17ms | 4.50–5.05x |
 
 这些是隔离热路径结果，不等价于完整 `gcard_query` 延迟。完整收益还取决于 walk 数、
-Stage 2 次数、属性谓词成本、Rayon 调度和日志 I/O。
+属性谓词成本、Rayon 调度和日志 I/O。
 本轮 CSR range、零分配 `k=1` 和 worker-local 复用尚未单独给出数字，因此不把预期收益
 混入上述实测表。
 
-### 4.8 当前验证状态
+### 4.9 当前验证状态
 
 - `cargo fmt --check`：通过；
 - `git diff --check`：通过；
-- GCard 相关测试：62 个通过，1 个忽略，0 个失败；
+- GCard 相关测试：75 个通过，1 个忽略，0 个失败；
 - `cargo clippy --tests --features std,serde,miette --no-deps`：通过，仓库仍有既存 warning；
 - 本机缺少 LDBC 数据集，因此尚未完成相同 query/seed/config 下的端到端前后对照。
 
@@ -687,25 +787,26 @@ Stage 2 次数、属性谓词成本、Rayon 调度和日志 I/O。
 - 相同 query 集合、`max_path_length`、`max_subgraphs` 和 `sample_size`；
 - 相同线程数和 release build；
 - 每个版本至少一次 warm-up，再重复 5–10 轮；
-- 同时记录总耗时、`sample_time`、walk 数、processed vertices、Stage 2 次数、过滤池
-  scan/cache hit、邻居时间、属性时间和日志开关状态。
+- 同时记录总耗时、`sample_time`、walk 数、processed vertices、`n_eff`、point estimate、
+  upper estimate、邻居时间、属性时间和日志开关状态；Stage 2 和过滤池 scan 应恒为零。
 
 建议优先选取以下三类 query：
 
 1. 起点标签很大、`sample_size` 很小：验证 `O(k)` 起点抽样收益；
 2. 包含高出度边并触发 branching：验证 selected-neighbor 和数字缓存 key 收益；
-3. 起点谓词很稀疏并触发 Stage 2：验证大过滤池采样，同时观察全标签扫描是否成为
-   新瓶颈。
+3. 谓词很稀疏且 Stage 1 零命中：验证置信上界大小、`n_eff` 以及查询延迟不随标签总量
+   线性增长。
 
 #### 示例：端到端结果表
 
 建议最终产出类似下面的对照，而不是只比较单次 wall-clock：
 
-| Query | 版本 | 总耗时 | sample_time | walks | vertices | Stage 2 | pool scan | nbr_time | prop_time |
+| Query | 版本 | 总耗时 | sample_time | walks | vertices | n_eff | point | upper | Stage 2 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `q3_01` | baseline | 待从 `:time` 提取 | 104ms | 125,215 | 16,970 | 需单独统计 | 尚未细分 | 9.1ms | 12.7ms |
-| `q3_01` | optimized | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 |
+| `q3_01` | baseline | 待从 `:time` 提取 | 104ms | 125,215 | 16,970 | 未记录 | 未记录 | 未记录 | 需单独统计 |
+| `q3_01` | optimized | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 待测 | 0 |
 
 如果 `sample_time` 明显下降但总耗时变化很小，下一瓶颈就不在采样；如果 walks 和
-vertices 完全不变而 CPU 时间下降，说明本轮容器/缓存微优化生效；如果耗时仍主要
-来自 pool scan，则下一步应优先建设 Stage 2 触发拆分或谓词索引。
+vertices 完全不变而 CPU 时间下降，说明本轮容器/缓存微优化生效。对于零命中查询，
+还应检查 upper 的覆盖率和松紧度；若过宽，下一步应增加有界样本预算或离线谓词索引，
+而不是恢复查询期全标签扫描。

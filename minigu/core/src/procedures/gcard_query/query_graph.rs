@@ -1,16 +1,6 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock};
-
-/// Global filter pool cache shared across all `gcard_query` invocations.
-///
-/// Key encodes the full predicate semantics, so reuse across queries is safe
-/// even when per-query `predicate_id` numbering collides.  This turns the
-/// expensive O(|label|) filter scan into an amortized one-time cost per
-/// distinct `(label, predicate-set)`.
-static GLOBAL_FILTERED_POOL_CACHE: LazyLock<
-    Arc<DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>>,
-> = LazyLock::new(|| Arc::new(DashMap::new()));
 
 fn decomp_trace_enabled() -> bool {
     std::env::var_os("GCARD_DECOMP_TRACE_LOG").is_some()
@@ -60,8 +50,8 @@ use crate::procedures::gcard_query::catalog::{
 };
 use crate::procedures::gcard_query::degreepiecewise::Pcf;
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
+use crate::procedures::gcard_query::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid;
-use crate::procedures::gcard_query::flat_graph::{FlatGraph, sample_without_replacement};
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
 use crate::procedures::gcard_query::types::{
     AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef,
@@ -287,6 +277,87 @@ mod tests {
     }
 
     #[test]
+    fn single_vertex_predicate_preserves_middle_null_alignment() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![crate::procedures::gcard_query::types::PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "city".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::String(Some("Beijing".to_string())),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema(
+            "person",
+            vec!["name".to_string(), "age".to_string(), "city".to_string()],
+        );
+        builder.add_vertex(
+            1,
+            "person",
+            vec![
+                ScalarValue::String(Some("Alice".to_string())),
+                ScalarValue::Null,
+                ScalarValue::String(Some("Beijing".to_string())),
+            ],
+        );
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                1,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates[0].0.get_es().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn null_value_ne_predicate_is_not_true() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "person")],
+            edges: Vec::new(),
+            predicates: vec![crate::procedures::gcard_query::types::PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "age".to_string(),
+                op: ComparisonOp::Ne,
+                value: ScalarValue::Int64(Some(20)),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["age".to_string()]);
+        builder.add_vertex(1, "person", vec![]);
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                1,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(candidates[0].0.get_es().unwrap(), 0.0);
+    }
+
+    #[test]
     fn single_vertex_partial_sample_zero_hit_uses_upper_bound() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![vertex(1, "person")],
@@ -416,6 +487,118 @@ mod tests {
             panic!("left segment must begin with an edge");
         };
         assert_eq!(csr.unwrap().neighbors_slice(2), &[(1, 100)]);
+    }
+
+    #[test]
+    fn zero_predicate_hits_use_clopper_pearson_upper_bound() {
+        let batch = WalkBatchResult {
+            sum_struct_weight: 300.0,
+            sum_pred_weight: 0.0,
+            sum_struct_weight_sq: 300.0,
+            struct_success_sample_count: 300,
+        };
+
+        let (upper, n_eff) = batch.selectivity_upper_bound();
+        let expected = 1.0 - 0.05f64.powf(1.0 / 300.0);
+        assert!((n_eff - 300.0).abs() < 1e-12);
+        assert!((upper - expected).abs() < 1e-12);
+        assert!(upper > 0.0);
+    }
+
+    #[test]
+    fn unequal_structural_weights_widen_zero_hit_upper_bound() {
+        let equal = WalkBatchResult {
+            sum_struct_weight: 100.0,
+            sum_pred_weight: 0.0,
+            sum_struct_weight_sq: 100.0,
+            struct_success_sample_count: 100,
+        };
+        // One weight is 100 and the other 99 weights are 1.
+        let unequal = WalkBatchResult {
+            sum_struct_weight: 199.0,
+            sum_pred_weight: 0.0,
+            sum_struct_weight_sq: 10_099.0,
+            struct_success_sample_count: 100,
+        };
+
+        let (equal_upper, equal_n_eff) = equal.selectivity_upper_bound();
+        let (unequal_upper, unequal_n_eff) = unequal.selectivity_upper_bound();
+        assert!(unequal_n_eff < equal_n_eff);
+        assert!(unequal_upper > equal_upper);
+    }
+
+    #[test]
+    fn nonzero_weighted_selectivity_uses_one_sided_wilson_upper_bound() {
+        let batch = WalkBatchResult {
+            sum_struct_weight: 100.0,
+            sum_pred_weight: 10.0,
+            sum_struct_weight_sq: 100.0,
+            struct_success_sample_count: 100,
+        };
+
+        let (upper, n_eff) = batch.selectivity_upper_bound();
+        assert!((n_eff - 100.0).abs() < 1e-12);
+        assert!(upper > 0.10);
+        assert!(upper < 0.20);
+    }
+
+    #[test]
+    fn no_structural_evidence_uses_trivial_upper_bound() {
+        let batch = WalkBatchResult::default();
+
+        let (upper, n_eff) = batch.selectivity_upper_bound();
+        assert_eq!(upper, 1.0);
+        assert_eq!(n_eff, 0.0);
+    }
+
+    #[test]
+    fn column_stats_selectivity_includes_null_fraction() {
+        let mut stats = crate::procedures::gcard_query::flat_graph::stats::ColumnStats::new();
+        stats.observe(&ScalarValue::Int64(Some(20)));
+        stats.observe(&ScalarValue::Int64(None));
+        stats.observe(&ScalarValue::Null);
+        stats.observe(&ScalarValue::Int64(None));
+
+        let eq = QueryGraph::estimate_single_predicate_stats(
+            &stats,
+            &ComparisonOp::Eq,
+            &ScalarValue::Int64(Some(20)),
+        );
+        let ne = QueryGraph::estimate_single_predicate_stats(
+            &stats,
+            &ComparisonOp::Ne,
+            &ScalarValue::Int64(Some(20)),
+        );
+        assert!((eq - 0.25).abs() < 1e-12);
+        assert!(ne <= 1e-12);
+    }
+
+    #[test]
+    fn compiled_walk_rejects_unknown_predicate_property() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("person", vec!["age".to_string()]);
+        builder.add_vertex(1, "person", vec![ScalarValue::Int64(Some(20))]);
+        let flat_graph = builder.build();
+        let path_query = PathQuery {
+            path_elements: vec![PathElement::Vertex {
+                label: "person".to_string(),
+                position: 0,
+            }],
+            vertex_predicates: HashMap::from([(
+                0,
+                vec![PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "missing".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(1)),
+                }],
+            )]),
+            edge_predicates: HashMap::new(),
+        };
+
+        assert!(FlatCompiledPathQuery::compile_all(&path_query, &flat_graph).is_err());
     }
 
     #[test]
@@ -1464,15 +1647,16 @@ impl QueryGraph {
         if non_null == 0 {
             return 0.0;
         }
+        let non_null_ratio = non_null as f64 / stats.total_count.max(1) as f64;
 
         match op {
             ComparisonOp::Eq | ComparisonOp::Ne => {
                 let ndv = stats.ndv().max(1);
                 let sel = 1.0 / ndv as f64;
                 if matches!(op, ComparisonOp::Ne) {
-                    1.0 - sel
+                    non_null_ratio * (1.0 - sel)
                 } else {
-                    sel
+                    non_null_ratio * sel
                 }
             }
             ComparisonOp::Gt | ComparisonOp::Ge | ComparisonOp::Lt | ComparisonOp::Le => {
@@ -1500,28 +1684,29 @@ impl QueryGraph {
                     (to_f64(min_val), to_f64(max_val), to_f64(value))
                 else {
                     // Non-numeric: compare against min/max boundaries.
-                    return match op {
-                        ComparisonOp::Gt | ComparisonOp::Ge => {
-                            if cmp_scalar(value, max_val) != Some(std::cmp::Ordering::Less) {
-                                0.0 // value >= max → nothing passes
-                            } else {
-                                0.5
+                    return non_null_ratio
+                        * match op {
+                            ComparisonOp::Gt | ComparisonOp::Ge => {
+                                if cmp_scalar(value, max_val) != Some(std::cmp::Ordering::Less) {
+                                    0.0 // value >= max → nothing passes
+                                } else {
+                                    0.5
+                                }
                             }
-                        }
-                        ComparisonOp::Lt | ComparisonOp::Le => {
-                            if cmp_scalar(value, min_val) != Some(std::cmp::Ordering::Greater) {
-                                0.0
-                            } else {
-                                0.5
+                            ComparisonOp::Lt | ComparisonOp::Le => {
+                                if cmp_scalar(value, min_val) != Some(std::cmp::Ordering::Greater) {
+                                    0.0
+                                } else {
+                                    0.5
+                                }
                             }
-                        }
-                        _ => 0.5,
-                    };
+                            _ => 0.5,
+                        };
                 };
                 let range = fmax - fmin;
                 if range <= 0.0 {
                     return if fval >= fmin && fval <= fmax {
-                        1.0
+                        non_null_ratio
                     } else {
                         0.0
                     };
@@ -1531,7 +1716,7 @@ impl QueryGraph {
                     ComparisonOp::Lt | ComparisonOp::Le => ((fval - fmin) / range).clamp(0.0, 1.0),
                     _ => 0.5,
                 };
-                sel
+                non_null_ratio * sel
             }
         }
     }
@@ -2127,6 +2312,11 @@ impl QueryGraph {
         op: &ComparisonOp,
         expected: &ScalarValue,
     ) -> GCardResult<bool> {
+        // SQL-style filter semantics: comparisons involving NULL are not
+        // true, including `NULL != value`.
+        if Self::scalar_is_null(value) || Self::scalar_is_null(expected) {
+            return Ok(false);
+        }
         // 统一封装谓词比较逻辑，避免顶点谓词/边谓词各写一遍分支。
         use ComparisonOp::*;
 
@@ -2151,6 +2341,28 @@ impl QueryGraph {
                     .map(|ord| ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal)
             }),
         }
+    }
+
+    fn scalar_is_null(value: &ScalarValue) -> bool {
+        use ScalarValue::*;
+        matches!(
+            value,
+            Null | Boolean(None)
+                | Int8(None)
+                | Int16(None)
+                | Int32(None)
+                | Int64(None)
+                | UInt8(None)
+                | UInt16(None)
+                | UInt32(None)
+                | UInt64(None)
+                | Float32(None)
+                | Float64(None)
+                | String(None)
+                | Vector { value: None, .. }
+                | Vertex(None)
+                | Edge(None)
+        )
     }
 
     fn compare_ordered<F>(
@@ -2254,10 +2466,68 @@ struct WalkProf {
 }
 
 /// Aggregated output of `run_walk_batch`.
+#[derive(Default)]
 struct WalkBatchResult {
     sum_struct_weight: f64,
     sum_pred_weight: f64,
+    sum_struct_weight_sq: f64,
     struct_success_sample_count: usize,
+}
+
+impl WalkBatchResult {
+    /// Kish effective sample size for the structurally successful per-start
+    /// observations. Unequal structural weights reduce the amount of
+    /// predicate evidence and therefore widen the confidence upper bound.
+    fn effective_sample_size(&self) -> Option<f64> {
+        if self.struct_success_sample_count == 0
+            || self.sum_struct_weight <= 0.0
+            || self.sum_struct_weight_sq <= 0.0
+        {
+            return None;
+        }
+
+        let observed = self.struct_success_sample_count as f64;
+        let raw = self.sum_struct_weight * self.sum_struct_weight / self.sum_struct_weight_sq;
+        let effective = if raw.is_finite() {
+            raw.clamp(1.0, observed)
+        } else {
+            1.0
+        };
+        Some(effective)
+    }
+
+    /// One-sided 95% upper confidence estimate for predicate selectivity.
+    ///
+    /// For zero predicate weight this uses the zero-success Clopper-Pearson
+    /// form with Kish effective sample size (exact for equal independent
+    /// samples, conservative approximation for weighted samples). For a
+    /// non-zero weighted ratio it uses the corresponding Wilson upper bound.
+    /// The per-start observation is the independent sampling unit; repeated
+    /// walks and Alley branches within one start do not inflate `n_eff`.
+    fn selectivity_upper_bound(&self) -> (f64, f64) {
+        const ALPHA: f64 = 0.05;
+        const Z_ONE_SIDED_95: f64 = 1.644_853_626_951_472_2;
+
+        // Without even one structurally successful observation, the
+        // conditional predicate denominator is unknown. The only assumption-
+        // free selectivity upper bound is therefore the trivial bound 1.0.
+        let Some(n_eff) = self.effective_sample_size() else {
+            return (1.0, 0.0);
+        };
+        let point = (self.sum_pred_weight / self.sum_struct_weight).clamp(0.0, 1.0);
+        if point == 0.0 {
+            let upper = 1.0 - ALPHA.powf(1.0 / n_eff);
+            return (upper.clamp(0.0, 1.0), n_eff);
+        }
+
+        let z2 = Z_ONE_SIDED_95 * Z_ONE_SIDED_95;
+        let denominator = 1.0 + z2 / n_eff;
+        let center = point + z2 / (2.0 * n_eff);
+        let margin =
+            Z_ONE_SIDED_95 * ((point * (1.0 - point) / n_eff) + z2 / (4.0 * n_eff * n_eff)).sqrt();
+        let upper = (center + margin) / denominator;
+        (upper.clamp(point, 1.0), n_eff)
+    }
 }
 
 /// Pre-resolved predicate: property index + comparison value + operator.
@@ -3067,10 +3337,8 @@ enum FlatCompiledStep<'graph> {
 /// walk.  Otherwise it is a split walk that branches from the middle.
 ///
 /// Property indices are resolved via [`FlatGraph::vertex_prop_index`] /
-/// [`FlatGraph::edge_prop_index`].  If a property cannot be resolved (e.g.
-/// the FlatGraph was built without properties), the predicate is silently
-/// dropped — the walk treats the step as always-passing, giving selectivity
-/// 1.0 for that predicate.
+/// [`FlatGraph::edge_prop_index`]. An unresolved property is rejected instead
+/// of silently dropping its predicate and treating it as always true.
 struct FlatCompiledPathQuery<'graph> {
     start_idx: usize,
     /// Label of the start vertex, used for sampling start vertices.
@@ -3103,17 +3371,23 @@ impl<'graph> FlatCompiledPathQuery<'graph> {
                     {
                         preds
                             .iter()
-                            .filter_map(|p| {
-                                let prop_index =
-                                    flat_graph.vertex_prop_index(label, &p.property)?;
-                                Some(ResolvedPredicate {
+                            .map(|p| {
+                                let prop_index = flat_graph
+                                    .vertex_prop_index(label, &p.property)
+                                    .ok_or_else(|| {
+                                    GCardError::InvalidState(format!(
+                                        "property {} is missing from FlatGraph label {}",
+                                        p.property, label
+                                    ))
+                                })?;
+                                Ok(ResolvedPredicate {
                                     predicate_id: p.predicate_id,
                                     prop_index,
                                     op: p.op.clone(),
                                     value: p.value.clone(),
                                 })
                             })
-                            .collect()
+                            .collect::<GCardResult<Vec<_>>>()?
                     } else {
                         Vec::new()
                     };
@@ -3127,16 +3401,23 @@ impl<'graph> FlatCompiledPathQuery<'graph> {
                     let predicates = if let Some(preds) = path_query.edge_predicates.get(position) {
                         preds
                             .iter()
-                            .filter_map(|p| {
-                                let prop_index = flat_graph.edge_prop_index(label, &p.property)?;
-                                Some(ResolvedPredicate {
+                            .map(|p| {
+                                let prop_index = flat_graph
+                                    .edge_prop_index(label, &p.property)
+                                    .ok_or_else(|| {
+                                        GCardError::InvalidState(format!(
+                                            "property {} is missing from FlatGraph edge label {}",
+                                            p.property, label
+                                        ))
+                                    })?;
+                                Ok(ResolvedPredicate {
                                     predicate_id: p.predicate_id,
                                     prop_index,
                                     op: p.op.clone(),
                                     value: p.value.clone(),
                                 })
                             })
-                            .collect()
+                            .collect::<GCardResult<Vec<_>>>()?
                     } else {
                         Vec::new()
                     };
@@ -3297,7 +3578,9 @@ impl QueryGraph {
         loop {
             hits += sampled[evaluated..target]
                 .iter()
-                .filter(|&&vid| self.vertex_passes_predicates_uncached(flat_graph, vid, &resolved))
+                .filter(|&&vid| {
+                    self.vertex_passes_predicates_uncached(flat_graph, label, vid, &resolved)
+                })
                 .count();
             evaluated = target;
             if hits >= MIN_HITS || evaluated == max_samples {
@@ -3333,13 +3616,6 @@ impl QueryGraph {
         // String-keyed vertex sample cache (label → sampled vertex IDs).
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
         let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());
-        // Share the filter pool cache across all queries — same `(label,
-        // predicate-set)` tuple always yields the same filtered vertex list
-        // regardless of which query asked, and the upfront scan cost
-        // dominates the predicate-aware sampler.
-        let filtered_pool_cache: Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        > = GLOBAL_FILTERED_POOL_CACHE.clone();
 
         // A one-vertex query has no path to decompose. Represent its label
         // cardinality (and optional predicate selectivity) as a unary PCF so
@@ -3414,7 +3690,6 @@ impl QueryGraph {
                 &selectivity_cache,
                 &flat_vertex_cache,
                 &pred_cache,
-                &filtered_pool_cache,
             )?;
             return Ok(abstract_graphs
                 .into_iter()
@@ -3469,7 +3744,6 @@ impl QueryGraph {
                     &selectivity_cache,
                     &flat_vertex_cache,
                     &pred_cache,
-                    &filtered_pool_cache,
                 )
                 .map(|graphs| {
                     graphs
@@ -3510,13 +3784,6 @@ impl QueryGraph {
         let selectivity_cache: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
         let flat_vertex_cache: Arc<DashMap<String, Vec<VertexId>>> = Arc::new(DashMap::new());
         let pred_cache: Arc<DashMap<(u32, u64), bool>> = Arc::new(DashMap::new());
-        // Share the filter pool cache across all queries — same `(label,
-        // predicate-set)` tuple always yields the same filtered vertex list
-        // regardless of which query asked, and the upfront scan cost
-        // dominates the predicate-aware sampler.
-        let filtered_pool_cache: Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        > = GLOBAL_FILTERED_POOL_CACHE.clone();
 
         let mut all_abstract_edges: Vec<AbstractEdge> = Vec::new();
         for ae_def in &decomposition.abstract_edges {
@@ -3537,7 +3804,6 @@ impl QueryGraph {
                     &selectivity_cache,
                     &flat_vertex_cache,
                     &pred_cache,
-                    &filtered_pool_cache,
                 )?;
                 Ok(abstract_edge)
             })
@@ -3695,9 +3961,6 @@ impl QueryGraph {
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<AbstractGraph> {
         let t_pivot = std::time::Instant::now();
         let pivot_nodes = query_graph.find_pivot_nodes();
@@ -3725,7 +3988,6 @@ impl QueryGraph {
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
-                    filtered_pool_cache,
                 )?;
                 Ok(abstract_edge)
             })
@@ -3774,9 +4036,6 @@ impl QueryGraph {
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<Vec<AbstractGraph>> {
         let t_pivot = std::time::Instant::now();
         let pivot_nodes = query_graph.find_pivot_nodes();
@@ -3890,7 +4149,6 @@ impl QueryGraph {
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
-                    filtered_pool_cache,
                 )
             })
             .collect::<GCardResult<Vec<_>>>()?;
@@ -3980,7 +4238,6 @@ impl QueryGraph {
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
-                    filtered_pool_cache,
                 )?);
                 if graphs.len() >= limit {
                     break;
@@ -4011,9 +4268,6 @@ impl QueryGraph {
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<AbstractGraph> {
         if decomp_trace_enabled() {
             decomp_trace_line(format!(
@@ -4039,7 +4293,6 @@ impl QueryGraph {
                     selectivity_cache,
                     flat_vertex_cache,
                     pred_cache,
-                    filtered_pool_cache,
                 )?;
                 Ok(abstract_edge)
             })
@@ -4544,9 +4797,6 @@ impl QueryGraph {
         selectivity_cache: &Arc<DashMap<String, f64>>,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<()> {
         // ── Build alt-key and label lists (identical to DB path) ──────────────
         let mut node_labels = Vec::new();
@@ -4635,7 +4885,6 @@ impl QueryGraph {
                             sample_size,
                             flat_vertex_cache,
                             pred_cache,
-                            filtered_pool_cache,
                         )?
                     } else {
                         self.compute_selectivity_flat(
@@ -4645,7 +4894,6 @@ impl QueryGraph {
                             sample_size,
                             flat_vertex_cache,
                             pred_cache,
-                            filtered_pool_cache,
                         )?
                     };
                     crate::procedures::gcard_query::SAMPLING_NANOS.fetch_add(
@@ -4690,9 +4938,6 @@ impl QueryGraph {
         sample_size: usize,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<f64> {
         let path_query = self.build_path_query(abstract_edge)?;
         self.compute_selectivity_flat_for_path_query(
@@ -4703,7 +4948,6 @@ impl QueryGraph {
             sample_size,
             flat_vertex_cache,
             pred_cache,
-            filtered_pool_cache,
         )
     }
 
@@ -4716,9 +4960,6 @@ impl QueryGraph {
         sample_size: usize,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<f64> {
         let unit_queries = self.build_unit_path_queries(abstract_edge)?;
         let mut selectivity = 1.0f64;
@@ -4733,7 +4974,6 @@ impl QueryGraph {
                 sample_size,
                 flat_vertex_cache,
                 pred_cache,
-                filtered_pool_cache,
             )?;
             selectivity *= hop_selectivity;
         }
@@ -4751,9 +4991,6 @@ impl QueryGraph {
         sample_size: usize,
         flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> GCardResult<f64> {
         let plans = FlatCompiledPathQuery::compile_all(path_query, flat_graph)?;
         if plans.is_empty() {
@@ -4781,46 +5018,35 @@ impl QueryGraph {
             &node_labels,
             &edge_labels,
             sample_size,
-            pred_cache,
-            filtered_pool_cache,
         );
         let compiled = &plans[chosen_plan_idx];
 
         // Pre-walk guard: if even the best anchor is expected to land on fewer
         // than one participating start vertex, uniform sampling would almost
         // certainly dead-end on every walk.  Skip the doomed walk entirely and
-        // return the static fallback, keeping the PCF's structural cardinality
-        // intact while supplying the predicate multiplier analytically.
+        // return the assumption-free predicate upper bound 1.0. This keeps the
+        // PCF structural cardinality intact without pretending that column
+        // statistics can bound an unobserved conditional selectivity.
         if let Some(p) = chosen_participation {
             if (sample_size as f64) * p < 1.0 {
                 crate::procedures::gcard_query::WALK_GUARD_SKIPPED
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let fallback = Self::static_fallback_selectivity(flat_graph, compiled);
                 if crate::procedures::gcard_query::GCARD_VERBOSE
                     .load(std::sync::atomic::Ordering::Relaxed)
                 {
                     eprintln!(
-                        "[selectivity-debug] path={}, GUARD-SKIP participation={:.3e}, fallback_sel={:.6}",
-                        path_desc, p, fallback,
+                        "[selectivity-debug] path={}, GUARD-SKIP participation={:.3e}, upper_sel=1.000000, mode=no-structure-upper",
+                        path_desc, p,
                     );
                 }
-                return Ok(fallback);
+                return Ok(1.0);
             }
         }
 
-        // Walk-fail-then-calculate (Alley §6 "walk-fail-then-calculate"):
-        //
-        //   Stage 1: sample uniformly from the start label, no filtering.
-        //            If the walks succeed often enough, return that estimate.
-        //   Stage 2: only if Stage 1's success rate falls below ζ, materialise
-        //            the filter pool for the start vertex's predicate and
-        //            re-sample with bias correction.
-        //
-        // This way we only ever pay the O(|label|) filter-scan price for the
-        // small set of *tangled* predicate combinations that uniform sampling
-        // can't handle — ad-hoc predicates that aren't "hard" never trigger
-        // materialisation, so the cost doesn't grow with workload diversity.
-        const FAIL_RATE_TRIGGER: f64 = 0.9;
+        // Uniform Stage-1 sampling is the only data-access stage. We never
+        // materialise a predicate-filtered label pool: doing so turns a
+        // cardinality estimate into an O(|label|) scan and makes its latency
+        // incomparable with sampling-based estimators.
 
         let stage1_starts = {
             let label = &compiled.start_label;
@@ -4834,132 +5060,57 @@ impl QueryGraph {
             }
         };
         if stage1_starts.is_empty() {
-            return Ok(0.0);
+            // An actually empty anchor label makes the path cardinality zero.
+            // Otherwise (for example, sample_size == 0) there is simply no
+            // structural evidence, so retain the trivial predicate upper
+            // bound instead of turning missing evidence into a zero estimate.
+            return Ok(
+                if flat_graph.vertex_count_by_label(&compiled.start_label) == 0 {
+                    0.0
+                } else {
+                    1.0
+                },
+            );
         }
 
         let stage1 = self.run_walk_batch(flat_graph, compiled, &stage1_starts, pred_cache);
-        let stage1_conditional = if stage1.sum_struct_weight > 0.0 {
-            stage1.sum_pred_weight / stage1.sum_struct_weight
+        let point_selectivity = if stage1.sum_struct_weight > 0.0 {
+            (stage1.sum_pred_weight / stage1.sum_struct_weight).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        // Failure rate: fraction of walks that didn't yield a pred-passing
-        // embedding.  This includes both predicate failures and pure
-        // structural dead ends (which collapse `sum_struct_weight` to 0).
-        let stage1_fail_rate = 1.0 - stage1_conditional;
 
-        let trigger_stage2 =
-            !compiled.start_predicates.is_empty() && stage1_fail_rate > FAIL_RATE_TRIGGER;
-        if trigger_stage2 {
-            crate::procedures::gcard_query::STAGE2_TRIGGERED
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        let (
-            final_conditional,
-            final_struct_success,
-            final_sum_struct,
-            final_sum_pred,
-            start_filter_ratio,
-            final_starts_len,
-            stage2_used,
-            pool_empty,
-        ) = if trigger_stage2 {
-            // Stage 2: materialise the tangled domain for this (label,
-            // predicates) pair and re-sample from it.  The pool is cached in
-            // `GLOBAL_FILTERED_POOL_CACHE`, so subsequent queries that share
-            // the same predicate hit O(1) here.
-            let (pool, ratio) = self.filtered_start_pool(
-                flat_graph,
-                &compiled.start_label,
-                &compiled.start_predicates,
-                filtered_pool_cache,
-                pred_cache,
-            );
-            if pool.is_empty() {
-                // No vertex matches the start predicate — truly zero, no
-                // amount of sampling can recover an embedding.  This is the
-                // *only* path to a genuine zero selectivity.
-                (0.0, 0, 0.0, 0.0, 0.0, 0, true, true)
-            } else {
-                let mut rng = rand::thread_rng();
-                let starts = sample_without_replacement(pool.as_ref(), sample_size, &mut rng);
-                let stage2 = self.run_walk_batch(flat_graph, compiled, &starts, pred_cache);
-                let cond = if stage2.sum_struct_weight > 0.0 {
-                    stage2.sum_pred_weight / stage2.sum_struct_weight
-                } else {
-                    0.0
-                };
-                (
-                    cond,
-                    stage2.struct_success_sample_count,
-                    stage2.sum_struct_weight,
-                    stage2.sum_pred_weight,
-                    ratio,
-                    starts.len(),
-                    true,
-                    false,
-                )
-            }
-        } else {
-            (
-                stage1_conditional,
-                stage1.struct_success_sample_count,
-                stage1.sum_struct_weight,
-                stage1.sum_pred_weight,
-                1.0,
-                stage1_starts.len(),
-                false,
-                false,
-            )
-        };
-
-        // Final unconditional selectivity: conditional ratio × P(start_pred).
-        // Stage 1 always uses ratio = 1.0 (no filter), so the multiplication
-        // is a no-op there.
-        let selectivity = final_conditional * start_filter_ratio;
-
-        // Distinguish a *genuine* zero (the start predicate matches no vertex
-        // at all → `pool_empty`) from a sampling miss (we found no
-        // structurally-valid, pred-passing embedding among the samples).  Only
-        // the former collapses the estimate to zero; the latter falls back to
-        // the static stats-based predicate selectivity so the PCF's structural
-        // cardinality survives instead of being truncated to zero.
-        let result = if pool_empty {
-            crate::procedures::gcard_query::SELECTIVITY_ZERO
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::procedures::gcard_query::STAGE2_RESULT_ZERO
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            0.0
-        } else if selectivity == 0.0 {
+        // A zero predicate hit is evidence that selectivity is small, not
+        // proof that it is zero. Convert the Stage-1 weighted ratio into a
+        // one-sided confidence upper estimate. If no structural sample
+        // succeeds at all, predicate selectivity is not identifiable from the
+        // walk, so use the assumption-free upper bound 1.0.
+        let (result, effective_samples) = stage1.selectivity_upper_bound();
+        let estimate_mode = if stage1.struct_success_sample_count == 0 {
             crate::procedures::gcard_query::SELECTIVITY_FALLBACK
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if stage2_used {
-                crate::procedures::gcard_query::STAGE2_RESULT_ZERO
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            Self::static_fallback_selectivity(flat_graph, compiled)
+            "no-structure-upper"
+        } else if stage1.sum_pred_weight == 0.0 {
+            "zero-hit-upper"
         } else {
-            selectivity
+            "wilson-upper"
         };
 
         if crate::procedures::gcard_query::GCARD_VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
         {
             eprintln!(
-                "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, conditional={:.6}, start_filter_ratio={:.6}, sel={:.6}, result={:.6}, stage2={}, pool_empty={}",
+                "[selectivity-debug] path={}, plan_idx={}, start_label={}, samples={}, struct_success={}, sum_struct={:.4}, sum_pred={:.4}, point={:.6}, n_eff={:.2}, result={:.6}, mode={}, stage2=false",
                 path_desc,
                 compiled.start_idx,
                 compiled.start_label,
-                final_starts_len,
-                final_struct_success,
-                final_sum_struct,
-                final_sum_pred,
-                final_conditional,
-                start_filter_ratio,
-                selectivity,
+                stage1_starts.len(),
+                stage1.struct_success_sample_count,
+                stage1.sum_struct_weight,
+                stage1.sum_pred_weight,
+                point_selectivity,
+                effective_samples,
                 result,
-                stage2_used,
-                pool_empty,
+                estimate_mode,
             );
         }
 
@@ -4967,9 +5118,8 @@ impl QueryGraph {
     }
 
     /// Run the batched parallel walk loop with per-start CV adaptation and
-    /// global Delta-method CI early stopping.  Returns aggregated weights so
-    /// the caller can decide whether to escalate (Stage 2) or accept the
-    /// estimate.
+    /// global Delta-method CI early stopping. Returns the weighted moments
+    /// needed to derive a one-sided selectivity confidence upper estimate.
     fn run_walk_batch(
         &self,
         flat_graph: &FlatGraph,
@@ -5067,6 +5217,7 @@ impl QueryGraph {
                         // probing the local predicate HashMap 5-50 times.
                         let start_pred_ok = match self.evaluate_start_vertex_predicates(
                             flat_graph,
+                            &compiled.start_label,
                             start_vid,
                             &compiled.start_predicates,
                             &mut prof,
@@ -5206,6 +5357,13 @@ impl QueryGraph {
                 let denom = k - 1.0;
                 if denom > 0.0 && mean_struct.abs() > eps0 {
                     let selectivity_est = mean_pred / mean_struct;
+                    // With zero predicate hits the Delta variance also
+                    // collapses to zero, but that is not evidence of exact
+                    // convergence. Consume the remaining bounded Stage-1
+                    // starts so the zero-hit upper bound becomes tighter.
+                    if selectivity_est <= eps0 {
+                        continue;
+                    }
                     let var_pred = (sum_pred_weight_sq - k * mean_pred * mean_pred) / denom;
                     let var_struct = (sum_struct_weight_sq - k * mean_struct * mean_struct) / denom;
                     let cov = (sum_cross_weight - k * mean_pred * mean_struct) / denom;
@@ -5233,6 +5391,7 @@ impl QueryGraph {
         WalkBatchResult {
             sum_struct_weight,
             sum_pred_weight,
+            sum_struct_weight_sq,
             struct_success_sample_count,
         }
     }
@@ -5304,48 +5463,6 @@ impl QueryGraph {
         joint.clamp(1e-12, 1.0)
     }
 
-    /// Static, sampling-free estimate of the *whole path*'s predicate
-    /// selectivity for the chosen plan — the product of every predicated
-    /// position's stats selectivity (start vertex + both segments, vertices via
-    /// vertex stats, edges via edge stats), assuming predicate independence.
-    ///
-    /// This is the fallback returned when sampling fails to find any
-    /// structurally-valid embedding: the structural cardinality is already
-    /// carried exactly by the PCF, so we only need to supply the predicate
-    /// multiplier analytically rather than collapsing the estimate to zero.
-    fn static_fallback_selectivity(
-        flat_graph: &FlatGraph,
-        compiled: &FlatCompiledPathQuery<'_>,
-    ) -> f64 {
-        let mut sel = Self::stats_predicate_selectivity(
-            flat_graph,
-            &compiled.start_label,
-            false,
-            &compiled.start_predicates,
-        );
-        for segment in [&compiled.left_segment, &compiled.right_segment] {
-            for step in segment {
-                match step {
-                    FlatCompiledStep::Vertex { label, predicates } if !predicates.is_empty() => {
-                        sel *=
-                            Self::stats_predicate_selectivity(flat_graph, label, false, predicates);
-                    }
-                    FlatCompiledStep::Edge {
-                        edge_label,
-                        predicates,
-                        ..
-                    } if !predicates.is_empty() => {
-                        sel *= Self::stats_predicate_selectivity(
-                            flat_graph, edge_label, true, predicates,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-        }
-        sel.clamp(1e-12, 1.0)
-    }
-
     /// Estimate the *structural participation fraction* of anchoring the walk at
     /// vertex index `anchor` on the path described by `node_labels` /
     /// `edge_labels` — i.e. the probability that a uniformly sampled vertex of
@@ -5408,24 +5525,29 @@ impl QueryGraph {
         op: &ComparisonOp,
         value: &ScalarValue,
     ) -> f64 {
+        let non_null_ratio =
+            col.total_count.saturating_sub(col.null_count) as f64 / col.total_count.max(1) as f64;
+        if non_null_ratio == 0.0 {
+            return 0.0;
+        }
         let ndv = col.ndv() as f64;
         match op {
             ComparisonOp::Eq => {
                 if ndv >= 1.0 {
-                    (1.0 / ndv).max(1e-12)
+                    (non_null_ratio / ndv).max(1e-12)
                 } else {
-                    0.5
+                    0.5 * non_null_ratio
                 }
             }
             ComparisonOp::Ne => {
                 if ndv >= 1.0 {
-                    (1.0 - 1.0 / ndv).max(1e-12)
+                    (non_null_ratio * (1.0 - 1.0 / ndv)).max(1e-12)
                 } else {
-                    0.5
+                    0.5 * non_null_ratio
                 }
             }
             ComparisonOp::Lt | ComparisonOp::Le | ComparisonOp::Gt | ComparisonOp::Ge => {
-                Self::estimate_range_predicate_stats(col, op, value).unwrap_or(0.5)
+                non_null_ratio * Self::estimate_range_predicate_stats(col, op, value).unwrap_or(0.5)
             }
         }
     }
@@ -5467,102 +5589,20 @@ impl QueryGraph {
         }
     }
 
-    /// Return the cached (or freshly computed) filtered start pool — vertices
-    /// of `label` that pass every predicate in `predicates`.  Returns the full
-    /// filtered list (so callers can sample from it) along with the filter
-    /// ratio `|filtered| / |total|` used to debias the final selectivity.
-    ///
-    /// The pool is cached by `(label, sorted_predicate_ids)`.  Predicates
-    /// without a `predicate_id` can still be evaluated, but the pool can only
-    /// be cached when every predicate has an id, otherwise we'd risk hits
-    /// across queries that share an id but differ in value.
-    fn filtered_start_pool(
-        &self,
-        flat_graph: &FlatGraph,
-        label: &str,
-        predicates: &[ResolvedPredicate],
-        filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
-        pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-    ) -> (Arc<Vec<VertexId>>, f64) {
-        let total = flat_graph.vertex_count_by_label(label);
-        if total == 0 {
-            return (Arc::new(Vec::new()), 0.0);
-        }
-
-        // Cache key encodes the full predicate semantics (prop_index, op,
-        // value) so the filtered pool can be safely reused across queries
-        // that share the same predicate, regardless of any per-query
-        // `predicate_id` numbering.
-        let cache_key = if !predicates.is_empty() {
-            let mut spec: Vec<(usize, ComparisonOp, ScalarValue)> = predicates
-                .iter()
-                .map(|p| (p.prop_index, p.op, p.value.clone()))
-                .collect();
-            spec.sort_by(|a, b| a.0.cmp(&b.0));
-            Some((label.to_string(), spec))
-        } else {
-            None
-        };
-
-        if let Some(ref k) = cache_key {
-            if let Some(cached) = filtered_pool_cache.get(k) {
-                crate::procedures::gcard_query::FILTER_POOL_CACHE_HITS
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let pool = cached.clone();
-                let ratio = (pool.len() as f64) / (total as f64);
-                if pool.is_empty() {
-                    crate::procedures::gcard_query::FILTER_POOL_EMPTY
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-                return (pool, ratio);
-            }
-        }
-
-        crate::procedures::gcard_query::FILTER_POOL_CACHE_MISSES
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        let all_vids = flat_graph.all_vertex_ids_by_label(label);
-        // Parallel filter scan over the whole label pool.  Predicate
-        // evaluation is done without touching `pred_cache` — DashMap writes
-        // serialise across rayon workers and dominate the scan time.
-        // Subsequent walks may re-evaluate predicates on the same vertices,
-        // but that cost is small compared with the lock contention here.
-        let _ = pred_cache; // intentionally unused in the scan body
-        let filtered: Vec<VertexId> = all_vids
-            .par_iter()
-            .filter(|&&vid| self.vertex_passes_predicates_uncached(flat_graph, vid, predicates))
-            .copied()
-            .collect();
-        let pool = Arc::new(filtered);
-        let ratio = (pool.len() as f64) / (total as f64);
-
-        if pool.is_empty() {
-            crate::procedures::gcard_query::FILTER_POOL_EMPTY
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-
-        if let Some(k) = cache_key {
-            filtered_pool_cache.insert(k, pool.clone());
-        }
-
-        (pool, ratio)
-    }
-
-    /// Cache-free predicate evaluation used inside the parallel filter scan.
-    /// Reads `flat_graph.vertex_props` and applies predicates directly with
-    /// no DashMap traffic, so rayon workers don't contend on shared locks.
+    /// Cache-free predicate evaluation for a bounded candidate sample. Reads
+    /// `flat_graph.vertex_props` and applies predicates directly with no
+    /// DashMap traffic, so rayon workers do not contend on shared locks.
     fn vertex_passes_predicates_uncached(
         &self,
         flat_graph: &FlatGraph,
+        label: &str,
         vid: VertexId,
         predicates: &[ResolvedPredicate],
     ) -> bool {
         if predicates.is_empty() {
             return true;
         }
-        let Some(props) = flat_graph.vertex_props(vid) else {
+        let Some(props) = flat_graph.vertex_props(label, vid) else {
             return false;
         };
         for rp in predicates {
@@ -5583,6 +5623,7 @@ impl QueryGraph {
     fn vertex_passes_all_predicates(
         &self,
         flat_graph: &FlatGraph,
+        label: &str,
         vid: VertexId,
         predicates: &[ResolvedPredicate],
         pred_cache: &Arc<DashMap<(u32, u64), bool>>,
@@ -5614,7 +5655,7 @@ impl QueryGraph {
             return true;
         }
 
-        let Some(props) = flat_graph.vertex_props(vid) else {
+        let Some(props) = flat_graph.vertex_props(label, vid) else {
             return false;
         };
         for rp in predicates {
@@ -5643,24 +5684,14 @@ impl QueryGraph {
         true
     }
 
-    /// Pilot-evaluate every candidate walk plan and pick the one with the
-    /// lowest Delta-method SE² × pilot lookup cost.  Falls back to plan 0 if
-    /// no plan produces enough successful samples in the pilot.
-    /// Pick the best walk plan using *statistics only* — no pilot walks, no
-    /// label scan.  For each plan we estimate the start vertex's predicate
-    /// selectivity from `ColumnStats` and pick the plan whose start vertex is
-    /// most selective (smallest estimated ratio).  Ties go to the plan with
-    /// the smaller start population (cheaper to materialise later if the
-    /// walk-fail-then-calculate stage 2 ever triggers).
     /// Pick the single walk plan to sample, considering **both** predicate
-    /// selectivity (as before) **and** structural participation (new).
+    /// pass probability and structural participation, using statistics only.
     ///
-    /// Structure gates, selectivity refines: an anchor is "viable" when uniform
-    /// start sampling is expected to land on enough participating vertices
-    /// (`sample_size * participation >= VIABLE_MIN_HITS`).  Among viable anchors
-    /// the most predicate-selective start wins (smallest filter pool, cleanest
-    /// conditional estimate); if none is viable we pick the best structural
-    /// chance so the caller's fallback path runs from the least-bad anchor.
+    /// Without a materialising Stage 2, choosing the most selective start
+    /// predicate would deliberately create zero-hit samples. Instead, rank by
+    /// the expected number of starts that both participate structurally and
+    /// pass the start predicate:
+    /// `sample_size * participation * start_predicate_selectivity`.
     ///
     /// Returns `(chosen_idx, participation_of_chosen)`.  The participation is
     /// `None` when the catalog has no stats for that anchor's pattern.
@@ -5673,14 +5704,9 @@ impl QueryGraph {
         node_labels: &[String],
         edge_labels: &[String],
         sample_size: usize,
-        _pred_cache: &Arc<DashMap<(u32, u64), bool>>,
-        _filtered_pool_cache: &Arc<
-            DashMap<(String, Vec<(usize, ComparisonOp, ScalarValue)>), Arc<Vec<VertexId>>>,
-        >,
     ) -> (usize, Option<f64>) {
-        // Minimum expected number of structurally-successful starts for an
-        // anchor to count as "viable" — above this, uniform sampling lands on
-        // enough participating vertices to yield a real conditional estimate.
+        // Minimum expected number of starts that are structurally usable and
+        // pass the start predicate for an anchor to count as viable.
         const VIABLE_MIN_HITS: f64 = 5.0;
 
         struct Cand {
@@ -5688,6 +5714,7 @@ impl QueryGraph {
             participation: Option<f64>,
             viable: bool,
             ratio: f64,
+            expected_evidence: f64,
             pop: usize,
         }
 
@@ -5696,29 +5723,18 @@ impl QueryGraph {
             if a.viable != b.viable {
                 return a.viable;
             }
+            if a.expected_evidence != b.expected_evidence {
+                return a.expected_evidence > b.expected_evidence;
+            }
             let pa = a.participation.unwrap_or(0.0);
             let pb = b.participation.unwrap_or(0.0);
-            if a.viable {
-                // Both viable: most selective start first, then highest
-                // participation, then smallest population.
-                if a.ratio != b.ratio {
-                    return a.ratio < b.ratio;
-                }
-                if pa != pb {
-                    return pa > pb;
-                }
-                a.pop < b.pop
-            } else {
-                // Both non-viable: best structural chance first, then most
-                // selective start, then smallest population.
-                if pa != pb {
-                    return pa > pb;
-                }
-                if a.ratio != b.ratio {
-                    return a.ratio < b.ratio;
-                }
-                a.pop < b.pop
+            if pa != pb {
+                return pa > pb;
             }
+            if a.ratio != b.ratio {
+                return a.ratio > b.ratio;
+            }
+            a.pop < b.pop
         };
 
         let n = sample_size as f64;
@@ -5742,19 +5758,18 @@ impl QueryGraph {
                 edge_labels,
                 plan.start_idx,
             );
-            // Unknown participation is treated as neutral/viable so anchors
-            // without catalog stats fall back to the legacy selectivity ranking
-            // instead of being penalised to the bottom.
-            let viable = match participation {
-                Some(p) => n * p >= VIABLE_MIN_HITS,
-                None => true,
-            };
+            // Unknown participation remains neutral rather than being
+            // penalised as zero support.
+            let structural_factor = participation.unwrap_or(1.0);
+            let expected_evidence = n * structural_factor * ratio;
+            let viable = expected_evidence >= VIABLE_MIN_HITS;
 
             let cand = Cand {
                 idx,
                 participation,
                 viable,
                 ratio,
+                expected_evidence,
                 pop,
             };
             if best.as_ref().is_none_or(|b| is_better(&cand, b)) {
@@ -5766,12 +5781,13 @@ impl QueryGraph {
         if crate::procedures::gcard_query::GCARD_VERBOSE.load(std::sync::atomic::Ordering::Relaxed)
         {
             eprintln!(
-                "[plan-select] plans={}, chosen={}, viable={}, participation={:?}, est_ratio={:.6e}, pop={}, start_label={}",
+                "[plan-select] plans={}, chosen={}, viable={}, participation={:?}, est_ratio={:.6e}, expected_evidence={:.3}, pop={}, start_label={}",
                 plans.len(),
                 best.idx,
                 best.viable,
                 best.participation,
                 best.ratio,
+                best.expected_evidence,
                 best.pop,
                 plans[best.idx].start_label,
             );
@@ -5908,12 +5924,12 @@ impl QueryGraph {
     /// Evaluate start vertex predicates.
     ///
     /// Returns `Some(true)` if predicates pass (or are empty), `Some(false)` if
-    /// any predicate fails, and `None` to signal a structural dead end
-    /// (preserves the legacy behaviour where missing vertex props at a
-    /// predicated step discards the walk entirely).
+    /// any predicate fails. A missing property row on a topologically known
+    /// vertex is a predicate failure, not a structural dead end.
     fn evaluate_start_vertex_predicates(
         &self,
         flat_graph: &FlatGraph,
+        label: &str,
         vid: VertexId,
         predicates: &[ResolvedPredicate],
         prof: &mut WalkProf,
@@ -5923,10 +5939,10 @@ impl QueryGraph {
             return Ok(Some(true));
         }
         let t0 = std::time::Instant::now();
-        let props = flat_graph.vertex_props(vid);
+        let props = flat_graph.vertex_props(label, vid);
         prof.prop_nanos += t0.elapsed().as_nanos() as u64;
         let Some(props) = props else {
-            return Ok(None);
+            return Ok(Some(false));
         };
         for rp in predicates {
             let pass = if let Some(pid) = rp.predicate_id {
@@ -6074,12 +6090,13 @@ impl QueryGraph {
         }
 
         match &segment[depth] {
-            FlatCompiledStep::Vertex { predicates, .. } => {
+            FlatCompiledStep::Vertex { label, predicates } => {
                 let pred_pass = if predicates.is_empty() {
                     true
                 } else {
                     match self.evaluate_step_vertex_predicates(
                         flat_graph,
+                        label,
                         current_vid,
                         predicates,
                         prof,
@@ -6239,23 +6256,22 @@ impl QueryGraph {
         Ok((struct_weight, pred_weight * edge_factor))
     }
 
-    /// Evaluate `predicates` against a vertex's properties.  Returns
-    /// `Some(true)` if every predicate passes, `Some(false)` if any fails,
-    /// and `None` to signal a structural dead end (missing properties for a
-    /// predicated step).
+    /// Evaluate `predicates` against a vertex's properties. A missing row or
+    /// NULL property fails the predicate while preserving structural weight.
     fn evaluate_step_vertex_predicates(
         &self,
         flat_graph: &FlatGraph,
+        label: &str,
         vid: VertexId,
         predicates: &[ResolvedPredicate],
         prof: &mut WalkProf,
         local_pred_cache: &mut HashMap<(u32, u64), bool>,
     ) -> GCardResult<Option<bool>> {
         let t0 = std::time::Instant::now();
-        let props = flat_graph.vertex_props(vid);
+        let props = flat_graph.vertex_props(label, vid);
         prof.prop_nanos += t0.elapsed().as_nanos() as u64;
         let Some(props) = props else {
-            return Ok(None);
+            return Ok(Some(false));
         };
         for rp in predicates {
             let pass = if let Some(pid) = rp.predicate_id {

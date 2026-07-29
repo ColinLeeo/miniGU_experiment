@@ -624,8 +624,8 @@ fn evaluate_wander_join_binding(
     binding: &WanderJoinBinding,
 ) -> GCardResult<bool> {
     match (&node.kind, binding) {
-        (WanderJoinNodeKind::Vertex { .. }, WanderJoinBinding::Vertex(data_vertex)) => {
-            evaluate_vertex_predicates(flat_graph, *data_vertex, &node.predicates)
+        (WanderJoinNodeKind::Vertex { label, .. }, WanderJoinBinding::Vertex(data_vertex)) => {
+            evaluate_vertex_predicates(flat_graph, label, *data_vertex, &node.predicates)
         }
         (WanderJoinNodeKind::Edge { .. }, WanderJoinBinding::Edge { edge_id, .. }) => {
             evaluate_edge_predicates(flat_graph, *edge_id, &node.predicates)
@@ -636,13 +636,14 @@ fn evaluate_wander_join_binding(
 
 fn evaluate_vertex_predicates(
     flat_graph: &FlatGraph,
+    label: &str,
     data_vertex: VertexId,
     predicates: &[ResolvedPredicate],
 ) -> GCardResult<bool> {
     if predicates.is_empty() {
         return Ok(true);
     }
-    let Some(props) = flat_graph.vertex_props(data_vertex) else {
+    let Some(props) = flat_graph.vertex_props(label, data_vertex) else {
         return Ok(false);
     };
     for predicate in predicates {
@@ -683,6 +684,9 @@ fn compare_values(
     op: &ComparisonOp,
     expected: &ScalarValue,
 ) -> GCardResult<bool> {
+    if scalar_is_null(value) || scalar_is_null(expected) {
+        return Ok(false);
+    }
     use ComparisonOp::*;
 
     match op {
@@ -703,6 +707,28 @@ fn compare_values(
                 .map(|ord| ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal)
         }),
     }
+}
+
+fn scalar_is_null(value: &ScalarValue) -> bool {
+    use ScalarValue::*;
+    matches!(
+        value,
+        Null | Boolean(None)
+            | Int8(None)
+            | Int16(None)
+            | Int32(None)
+            | Int64(None)
+            | UInt8(None)
+            | UInt16(None)
+            | UInt32(None)
+            | UInt64(None)
+            | Float32(None)
+            | Float64(None)
+            | String(None)
+            | Vector { value: None, .. }
+            | Vertex(None)
+            | Edge(None)
+    )
 }
 
 fn compare_ordered<F>(value: &ScalarValue, expected: &ScalarValue, cmp: F) -> GCardResult<bool>
