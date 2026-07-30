@@ -9,11 +9,16 @@ use minigu::database::{Database, DatabaseConfig};
 pub struct ScriptExecutor {}
 
 impl ScriptExecutor {
-    pub fn execute_file(&self, file: String, path: Option<String>) -> Result<()> {
+    pub fn execute_file(&self, file: String, path: Option<String>, threads: usize) -> Result<()> {
+        let config = DatabaseConfig {
+            num_threads: threads,
+            ..DatabaseConfig::default()
+        };
+        eprintln!("[minigu] database threads: {threads}");
         let db = if let Some(path) = path {
-            Database::open(path, DatabaseConfig::default()).unwrap()
+            Database::open(path, config).unwrap()
         } else {
-            Database::open_in_memory(DatabaseConfig::default()).unwrap()
+            Database::open_in_memory(config).unwrap()
         };
         let mut session = db.session().unwrap();
         let content = std::fs::read_to_string(&file).into_diagnostic()?;
