@@ -931,6 +931,12 @@ mod tests {
         assert!(!graph.edge_set_to_endpoints.contains_key(&long));
         assert!(graph.path_aliases.contains_key(&long));
         assert!(graph.path_has_endpoint_pair(&long, "A", "D"));
+        assert!(!graph.path_has_materialized_endpoint_pair(&long, "A", "D"));
+        assert!(
+            graph
+                .get_materialized_piece_func_by_path(&long, "A")
+                .is_empty_placeholder()
+        );
         assert_eq!(graph.get_piece_func_by_path(&long, "A").get_num_rows(), 6.0);
         assert_eq!(
             graph.get_piece_func_by_path(&long, "D").get_num_rows(),

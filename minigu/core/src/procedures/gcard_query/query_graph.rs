@@ -88,7 +88,7 @@ impl Endpoints for QueryEdge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::procedures::gcard_query::catalog::CompressedDegreeSeq;
+    use crate::procedures::gcard_query::catalog::{CompressedDegreeSeq, PathAlias};
     use crate::procedures::gcard_query::degreepiecewise::PiecewiseConstantFunction;
     use crate::procedures::gcard_query::flat_graph::FlatGraphBuilder;
 
@@ -1002,6 +1002,126 @@ mod tests {
 
         assert_eq!(selected, vec![1, 2, 3]);
         assert_eq!(pcf.get_num_rows(), 34.0);
+    }
+
+    #[test]
+    fn functional_alias_does_not_contract_k_boundary_without_two_ended_pcf() {
+        // Mirrors the problematic LDBC direction:
+        // City -> Country <- City <- Person -> Person <- Person.
+        // The four-edge suffix has a schema-only alias to the two knows
+        // edges because Person -> City -> Country is functional.  That alias
+        // preserves the far Person endpoint, but it cannot provide the
+        // Country-side PCF where many persons must be aggregated.
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "person"),
+                vertex(2, "person"),
+                vertex(3, "city"),
+                vertex(4, "city"),
+                vertex(5, "country"),
+                vertex(6, "person"),
+            ],
+            edges: vec![
+                edge(1, "person_knows_person", 1, 2),
+                edge(2, "person_knows_person", 6, 2),
+                edge(3, "person_islocatedin_city", 1, 3),
+                edge(4, "city_ispartof_country", 3, 5),
+                edge(5, "city_ispartof_country", 4, 5),
+            ],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+        let path = Path {
+            start: 4,
+            end: 6,
+            vertices: vec![4, 5, 3, 1, 2, 6],
+            edges: vec![5, 4, 3, 1, 2],
+        };
+
+        let core_key = make_alt_key(
+            &[
+                "person".to_string(),
+                "person".to_string(),
+                "person".to_string(),
+            ],
+            &[
+                "person_knows_person".to_string(),
+                "person_knows_person".to_string(),
+            ],
+        );
+        let alias_key = make_alt_key(
+            &[
+                "country".to_string(),
+                "city".to_string(),
+                "person".to_string(),
+                "person".to_string(),
+                "person".to_string(),
+            ],
+            &[
+                "city_ispartof_country".to_string(),
+                "person_islocatedin_city".to_string(),
+                "person_knows_person".to_string(),
+                "person_knows_person".to_string(),
+            ],
+        );
+
+        let mut catalog = DegreeSeqGraphCompressed::new();
+        catalog.edge_set_to_endpoints.insert(
+            core_key.clone(),
+            HashMap::from([(
+                "person".to_string(),
+                CompressedDegreeSeq::SafeBound {
+                    function: PiecewiseConstantFunction {
+                        constants: vec![2.0],
+                        right_interval_edges: vec![3.0],
+                        cumulative_rows: vec![6.0],
+                    },
+                },
+            )]),
+        );
+        catalog.path_aliases.insert(
+            alias_key.clone(),
+            PathAlias {
+                source: core_key,
+                endpoint_map: HashMap::from([
+                    ("country".to_string(), "person".to_string()),
+                    ("person".to_string(), "person".to_string()),
+                ]),
+            },
+        );
+        catalog.edge_cardinalities.insert(
+            "city_ispartof_country".to_string(),
+            EdgeCardinality::ManyToOne,
+        );
+        catalog.edge_cardinalities.insert(
+            "person_islocatedin_city".to_string(),
+            EdgeCardinality::ManyToOne,
+        );
+        catalog.edge_cardinalities.insert(
+            "person_knows_person".to_string(),
+            EdgeCardinality::ManyToMany,
+        );
+
+        assert!(catalog.path_has_endpoint_pair(&alias_key, "country", "person"));
+        assert!(!catalog.path_has_materialized_endpoint_pair(&alias_key, "country", "person"));
+
+        let candidates = query_graph
+            .build_abstract_edge_candidates_for_path(&path, 2, &catalog)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 3);
+        assert!(
+            candidates
+                .iter()
+                .flatten()
+                .all(|edge| { edge.original_edge_ids.len() <= 2 })
+        );
+        assert!(candidates.iter().any(|edges| {
+            edges
+                .iter()
+                .map(|edge| edge.original_edge_ids.as_slice())
+                .eq([&[5][..], &[4, 3][..], &[1, 2][..]])
+        }));
     }
 }
 
@@ -3189,7 +3309,12 @@ impl QueryGraph {
             return false;
         }
         let key = make_alt_key(&node_seq, &edge_seq);
-        degree_seq_graph.path_has_endpoint_pair(
+        // Functional aliases are directional: they can preserve the PCF at
+        // the endpoint opposite a functional extension, but not the PCF at
+        // the extended endpoint where many keys may be aggregated.  A merged
+        // abstract edge needs both endpoint PCFs, so only a genuinely scanned
+        // catalog entry can justify contracting this K-boundary.
+        degree_seq_graph.path_has_materialized_endpoint_pair(
             &key,
             node_seq.first().map(String::as_str).unwrap_or_default(),
             node_seq.last().map(String::as_str).unwrap_or_default(),
@@ -4849,8 +4974,13 @@ impl QueryGraph {
             .clone();
 
         let t_pcf = std::time::Instant::now();
-        let mut src_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &src_label);
-        let mut dst_pcf_func = degree_seq_graph.get_piece_func_by_path(&alt_key, &dst_label);
+        // An AbstractEdge is consumed in both directions by alpha/beta.  Do
+        // not fill either endpoint from a one-sided functional alias; keeping
+        // the K-bounded pieces forces the required beta projection instead.
+        let mut src_pcf_func =
+            degree_seq_graph.get_materialized_piece_func_by_path(&alt_key, &src_label);
+        let mut dst_pcf_func =
+            degree_seq_graph.get_materialized_piece_func_by_path(&alt_key, &dst_label);
         BUILD_PCF_LOOKUP_NANOS.fetch_add(t_pcf.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
         let mut output = String::new();

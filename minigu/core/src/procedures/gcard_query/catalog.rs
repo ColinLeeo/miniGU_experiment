@@ -315,8 +315,42 @@ impl DegreeSeqGraphCompressed {
         }
     }
 
+    /// Return an endpoint PCF only when the requested path was actually
+    /// materialized by the catalog scan.
+    ///
+    /// A functional path alias may preserve the relation cardinality or the
+    /// PCF at the endpoint opposite the extension, but it does not preserve
+    /// both endpoint PCFs.  In particular, extending `Person -> Country` and
+    /// then observing the path from `Country` must aggregate all matching
+    /// persons per country.  Callers that need a complete two-ended abstract
+    /// edge must therefore use materialized statistics rather than an alias.
+    pub fn get_materialized_piece_func_by_path(
+        &self,
+        path: &AltKey,
+        target_node: &str,
+    ) -> PiecewiseConstantFunction {
+        self.edge_set_to_endpoints
+            .get(path)
+            .and_then(|endpoints| {
+                endpoints
+                    .iter()
+                    .find(|(label, _)| label.eq_ignore_ascii_case(target_node))
+                    .map(|(_, degree_seq)| degree_seq.to_pcf())
+            })
+            .unwrap_or_else(PiecewiseConstantFunction::empty)
+    }
+
+    pub fn path_has_materialized_endpoint_pair(
+        &self,
+        path: &AltKey,
+        src_label: &str,
+        dst_label: &str,
+    ) -> bool {
+        Self::endpoint_pair_exists(self.edge_set_to_endpoints.get(path), src_label, dst_label)
+    }
+
     pub fn path_has_endpoint_pair(&self, path: &AltKey, src_label: &str, dst_label: &str) -> bool {
-        if Self::endpoint_pair_exists(self.edge_set_to_endpoints.get(path), src_label, dst_label) {
+        if self.path_has_materialized_endpoint_pair(path, src_label, dst_label) {
             return true;
         }
 
