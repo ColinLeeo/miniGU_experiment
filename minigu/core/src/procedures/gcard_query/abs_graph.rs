@@ -153,7 +153,7 @@ impl GraphSkeleton<AbstractEdge> {
 
                 if incident.len() == 1 {
                     let (neighbor, edge_id) = incident[0];
-                    if self.edge_is_functional_from_to(edge_id, neighbor, vertex_id) {
+                    if self.edge_is_omittable_functional_from_to(edge_id, neighbor, vertex_id) {
                         to_remove.push(vertex_id);
                     }
                 }
@@ -336,6 +336,18 @@ impl GraphSkeleton<AbstractEdge> {
         }
     }
 
+    fn edge_is_omittable_functional_from_to(
+        &self,
+        edge_id: EdgeId,
+        from: VertexId,
+        to: VertexId,
+    ) -> bool {
+        self.edges
+            .get(&edge_id)
+            .is_some_and(|edge| edge.predicates.is_empty())
+            && self.edge_is_functional_from_to(edge_id, from, to)
+    }
+
     fn edge_contribution_kind_from_to(
         &self,
         edge_id: EdgeId,
@@ -358,7 +370,14 @@ impl GraphSkeleton<AbstractEdge> {
     ) -> bool {
         !has_children
             && !self.local_pcfs.contains_key(&vertex_id)
-            && self.edge_is_functional_from_to(parent_edge_id, parent_id, vertex_id)
+            // A functional edge preserves cardinality only before filtering.  Once the
+            // contracted path carries a predicate, its sampled PCF is a real unary
+            // message at the parent and must participate in the reduction.
+            && self.edge_is_omittable_functional_from_to(
+                parent_edge_id,
+                parent_id,
+                vertex_id,
+            )
     }
 
     fn vertex_label(&self, vertex_id: VertexId) -> String {
@@ -867,9 +886,13 @@ impl GraphSkeleton<AbstractEdge> {
 mod tests {
     use std::sync::Arc;
 
+    use minigu_common::value::ScalarValue;
+
     use super::AbstractGraph;
     use crate::procedures::gcard_query::degreepiecewise::{Pcf, alpha_refs, beta_right};
-    use crate::procedures::gcard_query::types::{AbstractEdge, FunctionalDirection, QueryVertex};
+    use crate::procedures::gcard_query::types::{
+        AbstractEdge, ComparisonOp, FunctionalDirection, PredicateDef, QueryVertex,
+    };
 
     fn vertex(id: u64, label: &str) -> QueryVertex {
         QueryVertex {
@@ -918,6 +941,18 @@ mod tests {
             selectivity: 1.0,
             path_str: String::new(),
         }
+    }
+
+    fn with_vertex_predicate(mut edge: AbstractEdge, vertex_id: u32) -> AbstractEdge {
+        edge.predicates.push(PredicateDef {
+            predicate_id: None,
+            target: "vertex".to_string(),
+            id: vertex_id,
+            property: "flag".to_string(),
+            op: ComparisonOp::Eq,
+            value: ScalarValue::Boolean(Some(true)),
+        });
+        edge
     }
 
     #[test]
@@ -989,6 +1024,48 @@ mod tests {
         let expected_reverse = alpha_refs(&[&functional_parent_side, &active]).get_num_rows();
         assert_ne!(expected_reverse, expected_forward);
         assert_eq!(reverse.get_es().unwrap(), expected_reverse);
+    }
+
+    #[test]
+    fn predicate_filtered_functional_leaves_keep_their_sampled_pcfs() {
+        let left_parent_side = pcf(vec![9.0], vec![10.0]);
+        let right_parent_side = pcf(vec![7.0], vec![10.0]);
+        let leaf_side = pcf(vec![1.0], vec![10.0]);
+
+        let mut graph = AbstractGraph::new();
+        graph.add_vertex(vertex(1, "root"));
+        graph.add_vertex(vertex(2, "filtered_functional_leaf"));
+        graph.add_vertex(vertex(3, "filtered_functional_leaf"));
+        graph.add_edge(
+            1,
+            with_vertex_predicate(
+                edge_with_functional(
+                    1,
+                    2,
+                    left_parent_side.clone(),
+                    leaf_side.clone(),
+                    FunctionalDirection::SrcToDst,
+                ),
+                2,
+            ),
+        );
+        graph.add_edge(
+            2,
+            with_vertex_predicate(
+                edge_with_functional(
+                    1,
+                    3,
+                    right_parent_side.clone(),
+                    leaf_side,
+                    FunctionalDirection::SrcToDst,
+                ),
+                3,
+            ),
+        );
+
+        let expected = alpha_refs(&[&left_parent_side, &right_parent_side]).get_num_rows();
+        assert!(expected > 1.0);
+        assert_eq!(graph.get_es().unwrap(), expected);
     }
 
     #[test]
