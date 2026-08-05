@@ -53,6 +53,7 @@ use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::flat_graph::FlatGraph;
 use crate::procedures::gcard_query::flat_graph::csr::CsrAdjWithEid;
 use crate::procedures::gcard_query::graph::{Endpoints, GraphSkeleton};
+use crate::procedures::gcard_query::predicate::ResolvedPredicate;
 use crate::procedures::gcard_query::types::{
     AbstractEdge, AbstractEdgeDef, CandidateTree, ComparisonOp, DecompositionDef,
     FunctionalDirection, PredicateDef, PredicateId, PredicateLocation,
@@ -155,6 +156,7 @@ mod tests {
                 property: "age".to_string(),
                 op: ComparisonOp::Eq,
                 value: ScalarValue::Int64(Some(20)),
+                values: Vec::new(),
             }],
         };
         let query_graph = query.build_graph().unwrap();
@@ -194,6 +196,7 @@ mod tests {
                 property: "downvotes".to_string(),
                 op: ComparisonOp::Le,
                 value: ScalarValue::Int64(Some(0)),
+                values: Vec::new(),
             }],
         };
         let query_graph = query.build_graph().unwrap();
@@ -234,6 +237,7 @@ mod tests {
                     property: "age".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int64(Some(20)),
+                    values: Vec::new(),
                 },
                 crate::procedures::gcard_query::types::PredicateDef {
                     predicate_id: None,
@@ -242,6 +246,7 @@ mod tests {
                     property: "downvotes".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int64(Some(0)),
+                    values: Vec::new(),
                 },
             ],
         };
@@ -288,6 +293,7 @@ mod tests {
                 property: "city".to_string(),
                 op: ComparisonOp::Eq,
                 value: ScalarValue::String(Some("Beijing".to_string())),
+                values: Vec::new(),
             }],
         };
         let query_graph = query.build_graph().unwrap();
@@ -334,6 +340,7 @@ mod tests {
                 property: "age".to_string(),
                 op: ComparisonOp::Ne,
                 value: ScalarValue::Int64(Some(20)),
+                values: Vec::new(),
             }],
         };
         let query_graph = query.build_graph().unwrap();
@@ -357,6 +364,143 @@ mod tests {
         assert_eq!(candidates[0].0.get_es().unwrap(), 0.0);
     }
 
+    fn single_vertex_string_predicate_cardinality(predicate: PredicateDef) -> f64 {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "cast_info")],
+            edges: Vec::new(),
+            predicates: vec![predicate],
+        };
+        let query_graph = query.build_graph().unwrap();
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("cast_info", vec!["note".to_string()]);
+        builder.add_vertex(
+            1,
+            "cast_info",
+            vec![ScalarValue::String(Some(
+                "(voice) (uncredited)".to_string(),
+            ))],
+        );
+        builder.add_vertex(
+            2,
+            "cast_info",
+            vec![ScalarValue::String(Some("producer".to_string()))],
+        );
+        builder.add_vertex(
+            3,
+            "cast_info",
+            vec![ScalarValue::String(Some("Money".to_string()))],
+        );
+        builder.add_vertex(4, "cast_info", vec![ScalarValue::String(None)]);
+        let flat_graph = builder.build();
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                2,
+                10,
+                &DegreeSeqGraphCompressed::new(),
+                Some(&flat_graph),
+                100,
+                &PredicateApplyType::INNER,
+                false,
+            )
+            .unwrap();
+        candidates[0].0.get_es().unwrap()
+    }
+
+    fn string_predicate(
+        op: ComparisonOp,
+        value: ScalarValue,
+        values: Vec<ScalarValue>,
+    ) -> PredicateDef {
+        PredicateDef {
+            predicate_id: None,
+            target: "vertex".to_string(),
+            id: 1,
+            property: "note".to_string(),
+            op,
+            value,
+            values,
+        }
+    }
+
+    #[test]
+    fn single_vertex_query_supports_job_m_filter_operators() {
+        assert_eq!(
+            single_vertex_string_predicate_cardinality(string_predicate(
+                ComparisonOp::In,
+                ScalarValue::Null,
+                vec![
+                    ScalarValue::String(Some("producer".to_string())),
+                    ScalarValue::String(Some("Money".to_string())),
+                ],
+            )),
+            2.0
+        );
+        assert_eq!(
+            single_vertex_string_predicate_cardinality(string_predicate(
+                ComparisonOp::Like,
+                ScalarValue::String(Some("%(voice)%".to_string())),
+                Vec::new(),
+            )),
+            1.0
+        );
+        assert_eq!(
+            single_vertex_string_predicate_cardinality(string_predicate(
+                ComparisonOp::NotLike,
+                ScalarValue::String(Some("%(voice)%".to_string())),
+                Vec::new(),
+            )),
+            2.0
+        );
+        assert_eq!(
+            single_vertex_string_predicate_cardinality(string_predicate(
+                ComparisonOp::IsNull,
+                ScalarValue::Null,
+                Vec::new(),
+            )),
+            1.0
+        );
+        assert_eq!(
+            single_vertex_string_predicate_cardinality(string_predicate(
+                ComparisonOp::IsNotNull,
+                ScalarValue::Null,
+                Vec::new(),
+            )),
+            3.0
+        );
+    }
+
+    #[test]
+    fn job_m_predicate_json_contract_is_validated() {
+        let query: crate::procedures::gcard_query::types::Query = serde_json::from_str(
+            r#"{
+                "vertices":[{"id":1,"label":"cast_info"}],
+                "edges":[],
+                "predicates":[
+                    {"target":"vertex","id":1,"property":"note","op":"in",
+                     "values":[{"String":"producer"},{"String":"Money"}]},
+                    {"target":"vertex","id":1,"property":"note","op":"like",
+                     "value":{"String":"%(voice)%"}},
+                    {"target":"vertex","id":1,"property":"note","op":"is_not_null"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert!(query.build_graph().is_ok());
+
+        let invalid: crate::procedures::gcard_query::types::Query = serde_json::from_str(
+            r#"{
+                "vertices":[{"id":1,"label":"cast_info"}],
+                "edges":[],
+                "predicates":[
+                    {"target":"vertex","id":1,"property":"note","op":"in","values":[]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert!(invalid.build_graph().is_err());
+    }
+
     #[test]
     fn single_vertex_partial_sample_zero_hit_uses_upper_bound() {
         let query = crate::procedures::gcard_query::types::Query {
@@ -369,6 +513,7 @@ mod tests {
                 property: "age".to_string(),
                 op: ComparisonOp::Eq,
                 value: ScalarValue::Int64(Some(20)),
+                values: Vec::new(),
             }],
         };
         let query_graph = query.build_graph().unwrap();
@@ -563,14 +708,57 @@ mod tests {
             &stats,
             &ComparisonOp::Eq,
             &ScalarValue::Int64(Some(20)),
+            &[],
         );
         let ne = QueryGraph::estimate_single_predicate_stats(
             &stats,
             &ComparisonOp::Ne,
             &ScalarValue::Int64(Some(20)),
+            &[],
+        );
+        let is_null = QueryGraph::estimate_single_predicate_stats(
+            &stats,
+            &ComparisonOp::IsNull,
+            &ScalarValue::Null,
+            &[],
+        );
+        let is_not_null = QueryGraph::estimate_single_predicate_stats(
+            &stats,
+            &ComparisonOp::IsNotNull,
+            &ScalarValue::Null,
+            &[],
+        );
+        let in_list = QueryGraph::estimate_single_predicate_stats(
+            &stats,
+            &ComparisonOp::In,
+            &ScalarValue::Null,
+            &[ScalarValue::Int64(Some(20)), ScalarValue::Int64(Some(30))],
         );
         assert!((eq - 0.25).abs() < 1e-12);
         assert!(ne <= 1e-12);
+        assert!((is_null - 0.75).abs() < 1e-12);
+        assert!((is_not_null - 0.25).abs() < 1e-12);
+        assert!((in_list - 0.25).abs() < 1e-12);
+
+        let mut string_stats =
+            crate::procedures::gcard_query::flat_graph::stats::ColumnStats::new();
+        string_stats.observe(&ScalarValue::String(Some("Alice".to_string())));
+        string_stats.observe(&ScalarValue::String(Some("Bob".to_string())));
+        string_stats.observe(&ScalarValue::String(None));
+        let exact_like = QueryGraph::estimate_single_predicate_stats(
+            &string_stats,
+            &ComparisonOp::Like,
+            &ScalarValue::String(Some("Alice".to_string())),
+            &[],
+        );
+        let exact_not_like = QueryGraph::estimate_single_predicate_stats(
+            &string_stats,
+            &ComparisonOp::NotLike,
+            &ScalarValue::String(Some("Alice".to_string())),
+            &[],
+        );
+        assert!((exact_like - 1.0 / 3.0).abs() < 1e-12);
+        assert!((exact_not_like - 1.0 / 3.0).abs() < 1e-12);
     }
 
     #[test]
@@ -593,6 +781,7 @@ mod tests {
                     property: "missing".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int64(Some(1)),
+                    values: Vec::new(),
                 }],
             )]),
             edge_predicates: HashMap::new(),
@@ -828,6 +1017,7 @@ mod tests {
                     property: "p".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int32(Some(1)),
+                    values: Vec::new(),
                 },
                 PredicateDef {
                     predicate_id: Some(2),
@@ -836,6 +1026,7 @@ mod tests {
                     property: "p".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int32(Some(2)),
+                    values: Vec::new(),
                 },
                 PredicateDef {
                     predicate_id: Some(3),
@@ -844,6 +1035,7 @@ mod tests {
                     property: "p".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int32(Some(3)),
+                    values: Vec::new(),
                 },
                 PredicateDef {
                     predicate_id: Some(4),
@@ -852,6 +1044,7 @@ mod tests {
                     property: "q".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int32(Some(10)),
+                    values: Vec::new(),
                 },
                 PredicateDef {
                     predicate_id: Some(5),
@@ -860,6 +1053,7 @@ mod tests {
                     property: "q".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int32(Some(11)),
+                    values: Vec::new(),
                 },
             ],
         };
@@ -1053,8 +1247,8 @@ impl QueryGraph {
             .iter()
             .map(|p| {
                 format!(
-                    "{}#{}.{:?}({}) {:?} {:?}",
-                    p.target, p.id, p.predicate_id, p.property, p.op, p.value
+                    "{}#{}.{:?}({}) {:?} {:?} {:?}",
+                    p.target, p.id, p.predicate_id, p.property, p.op, p.value, p.values
                 )
             })
             .collect::<Vec<_>>()
@@ -1274,6 +1468,7 @@ impl QueryGraph {
                         fg.edge_column_stats(&edge.label, &pred.property),
                         &pred.op,
                         &pred.value,
+                        &pred.values,
                     );
                 }
 
@@ -1284,6 +1479,7 @@ impl QueryGraph {
                             fg.vertex_column_stats(&src_vertex.label, &pred.property),
                             &pred.op,
                             &pred.value,
+                            &pred.values,
                         );
                     }
                 }
@@ -1295,6 +1491,7 @@ impl QueryGraph {
                             fg.vertex_column_stats(&dst_vertex.label, &pred.property),
                             &pred.op,
                             &pred.value,
+                            &pred.values,
                         );
                     }
                 }
@@ -1562,6 +1759,7 @@ impl QueryGraph {
                 flat_graph.edge_column_stats(&edge.label, &pred.property),
                 &pred.op,
                 &pred.value,
+                &pred.values,
             );
         }
         edge_selectivity.clamp(0.0, 1.0)
@@ -1632,25 +1830,31 @@ impl QueryGraph {
         col_stats: Option<&super::flat_graph::stats::ColumnStats>,
         op: &ComparisonOp,
         value: &ScalarValue,
+        values: &[ScalarValue],
     ) -> f64 {
         use super::flat_graph::stats::cmp_scalar;
 
         let Some(stats) = col_stats else {
-            // No stats available — assume Kuzu's default.
+            // Conservative defaults used only for plan ranking/fallback when
+            // the FlatGraph has no column statistics.
             return match op {
                 ComparisonOp::Eq => 0.01,
+                ComparisonOp::In => (0.01 * values.len() as f64).clamp(0.01, 1.0),
+                ComparisonOp::NotLike | ComparisonOp::IsNotNull => 0.9,
                 _ => 0.1,
             };
         };
 
         let non_null = stats.total_count - stats.null_count;
-        if non_null == 0 {
-            return 0.0;
-        }
         let non_null_ratio = non_null as f64 / stats.total_count.max(1) as f64;
 
         match op {
+            ComparisonOp::IsNull => 1.0 - non_null_ratio,
+            ComparisonOp::IsNotNull => non_null_ratio,
             ComparisonOp::Eq | ComparisonOp::Ne => {
+                if non_null == 0 {
+                    return 0.0;
+                }
                 let ndv = stats.ndv().max(1);
                 let sel = 1.0 / ndv as f64;
                 if matches!(op, ComparisonOp::Ne) {
@@ -1659,7 +1863,36 @@ impl QueryGraph {
                     non_null_ratio * sel
                 }
             }
+            ComparisonOp::In => {
+                if non_null == 0 {
+                    return 0.0;
+                }
+                let distinct_values = values
+                    .iter()
+                    .filter(|candidate| {
+                        !crate::procedures::gcard_query::predicate::scalar_is_null(candidate)
+                    })
+                    .collect::<HashSet<_>>()
+                    .len();
+                non_null_ratio
+                    * (distinct_values as f64 / stats.ndv().max(1) as f64).clamp(0.0, 1.0)
+            }
+            ComparisonOp::Like | ComparisonOp::NotLike => {
+                if non_null == 0 {
+                    return 0.0;
+                }
+                let like_selectivity =
+                    Self::estimate_like_predicate_stats(non_null_ratio, stats.ndv().max(1), value);
+                if matches!(op, ComparisonOp::NotLike) {
+                    (non_null_ratio - like_selectivity).clamp(0.0, non_null_ratio)
+                } else {
+                    like_selectivity
+                }
+            }
             ComparisonOp::Gt | ComparisonOp::Ge | ComparisonOp::Lt | ComparisonOp::Le => {
+                if non_null == 0 {
+                    return 0.0;
+                }
                 // Uniform distribution assumption: sel = (max - value) / (max - min).
                 let (Some(min_val), Some(max_val)) = (&stats.min, &stats.max) else {
                     return 0.1; // fallback
@@ -1719,6 +1952,19 @@ impl QueryGraph {
                 non_null_ratio * sel
             }
         }
+    }
+
+    fn estimate_like_predicate_stats(non_null_ratio: f64, ndv: usize, value: &ScalarValue) -> f64 {
+        let ScalarValue::String(Some(pattern)) = value else {
+            return 0.1 * non_null_ratio;
+        };
+        if !pattern.contains('%') && !pattern.contains('_') {
+            return non_null_ratio / ndv.max(1) as f64;
+        }
+        if pattern.chars().all(|character| character == '%') {
+            return non_null_ratio;
+        }
+        0.1 * non_null_ratio
     }
 
     pub fn find_k_path_edges_between_predicates(
@@ -2176,8 +2422,8 @@ impl QueryGraph {
         for p in sorted_preds {
             let _ = write!(
                 key,
-                "|{}:{}:{}:{:?}:{:?}",
-                p.target, p.id, p.property, p.op, p.value
+                "|{}:{}:{}:{:?}:{:?}:{:?}",
+                p.target, p.id, p.property, p.op, p.value, p.values
             );
         }
         key
@@ -2305,130 +2551,6 @@ impl QueryGraph {
 
         Ok(queries)
     }
-
-    fn compare_values(
-        &self,
-        value: &ScalarValue,
-        op: &ComparisonOp,
-        expected: &ScalarValue,
-    ) -> GCardResult<bool> {
-        // SQL-style filter semantics: comparisons involving NULL are not
-        // true, including `NULL != value`.
-        if Self::scalar_is_null(value) || Self::scalar_is_null(expected) {
-            return Ok(false);
-        }
-        // 统一封装谓词比较逻辑，避免顶点谓词/边谓词各写一遍分支。
-        use ComparisonOp::*;
-
-        match op {
-            Eq => Ok(value == expected),
-            Ne => Ok(value != expected),
-            Gt => self.compare_ordered(value, expected, |a, b| {
-                self.partial_cmp_scalar(a, b)
-                    .map(|ord| ord == std::cmp::Ordering::Greater)
-            }),
-            Ge => self.compare_ordered(value, expected, |a, b| {
-                self.partial_cmp_scalar(a, b).map(|ord| {
-                    ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal
-                })
-            }),
-            Lt => self.compare_ordered(value, expected, |a, b| {
-                self.partial_cmp_scalar(a, b)
-                    .map(|ord| ord == std::cmp::Ordering::Less)
-            }),
-            Le => self.compare_ordered(value, expected, |a, b| {
-                self.partial_cmp_scalar(a, b)
-                    .map(|ord| ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal)
-            }),
-        }
-    }
-
-    fn scalar_is_null(value: &ScalarValue) -> bool {
-        use ScalarValue::*;
-        matches!(
-            value,
-            Null | Boolean(None)
-                | Int8(None)
-                | Int16(None)
-                | Int32(None)
-                | Int64(None)
-                | UInt8(None)
-                | UInt16(None)
-                | UInt32(None)
-                | UInt64(None)
-                | Float32(None)
-                | Float64(None)
-                | String(None)
-                | Vector { value: None, .. }
-                | Vertex(None)
-                | Edge(None)
-        )
-    }
-
-    fn compare_ordered<F>(
-        &self,
-        value: &ScalarValue,
-        expected: &ScalarValue,
-        cmp: F,
-    ) -> GCardResult<bool>
-    where
-        F: FnOnce(&ScalarValue, &ScalarValue) -> Option<bool>,
-    {
-        cmp(value, expected).ok_or_else(|| {
-            GCardError::InvalidData(format!(
-                "Cannot compare values: {:?} and {:?}",
-                value, expected
-            ))
-        })
-    }
-
-    fn partial_cmp_scalar(&self, a: &ScalarValue, b: &ScalarValue) -> Option<std::cmp::Ordering> {
-        use ScalarValue::*;
-
-        match (a, b) {
-            (Int8(Some(a_val)), Int8(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Int16(Some(a_val)), Int16(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Int32(Some(a_val)), Int32(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Int64(Some(a_val)), Int64(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (UInt8(Some(a_val)), UInt8(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (UInt16(Some(a_val)), UInt16(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (UInt32(Some(a_val)), UInt32(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (UInt64(Some(a_val)), UInt64(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Float32(Some(a_val)), Float32(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Float64(Some(a_val)), Float64(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (String(Some(a_val)), String(Some(b_val))) => Some(a_val.cmp(b_val)),
-            (Boolean(Some(a_val)), Boolean(Some(b_val))) => Some(a_val.cmp(b_val)),
-            // 跨类型比较：尝试转换为f64
-            _ => {
-                let a_f64 = self.to_f64_opt(a);
-                let b_f64 = self.to_f64_opt(b);
-                match (a_f64, b_f64) {
-                    (Some(a_f), Some(b_f)) => {
-                        use ordered_float::OrderedFloat;
-                        Some(OrderedFloat(a_f).cmp(&OrderedFloat(b_f)))
-                    }
-                    _ => None,
-                }
-            }
-        }
-    }
-
-    fn to_f64_opt(&self, value: &ScalarValue) -> Option<f64> {
-        use ScalarValue::*;
-        match value {
-            Int8(Some(v)) => Some(*v as f64),
-            Int16(Some(v)) => Some(*v as f64),
-            Int32(Some(v)) => Some(*v as f64),
-            Int64(Some(v)) => Some(*v as f64),
-            UInt8(Some(v)) => Some(*v as f64),
-            UInt16(Some(v)) => Some(*v as f64),
-            UInt32(Some(v)) => Some(*v as f64),
-            UInt64(Some(v)) => Some(*v as f64),
-            Float32(Some(v)) => Some(v.into_inner() as f64),
-            Float64(Some(v)) => Some(v.into_inner()),
-            _ => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -2528,15 +2650,6 @@ impl WalkBatchResult {
         let upper = (center + margin) / denominator;
         (upper.clamp(point, 1.0), n_eff)
     }
-}
-
-/// Pre-resolved predicate: property index + comparison value + operator.
-#[derive(Clone)]
-struct ResolvedPredicate {
-    predicate_id: Option<u32>,
-    prop_index: usize,
-    op: ComparisonOp,
-    value: ScalarValue,
 }
 
 impl QueryGraph {
@@ -3380,12 +3493,7 @@ impl<'graph> FlatCompiledPathQuery<'graph> {
                                         p.property, label
                                     ))
                                 })?;
-                                Ok(ResolvedPredicate {
-                                    predicate_id: p.predicate_id,
-                                    prop_index,
-                                    op: p.op.clone(),
-                                    value: p.value.clone(),
-                                })
+                                Ok(ResolvedPredicate::new(prop_index, p))
                             })
                             .collect::<GCardResult<Vec<_>>>()?
                     } else {
@@ -3410,12 +3518,7 @@ impl<'graph> FlatCompiledPathQuery<'graph> {
                                             p.property, label
                                         ))
                                     })?;
-                                Ok(ResolvedPredicate {
-                                    predicate_id: p.predicate_id,
-                                    prop_index,
-                                    op: p.op.clone(),
-                                    value: p.value.clone(),
-                                })
+                                Ok(ResolvedPredicate::new(prop_index, p))
                             })
                             .collect::<GCardResult<Vec<_>>>()?
                     } else {
@@ -3554,12 +3657,7 @@ impl QueryGraph {
                             predicate.property, label
                         ))
                     })?;
-                Ok(ResolvedPredicate {
-                    predicate_id: predicate.predicate_id,
-                    prop_index,
-                    op: predicate.op,
-                    value: predicate.value.clone(),
-                })
+                Ok(ResolvedPredicate::new(prop_index, predicate))
             })
             .collect::<GCardResult<Vec<_>>>()?;
 
@@ -5404,6 +5502,9 @@ impl QueryGraph {
     /// and use per-column NDV + min/max from `ColumnStats`:
     ///   - `Eq`:  `1 / ndv`
     ///   - `Ne`:  `1 - 1 / ndv`
+    ///   - `In`:  `distinct values / ndv`
+    ///   - `IsNull`/`IsNotNull`: column null fraction / non-null fraction
+    ///   - exact `Like`: `1 / ndv`; wildcard LIKE uses a conservative fallback
     ///   - `Lt`/`Le`/`Gt`/`Ge`:  linear interpolation across `[min, max]`
     ///   - boolean `Eq`: `1 / 2` fallback if more accurate stats are absent.
     ///
@@ -5458,7 +5559,7 @@ impl QueryGraph {
                 joint *= 0.5;
                 continue;
             };
-            joint *= Self::estimate_single_predicate_stats(col, &rp.op, &rp.value);
+            joint *= Self::estimate_single_predicate_stats(col, &rp.op, &rp.value, &rp.values);
         }
         joint.clamp(1e-12, 1.0)
     }
@@ -5524,14 +5625,14 @@ impl QueryGraph {
         col: &crate::procedures::gcard_query::flat_graph::stats::ColumnStats,
         op: &ComparisonOp,
         value: &ScalarValue,
+        values: &[ScalarValue],
     ) -> f64 {
         let non_null_ratio =
             col.total_count.saturating_sub(col.null_count) as f64 / col.total_count.max(1) as f64;
-        if non_null_ratio == 0.0 {
-            return 0.0;
-        }
         let ndv = col.ndv() as f64;
         match op {
+            ComparisonOp::IsNull => 1.0 - non_null_ratio,
+            ComparisonOp::IsNotNull => non_null_ratio,
             ComparisonOp::Eq => {
                 if ndv >= 1.0 {
                     (non_null_ratio / ndv).max(1e-12)
@@ -5544,6 +5645,29 @@ impl QueryGraph {
                     (non_null_ratio * (1.0 - 1.0 / ndv)).max(1e-12)
                 } else {
                     0.5 * non_null_ratio
+                }
+            }
+            ComparisonOp::In => {
+                let distinct_values = values
+                    .iter()
+                    .filter(|candidate| {
+                        !crate::procedures::gcard_query::predicate::scalar_is_null(candidate)
+                    })
+                    .collect::<HashSet<_>>()
+                    .len();
+                if ndv >= 1.0 {
+                    non_null_ratio * (distinct_values as f64 / ndv).clamp(0.0, 1.0)
+                } else {
+                    0.5 * non_null_ratio
+                }
+            }
+            ComparisonOp::Like | ComparisonOp::NotLike => {
+                let like_selectivity =
+                    Self::estimate_like_predicate_stats(non_null_ratio, col.ndv().max(1), value);
+                if matches!(op, ComparisonOp::NotLike) {
+                    (non_null_ratio - like_selectivity).clamp(0.0, non_null_ratio)
+                } else {
+                    like_selectivity
                 }
             }
             ComparisonOp::Lt | ComparisonOp::Le | ComparisonOp::Gt | ComparisonOp::Ge => {
@@ -5607,7 +5731,7 @@ impl QueryGraph {
         };
         for rp in predicates {
             let pass = match props.get(rp.prop_index) {
-                Some(v) => self.compare_values(v, &rp.op, &rp.value).unwrap_or(false),
+                Some(v) => rp.evaluate(v).unwrap_or(false),
                 None => false,
             };
             if !pass {
@@ -5667,13 +5791,10 @@ impl QueryGraph {
                     continue;
                 }
             }
-            let pass = match props.get(rp.prop_index) {
-                Some(v) => match self.compare_values(v, &rp.op, &rp.value) {
-                    Ok(b) => b,
-                    Err(_) => false,
-                },
-                None => false,
-            };
+            let pass = props
+                .get(rp.prop_index)
+                .map(|value| rp.evaluate(value).unwrap_or_default())
+                .unwrap_or_default();
             if let Some(pid) = rp.predicate_id {
                 pred_cache.insert((pid, vid), pass);
             }
@@ -5950,7 +6071,7 @@ impl QueryGraph {
                     cached
                 } else {
                     let p = match props.get(rp.prop_index) {
-                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                        Some(v) => rp.evaluate(v)?,
                         None => false,
                     };
                     local_pred_cache.insert((pid, vid), p);
@@ -5958,7 +6079,7 @@ impl QueryGraph {
                 }
             } else {
                 match props.get(rp.prop_index) {
-                    Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                    Some(v) => rp.evaluate(v)?,
                     None => false,
                 }
             };
@@ -6279,7 +6400,7 @@ impl QueryGraph {
                     cached
                 } else {
                     let p = match props.get(rp.prop_index) {
-                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                        Some(v) => rp.evaluate(v)?,
                         None => false,
                     };
                     local_pred_cache.insert((pid, vid), p);
@@ -6287,7 +6408,7 @@ impl QueryGraph {
                 }
             } else {
                 match props.get(rp.prop_index) {
-                    Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                    Some(v) => rp.evaluate(v)?,
                     None => false,
                 }
             };
@@ -6320,7 +6441,7 @@ impl QueryGraph {
                     cached
                 } else {
                     let p = match eprops.get(rp.prop_index) {
-                        Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                        Some(v) => rp.evaluate(v)?,
                         None => false,
                     };
                     local_pred_cache.insert((pid, eid), p);
@@ -6328,7 +6449,7 @@ impl QueryGraph {
                 }
             } else {
                 match eprops.get(rp.prop_index) {
-                    Some(v) => self.compare_values(v, &rp.op, &rp.value)?,
+                    Some(v) => rp.evaluate(v)?,
                     None => false,
                 }
             };

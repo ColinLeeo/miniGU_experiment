@@ -53,7 +53,7 @@ impl FunctionalDirection {
 pub type PredicateId = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ComparisonOp {
     Eq,
     Ne,
@@ -61,6 +61,11 @@ pub enum ComparisonOp {
     Ge,
     Lt,
     Le,
+    In,
+    Like,
+    NotLike,
+    IsNull,
+    IsNotNull,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +82,60 @@ pub struct PredicateDef {
     pub id: u32,
     pub property: String,
     pub op: ComparisonOp,
+    #[serde(
+        default = "default_predicate_value",
+        skip_serializing_if = "predicate_value_is_absent"
+    )]
     pub value: ScalarValue,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<ScalarValue>,
+}
+
+fn default_predicate_value() -> ScalarValue {
+    ScalarValue::Null
+}
+
+fn predicate_value_is_absent(value: &ScalarValue) -> bool {
+    matches!(value, ScalarValue::Null)
+}
+
+impl PredicateDef {
+    fn validate_operands(&self) -> Result<(), String> {
+        use ComparisonOp::*;
+
+        match self.op {
+            Eq | Ne | Gt | Ge | Lt | Le => {
+                if predicate_value_is_absent(&self.value) || !self.values.is_empty() {
+                    return Err(format!(
+                        "predicate {:?} requires exactly one scalar value",
+                        self.op
+                    ));
+                }
+            }
+            Like | NotLike => {
+                if !self.values.is_empty() || !matches!(self.value, ScalarValue::String(Some(_))) {
+                    return Err(format!(
+                        "predicate {:?} requires exactly one non-null string pattern",
+                        self.op
+                    ));
+                }
+            }
+            In => {
+                if !predicate_value_is_absent(&self.value) || self.values.is_empty() {
+                    return Err(
+                        "predicate In requires a non-empty values list and no scalar value"
+                            .to_string(),
+                    );
+                }
+            }
+            IsNull | IsNotNull => {
+                if !predicate_value_is_absent(&self.value) || !self.values.is_empty() {
+                    return Err(format!("predicate {:?} does not accept operands", self.op));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VertexDef {
@@ -236,6 +294,9 @@ impl Query {
         let mut predicate_ids_used = std::collections::HashSet::new();
 
         for mut predicate_def in self.predicates {
+            predicate_def
+                .validate_operands()
+                .map_err(anyhow::Error::msg)?;
             let predicate_id = if let Some(id) = predicate_def.predicate_id {
                 if !predicate_ids_used.insert(id) {
                     return Err(anyhow::anyhow!("Duplicate predicate id: {}", id));
