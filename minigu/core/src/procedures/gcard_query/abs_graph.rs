@@ -951,6 +951,7 @@ mod tests {
             property: "flag".to_string(),
             op: ComparisonOp::Eq,
             value: ScalarValue::Boolean(Some(true)),
+            values: Vec::new(),
         });
         edge
     }

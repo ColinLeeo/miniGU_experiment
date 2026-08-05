@@ -23,6 +23,7 @@ mod graph;
 pub mod load_catalog;
 pub mod load_flatgraph;
 pub mod load_ldbc;
+mod predicate;
 mod query_graph;
 pub mod random_insert;
 pub mod random_update;

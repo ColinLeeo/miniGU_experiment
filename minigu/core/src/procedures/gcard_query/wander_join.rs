@@ -13,6 +13,7 @@ use rand::{Rng, SeedableRng};
 
 use crate::procedures::gcard_query::error::{GCardError, GCardResult};
 use crate::procedures::gcard_query::flat_graph::FlatGraph;
+use crate::procedures::gcard_query::predicate::ResolvedPredicate;
 use crate::procedures::gcard_query::query_graph::QueryGraph;
 use crate::procedures::gcard_query::types::{ComparisonOp, PredicateDef, Query};
 
@@ -29,13 +30,6 @@ enum WanderJoinNodeKind {
         src_label: String,
         dst_label: String,
     },
-}
-
-#[derive(Clone)]
-struct ResolvedPredicate {
-    prop_index: usize,
-    op: ComparisonOp,
-    value: ScalarValue,
 }
 
 #[derive(Clone)]
@@ -286,11 +280,7 @@ fn resolve_vertex_predicates(
                         pred.property, label
                     ))
                 })?;
-            Ok(ResolvedPredicate {
-                prop_index,
-                op: pred.op,
-                value: pred.value.clone(),
-            })
+            Ok(ResolvedPredicate::new(prop_index, pred))
         })
         .collect()
 }
@@ -311,11 +301,7 @@ fn resolve_edge_predicates(
                         pred.property, label
                     ))
                 })?;
-            Ok(ResolvedPredicate {
-                prop_index,
-                op: pred.op,
-                value: pred.value.clone(),
-            })
+            Ok(ResolvedPredicate::new(prop_index, pred))
         })
         .collect()
 }
@@ -650,7 +636,7 @@ fn evaluate_vertex_predicates(
         let Some(value) = props.get(predicate.prop_index) else {
             return Ok(false);
         };
-        if !compare_values(value, &predicate.op, &predicate.value)? {
+        if !predicate.evaluate(value)? {
             return Ok(false);
         }
     }
@@ -672,122 +658,11 @@ fn evaluate_edge_predicates(
         let Some(value) = props.get(predicate.prop_index) else {
             return Ok(false);
         };
-        if !compare_values(value, &predicate.op, &predicate.value)? {
+        if !predicate.evaluate(value)? {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-fn compare_values(
-    value: &ScalarValue,
-    op: &ComparisonOp,
-    expected: &ScalarValue,
-) -> GCardResult<bool> {
-    if scalar_is_null(value) || scalar_is_null(expected) {
-        return Ok(false);
-    }
-    use ComparisonOp::*;
-
-    match op {
-        Eq => Ok(value == expected),
-        Ne => Ok(value != expected),
-        Gt => compare_ordered(value, expected, |a, b| {
-            partial_cmp_scalar(a, b).map(|ord| ord == std::cmp::Ordering::Greater)
-        }),
-        Ge => compare_ordered(value, expected, |a, b| {
-            partial_cmp_scalar(a, b)
-                .map(|ord| ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal)
-        }),
-        Lt => compare_ordered(value, expected, |a, b| {
-            partial_cmp_scalar(a, b).map(|ord| ord == std::cmp::Ordering::Less)
-        }),
-        Le => compare_ordered(value, expected, |a, b| {
-            partial_cmp_scalar(a, b)
-                .map(|ord| ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal)
-        }),
-    }
-}
-
-fn scalar_is_null(value: &ScalarValue) -> bool {
-    use ScalarValue::*;
-    matches!(
-        value,
-        Null | Boolean(None)
-            | Int8(None)
-            | Int16(None)
-            | Int32(None)
-            | Int64(None)
-            | UInt8(None)
-            | UInt16(None)
-            | UInt32(None)
-            | UInt64(None)
-            | Float32(None)
-            | Float64(None)
-            | String(None)
-            | Vector { value: None, .. }
-            | Vertex(None)
-            | Edge(None)
-    )
-}
-
-fn compare_ordered<F>(value: &ScalarValue, expected: &ScalarValue, cmp: F) -> GCardResult<bool>
-where
-    F: FnOnce(&ScalarValue, &ScalarValue) -> Option<bool>,
-{
-    cmp(value, expected).ok_or_else(|| {
-        GCardError::InvalidData(format!(
-            "Cannot compare values: {:?} and {:?}",
-            value, expected
-        ))
-    })
-}
-
-fn partial_cmp_scalar(a: &ScalarValue, b: &ScalarValue) -> Option<std::cmp::Ordering> {
-    use ScalarValue::*;
-
-    match (a, b) {
-        (Int8(Some(a_val)), Int8(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Int16(Some(a_val)), Int16(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Int32(Some(a_val)), Int32(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Int64(Some(a_val)), Int64(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (UInt8(Some(a_val)), UInt8(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (UInt16(Some(a_val)), UInt16(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (UInt32(Some(a_val)), UInt32(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (UInt64(Some(a_val)), UInt64(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Float32(Some(a_val)), Float32(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Float64(Some(a_val)), Float64(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (String(Some(a_val)), String(Some(b_val))) => Some(a_val.cmp(b_val)),
-        (Boolean(Some(a_val)), Boolean(Some(b_val))) => Some(a_val.cmp(b_val)),
-        _ => {
-            let a_f64 = to_f64_opt(a);
-            let b_f64 = to_f64_opt(b);
-            match (a_f64, b_f64) {
-                (Some(a_f), Some(b_f)) => {
-                    use ordered_float::OrderedFloat;
-                    Some(OrderedFloat(a_f).cmp(&OrderedFloat(b_f)))
-                }
-                _ => None,
-            }
-        }
-    }
-}
-
-fn to_f64_opt(value: &ScalarValue) -> Option<f64> {
-    use ScalarValue::*;
-    match value {
-        Int8(Some(v)) => Some(*v as f64),
-        Int16(Some(v)) => Some(*v as f64),
-        Int32(Some(v)) => Some(*v as f64),
-        Int64(Some(v)) => Some(*v as f64),
-        UInt8(Some(v)) => Some(*v as f64),
-        UInt16(Some(v)) => Some(*v as f64),
-        UInt32(Some(v)) => Some(*v as f64),
-        UInt64(Some(v)) => Some(*v as f64),
-        Float32(Some(v)) => Some(v.into_inner() as f64),
-        Float64(Some(v)) => Some(v.into_inner()),
-        _ => None,
-    }
 }
 
 pub fn build_procedure() -> Procedure {
@@ -927,6 +802,7 @@ mod tests {
             property: property.to_string(),
             op: ComparisonOp::Eq,
             value,
+            values: Vec::new(),
         }
     }
 
