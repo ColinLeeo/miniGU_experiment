@@ -906,6 +906,15 @@ mod tests {
         builder.add_vertex(300, "b", vec![ScalarValue::Int64(Some(1))]);
         builder.add_vertex(301, "b", vec![ScalarValue::Int64(Some(0))]);
         builder.add_vertex(302, "b", vec![ScalarValue::Int64(Some(0))]);
+        // FlatGraph vertex IDs are label-local.  Deliberately reuse every
+        // leaf ID under another label so this test catches any accidental use
+        // of the legacy global vertex_label_map in label-aware CSR traversal.
+        for vid in 200..=202 {
+            builder.add_vertex(vid, "shadow_a", vec![]);
+        }
+        for vid in 300..=302 {
+            builder.add_vertex(vid, "shadow_b", vec![]);
+        }
         builder.add_edge(1000, 100, "center", 200, "a", "to_a", vec![]);
         builder.add_edge(1001, 100, "center", 201, "a", "to_a", vec![]);
         builder.add_edge(1002, 101, "center", 202, "a", "to_a", vec![]);
@@ -5482,9 +5491,11 @@ impl QueryGraph {
             .map(|csr| csr.neighbors_slice(center_vid))
             .unwrap_or_default()
         {
-            if flat_graph.vertex_label(neighbor_vid) != Some(arm.leaf_label.as_str()) {
-                continue;
-            }
+            // The CSR handle was resolved from
+            // `(center_label, edge_label, direction)`, whose edge schema fixes
+            // the neighbor label.  Vertex IDs are label-local in LDBC/IMDb, so
+            // consulting the legacy global `vertex_label_map` here can confuse
+            // equal numeric IDs from different labels and discard valid arms.
             structural_degree = structural_degree.saturating_add(1);
             let edge_passes = Self::properties_pass_predicates(
                 flat_graph.edge_props(edge_id),
