@@ -93,6 +93,25 @@ struct CompiledRawStarArm<'graph> {
     leaf_predicates: Vec<ResolvedPredicate>,
 }
 
+#[derive(Clone, Debug)]
+struct RawN1Branch {
+    center: VertexId,
+    root_edge_id: EdgeId,
+    intermediate: VertexId,
+    leaf_arms: Vec<RawStarArm>,
+}
+
+struct CompiledN1Branch<'graph> {
+    center_label: String,
+    intermediate_label: String,
+    root_edge_label: String,
+    root_outgoing: bool,
+    root_csr: Option<&'graph CsrAdjWithEid>,
+    root_edge_predicates: Vec<ResolvedPredicate>,
+    intermediate_predicates: Vec<ResolvedPredicate>,
+    leaf_arms: Vec<CompiledRawStarArm<'graph>>,
+}
+
 struct RawStarExtraction {
     local_pcfs: HashMap<VertexId, Vec<Pcf>>,
     consumed_edges: HashSet<EdgeId>,
@@ -1396,6 +1415,148 @@ mod tests {
         assert!(residual.inner.vertices[&1].predicates.is_empty());
         assert!(residual.inner.edges.contains_key(&12));
         assert!(residual.inner.edges.contains_key(&13));
+    }
+
+    #[test]
+    fn predicate_n1_branch_is_anchored_at_parent() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "title"),
+                vertex(2, "movie_companies"),
+                vertex(3, "company_name"),
+                vertex(4, "company_type"),
+            ],
+            edges: vec![
+                edge(10, "title_to_mc", 1, 2),
+                edge(11, "cn_to_mc", 3, 2),
+                edge(12, "ct_to_mc", 4, 2),
+            ],
+            predicates: vec![
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "keep".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(1)),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 2,
+                    property: "keep".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(1)),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 3,
+                    property: "country".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::String(Some("us".to_string())),
+                    values: Vec::new(),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("title", vec!["keep".to_string()]);
+        builder.set_vertex_prop_schema("movie_companies", vec!["keep".to_string()]);
+        builder.set_vertex_prop_schema("company_name", vec!["country".to_string()]);
+        builder.set_vertex_prop_schema("company_type", vec![]);
+        for offset in 0..5 {
+            let title = 100 + offset;
+            let mc = 200 + offset;
+            let cn = 300 + offset;
+            let ct = 400 + offset;
+            builder.add_vertex(title, "title", vec![ScalarValue::Int64(Some(1))]);
+            builder.add_vertex(mc, "movie_companies", vec![ScalarValue::Int64(Some(1))]);
+            builder.add_vertex(
+                cn,
+                "company_name",
+                vec![ScalarValue::String(Some("us".to_string()))],
+            );
+            builder.add_vertex(ct, "company_type", vec![]);
+            builder.add_edge(
+                1000 + offset,
+                title,
+                "title",
+                mc,
+                "movie_companies",
+                "title_to_mc",
+                vec![],
+            );
+            builder.add_edge(
+                2000 + offset,
+                cn,
+                "company_name",
+                mc,
+                "movie_companies",
+                "cn_to_mc",
+                vec![],
+            );
+            builder.add_edge(
+                3000 + offset,
+                ct,
+                "company_type",
+                mc,
+                "movie_companies",
+                "ct_to_mc",
+                vec![],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("title_to_mc".to_string(), EdgeCardinality::OneToMany);
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("cn_to_mc".to_string(), EdgeCardinality::OneToMany);
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("ct_to_mc".to_string(), EdgeCardinality::OneToMany);
+        degree_seq_graph.star_stats.insert(
+            StarStatKey::new(
+                "unused".to_string(),
+                vec![
+                    PathPattern::new_without_reverse(
+                        vec!["unused".to_string(), "leaf".to_string()],
+                        vec!["unused_edge".to_string()],
+                    ),
+                    PathPattern::new_without_reverse(
+                        vec!["unused".to_string(), "leaf2".to_string()],
+                        vec!["unused_edge2".to_string()],
+                    ),
+                ],
+            ),
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(&[1, 1], 0.01, false)
+                    .unwrap(),
+            },
+        );
+
+        let extraction = query_graph
+            .extract_raw_star_local_pcfs(
+                &degree_seq_graph,
+                Some(&flat_graph),
+                5,
+                &PredicateApplyType::SCALE,
+                &Arc::new(DashMap::new()),
+            )
+            .unwrap()
+            .expect("the filtered N:1 branch should be sampled");
+        assert_eq!(extraction.consumed_edges, HashSet::from([10, 11, 12]));
+        assert_eq!(extraction.owned_predicate_vertices, HashSet::from([1, 2]));
+        assert_eq!(
+            extraction.local_pcfs.get(&1).unwrap()[0].get_num_rows(),
+            5.0
+        );
     }
 
     #[test]
@@ -5111,6 +5272,504 @@ impl QueryGraph {
         graph
     }
 
+    fn edge_is_functional_between(
+        &self,
+        edge_id: EdgeId,
+        from: VertexId,
+        to: VertexId,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> bool {
+        let Some(edge) = self.inner.edges.get(&edge_id) else {
+            return false;
+        };
+        let cardinality = degree_seq_graph
+            .edge_cardinality(&edge.label)
+            .unwrap_or_else(|| manual_edge_cardinality(&edge.label));
+        if edge.src_vertex_id == from && edge.dst_vertex_id == to {
+            matches!(cardinality, EdgeCardinality::ManyToOne)
+        } else if edge.dst_vertex_id == from && edge.src_vertex_id == to {
+            matches!(cardinality, EdgeCardinality::OneToMany)
+        } else {
+            false
+        }
+    }
+
+    fn find_predicate_n1_branch(
+        &self,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        max_star_degree: usize,
+    ) -> Option<RawN1Branch> {
+        let mut candidates = Vec::new();
+        for (&root_edge_id, root_edge) in &self.inner.edges {
+            for center in [root_edge.src_vertex_id, root_edge.dst_vertex_id] {
+                let intermediate = if center == root_edge.src_vertex_id {
+                    root_edge.dst_vertex_id
+                } else {
+                    root_edge.src_vertex_id
+                };
+                let Some(center_vertex) = self.inner.vertices.get(&center) else {
+                    continue;
+                };
+                let Some(intermediate_vertex) = self.inner.vertices.get(&intermediate) else {
+                    continue;
+                };
+
+                let mut leaf_edge_ids = self
+                    .get_neighbor_edges(intermediate)
+                    .into_iter()
+                    .filter(|edge_id| *edge_id != root_edge_id)
+                    .filter(|edge_id| {
+                        self.inner.edges.get(edge_id).is_some_and(|edge| {
+                            let other = if edge.src_vertex_id == intermediate {
+                                edge.dst_vertex_id
+                            } else {
+                                edge.src_vertex_id
+                            };
+                            self.get_degree(other) == 1
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                leaf_edge_ids.sort_unstable();
+                if leaf_edge_ids.len() < 2 || leaf_edge_ids.len() > max_star_degree {
+                    continue;
+                }
+                // The branch owns all incident edges of the intermediate. If
+                // another non-leaf edge remains, its intermediate predicate
+                // would be duplicated in the residual decomposition.
+                if leaf_edge_ids.len() + 1 != self.get_degree(intermediate) {
+                    continue;
+                }
+
+                let mut leaf_arms = Vec::with_capacity(leaf_edge_ids.len());
+                let mut has_predicates = !center_vertex.predicates.is_empty()
+                    || !intermediate_vertex.predicates.is_empty()
+                    || !root_edge.predicates.is_empty();
+                let mut all_functional = true;
+                for edge_id in leaf_edge_ids {
+                    let Some(edge) = self.inner.edges.get(&edge_id) else {
+                        all_functional = false;
+                        break;
+                    };
+                    let leaf_vertex_id = if edge.src_vertex_id == intermediate {
+                        edge.dst_vertex_id
+                    } else {
+                        edge.src_vertex_id
+                    };
+                    if !self.edge_is_functional_between(
+                        edge_id,
+                        intermediate,
+                        leaf_vertex_id,
+                        degree_seq_graph,
+                    ) {
+                        all_functional = false;
+                        break;
+                    }
+                    let Some(leaf_vertex) = self.inner.vertices.get(&leaf_vertex_id) else {
+                        all_functional = false;
+                        break;
+                    };
+                    has_predicates |=
+                        !edge.predicates.is_empty() || !leaf_vertex.predicates.is_empty();
+                    let (center_label, leaf_label) = if edge.src_vertex_id == intermediate {
+                        (intermediate_vertex.label.clone(), leaf_vertex.label.clone())
+                    } else {
+                        (intermediate_vertex.label.clone(), leaf_vertex.label.clone())
+                    };
+                    let pattern = PathPattern::new_without_reverse(
+                        vec![center_label, leaf_label],
+                        vec![edge.label.clone()],
+                    );
+                    leaf_arms.push(RawStarArm {
+                        edge_id,
+                        leaf_vertex_id,
+                        pattern,
+                    });
+                }
+                if !all_functional || !has_predicates {
+                    continue;
+                }
+                candidates.push(RawN1Branch {
+                    center,
+                    root_edge_id,
+                    intermediate,
+                    leaf_arms,
+                });
+            }
+        }
+
+        candidates.sort_by_key(|branch| (branch.center, branch.intermediate, branch.root_edge_id));
+        candidates.into_iter().next()
+    }
+
+    fn sample_filtered_n1_branch_pcf(
+        &self,
+        branch: &RawN1Branch,
+        flat_graph: &FlatGraph,
+        sample_size: usize,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+    ) -> GCardResult<Option<Pcf>> {
+        let center_vertex = self.inner.vertices.get(&branch.center).ok_or_else(|| {
+            GCardError::VertexNotFound(format!("branch center vertex {} not found", branch.center))
+        })?;
+        let intermediate_vertex =
+            self.inner
+                .vertices
+                .get(&branch.intermediate)
+                .ok_or_else(|| {
+                    GCardError::VertexNotFound(format!(
+                        "branch intermediate vertex {} not found",
+                        branch.intermediate
+                    ))
+                })?;
+        let root_edge = self.inner.edges.get(&branch.root_edge_id).ok_or_else(|| {
+            GCardError::EdgeNotFound(format!(
+                "branch root edge {} not found",
+                branch.root_edge_id
+            ))
+        })?;
+        let root_outgoing = root_edge.src_vertex_id == branch.center;
+        let center_predicates = Self::resolve_vertex_predicates(
+            flat_graph,
+            &center_vertex.label,
+            &center_vertex.predicates,
+        )?;
+        let root_edge_predicates =
+            Self::resolve_edge_predicates(flat_graph, &root_edge.label, &root_edge.predicates)?;
+        let intermediate_predicates = Self::resolve_vertex_predicates(
+            flat_graph,
+            &intermediate_vertex.label,
+            &intermediate_vertex.predicates,
+        )?;
+
+        let leaf_arms = branch
+            .leaf_arms
+            .iter()
+            .map(|arm| {
+                let edge = self.inner.edges.get(&arm.edge_id).ok_or_else(|| {
+                    GCardError::EdgeNotFound(format!("branch leaf edge {} not found", arm.edge_id))
+                })?;
+                let leaf = self
+                    .inner
+                    .vertices
+                    .get(&arm.leaf_vertex_id)
+                    .ok_or_else(|| {
+                        GCardError::VertexNotFound(format!(
+                            "branch leaf vertex {} not found",
+                            arm.leaf_vertex_id
+                        ))
+                    })?;
+                let outgoing = edge.src_vertex_id == branch.intermediate;
+                let edge_predicates =
+                    Self::resolve_edge_predicates(flat_graph, &edge.label, &edge.predicates)?;
+                let leaf_predicates =
+                    Self::resolve_vertex_predicates(flat_graph, &leaf.label, &leaf.predicates)?;
+                Ok(CompiledRawStarArm {
+                    edge_id: edge.id,
+                    edge_label: edge.label.clone(),
+                    leaf_label: leaf.label.clone(),
+                    outgoing,
+                    csr: flat_graph.hop_csr_for_label(
+                        &intermediate_vertex.label,
+                        &edge.label,
+                        outgoing,
+                    ),
+                    edge_predicates,
+                    leaf_predicates,
+                })
+            })
+            .collect::<GCardResult<Vec<_>>>()?;
+        let compiled = CompiledN1Branch {
+            center_label: center_vertex.label.clone(),
+            intermediate_label: intermediate_vertex.label.clone(),
+            root_edge_label: root_edge.label.clone(),
+            root_outgoing,
+            root_csr: flat_graph.hop_csr_for_label(
+                &center_vertex.label,
+                &root_edge.label,
+                root_outgoing,
+            ),
+            root_edge_predicates,
+            intermediate_predicates,
+            leaf_arms,
+        };
+        let population = flat_graph.vertex_count_by_label(&compiled.center_label);
+        if population == 0 || sample_size == 0 {
+            return Ok(None);
+        }
+
+        const MIN_POSITIVE_SAMPLES: usize = 5;
+        let started = std::time::Instant::now();
+        crate::procedures::gcard_query::SAMPLING_CALLS.fetch_add(1, Ordering::Relaxed);
+        let sample_signature = format!(
+            "predicate-n1-branch:{}:{}:{:?}",
+            compiled.center_label,
+            branch.root_edge_id,
+            branch
+                .leaf_arms
+                .iter()
+                .map(|arm| arm.edge_id)
+                .collect::<Vec<_>>()
+        );
+        let root_edge_population = flat_graph.edge_count_by_label(&compiled.root_edge_label);
+
+        let (pcf, sampling_mode, samples, positive_samples, sampled_rows, anchor_desc) =
+            if population <= sample_size || root_edge_population == 0 {
+                let sampled_centers = if let Some(cached) = flat_vertex_cache.get(&sample_signature)
+                {
+                    cached.clone()
+                } else {
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(
+                        Self::single_vertex_sample_seed(&sample_signature, &[]),
+                    );
+                    let sampled = flat_graph.sample_vertices_by_label(
+                        &compiled.center_label,
+                        sample_size,
+                        &mut rng,
+                    );
+                    flat_vertex_cache.insert(sample_signature.clone(), sampled.clone());
+                    sampled
+                };
+                let mut sampled_degrees = Vec::with_capacity(sampled_centers.len());
+                for &center_vid in &sampled_centers {
+                    if !Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&compiled.center_label, center_vid),
+                        &center_predicates,
+                    )? {
+                        sampled_degrees.push(0);
+                        continue;
+                    }
+                    let (_, degree) =
+                        Self::filtered_n1_branch_degree(flat_graph, &compiled, center_vid)?;
+                    sampled_degrees.push(degree);
+                }
+                let positive = sampled_degrees.iter().filter(|&&degree| degree > 0).count();
+                let sampled_rows = sampled_degrees
+                    .iter()
+                    .map(|&degree| degree as u128)
+                    .sum::<u128>();
+                (
+                    (positive >= MIN_POSITIVE_SAMPLES || sampled_centers.len() == population)
+                        .then(|| Self::pcf_from_uniform_center_sample(&sampled_degrees, population))
+                        .flatten(),
+                    "uniform-center",
+                    sampled_centers.len(),
+                    positive,
+                    sampled_rows,
+                    "none".to_string(),
+                )
+            } else {
+                let mut rng = rand::rngs::StdRng::seed_from_u64(Self::single_vertex_sample_seed(
+                    &sample_signature,
+                    &[],
+                ));
+                let mut weighted_degrees = Vec::with_capacity(sample_size);
+                let mut observed_rows = 0u128;
+                let mut valid_anchor_samples = 0usize;
+                let mut center_predicate_samples = 0usize;
+                for _ in 0..sample_size {
+                    let Some(edge_id) =
+                        flat_graph.sample_edge_id_by_label(&compiled.root_edge_label, &mut rng)
+                    else {
+                        continue;
+                    };
+                    let Some((src, src_label, dst, dst_label, edge_label)) =
+                        flat_graph.edge_endpoints(edge_id)
+                    else {
+                        continue;
+                    };
+                    let center_vid = if compiled.root_outgoing {
+                        if src_label != compiled.center_label
+                            || dst_label != compiled.intermediate_label
+                            || edge_label != compiled.root_edge_label
+                        {
+                            continue;
+                        }
+                        src
+                    } else {
+                        if dst_label != compiled.center_label
+                            || src_label != compiled.intermediate_label
+                            || edge_label != compiled.root_edge_label
+                        {
+                            continue;
+                        }
+                        dst
+                    };
+                    valid_anchor_samples += 1;
+                    if !Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&compiled.center_label, center_vid),
+                        &center_predicates,
+                    )? {
+                        continue;
+                    }
+                    center_predicate_samples += 1;
+                    let (root_degree, branch_degree) =
+                        Self::filtered_n1_branch_degree(flat_graph, &compiled, center_vid)?;
+                    if root_degree == 0 || branch_degree == 0 {
+                        continue;
+                    }
+                    observed_rows = observed_rows.saturating_add(branch_degree as u128);
+                    let weight =
+                        root_edge_population as f64 / (sample_size as f64 * root_degree as f64);
+                    weighted_degrees.push((branch_degree, weight));
+                }
+                let positive = weighted_degrees.len();
+                (
+                    (positive >= MIN_POSITIVE_SAMPLES)
+                        .then(|| {
+                            Self::pcf_from_weighted_center_sample(&weighted_degrees, population)
+                        })
+                        .flatten(),
+                    "edge-anchor",
+                    sample_size,
+                    positive,
+                    observed_rows,
+                    format!(
+                        "edge={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={}",
+                        branch.root_edge_id,
+                        compiled.root_edge_label,
+                        root_edge_population,
+                        valid_anchor_samples,
+                        center_predicate_samples,
+                    ),
+                )
+            };
+
+        crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED
+            .fetch_add(samples as u64, Ordering::Relaxed);
+        crate::procedures::gcard_query::SAMPLING_NANOS
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let enough_evidence = pcf.is_some();
+        let estimated_rows = pcf.as_ref().map(Pcf::get_num_rows).unwrap_or(0.0);
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[predicate-n1-branch-sample] center={} intermediate={} arms={} mode={} anchor={} population={} samples={} positive_samples={} enough_evidence={} sampled_rows={} estimated_rows={:.3}",
+                branch.center,
+                branch.intermediate,
+                branch.leaf_arms.len(),
+                sampling_mode,
+                anchor_desc,
+                population,
+                samples,
+                positive_samples,
+                enough_evidence,
+                sampled_rows,
+                estimated_rows,
+            ));
+        }
+        Ok(pcf)
+    }
+
+    fn filtered_n1_branch_degree(
+        flat_graph: &FlatGraph,
+        branch: &CompiledN1Branch<'_>,
+        center_vid: VertexId,
+    ) -> GCardResult<(u64, u64)> {
+        let mut root_degree = 0u64;
+        let mut branch_degree = 0u64;
+        for &(intermediate_vid, root_edge_id) in branch
+            .root_csr
+            .map(|csr| csr.neighbors_slice(center_vid))
+            .unwrap_or_default()
+        {
+            root_degree = root_degree.saturating_add(1);
+            if !Self::properties_pass_predicates(
+                flat_graph.edge_props(root_edge_id),
+                &branch.root_edge_predicates,
+            )? {
+                continue;
+            }
+            if !Self::properties_pass_predicates(
+                flat_graph.vertex_props(&branch.intermediate_label, intermediate_vid),
+                &branch.intermediate_predicates,
+            )? {
+                continue;
+            }
+            let mut joint_degree = 1u64;
+            for arm in &branch.leaf_arms {
+                let (_, filtered_degree) =
+                    Self::raw_star_arm_degrees(flat_graph, arm, intermediate_vid)?;
+                joint_degree = joint_degree.saturating_mul(filtered_degree);
+                if joint_degree == 0 {
+                    break;
+                }
+            }
+            branch_degree = branch_degree.saturating_add(joint_degree);
+        }
+        Ok((root_degree, branch_degree))
+    }
+
+    fn extract_filtered_n1_branch_local_pcf(
+        &self,
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
+        sample_size: usize,
+        predicate_apply_type: &PredicateApplyType,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+        max_star_degree: usize,
+    ) -> GCardResult<Option<RawStarExtraction>> {
+        if flat_graph.is_none()
+            || sample_size == 0
+            || !matches!(
+                predicate_apply_type,
+                PredicateApplyType::INNER | PredicateApplyType::SCALE
+            )
+        {
+            return Ok(None);
+        }
+        let Some(branch) = self.find_predicate_n1_branch(degree_seq_graph, max_star_degree) else {
+            return Ok(None);
+        };
+        let Some(fg) = flat_graph else {
+            return Ok(None);
+        };
+        let Some(pcf) =
+            self.sample_filtered_n1_branch_pcf(&branch, fg, sample_size, flat_vertex_cache)?
+        else {
+            return Ok(None);
+        };
+        let mut consumed_edges = HashSet::from([branch.root_edge_id]);
+        consumed_edges.extend(branch.leaf_arms.iter().map(|arm| arm.edge_id));
+        let mut owned_predicate_vertices = HashSet::new();
+        if self
+            .inner
+            .vertices
+            .get(&branch.center)
+            .is_some_and(|vertex| !vertex.predicates.is_empty())
+        {
+            owned_predicate_vertices.insert(branch.center);
+        }
+        if self
+            .inner
+            .vertices
+            .get(&branch.intermediate)
+            .is_some_and(|vertex| !vertex.predicates.is_empty())
+        {
+            owned_predicate_vertices.insert(branch.intermediate);
+        }
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[n1-branch-mode] center={} intermediate={} consumed_edges={:?} owned_predicate_vertices={:?}",
+                branch.center,
+                branch.intermediate,
+                {
+                    let mut ids: Vec<_> = consumed_edges.iter().copied().collect();
+                    ids.sort_unstable();
+                    ids
+                },
+                {
+                    let mut ids: Vec<_> = owned_predicate_vertices.iter().copied().collect();
+                    ids.sort_unstable();
+                    ids
+                },
+            ));
+        }
+        Ok(Some(RawStarExtraction {
+            local_pcfs: HashMap::from([(branch.center, vec![pcf])]),
+            consumed_edges,
+            owned_predicate_vertices,
+        }))
+    }
+
     fn extract_raw_star_local_pcfs(
         &self,
         degree_seq_graph: &DegreeSeqGraphCompressed,
@@ -5142,6 +5801,21 @@ impl QueryGraph {
         }
         if max_star_degree < 2 {
             return Ok(None);
+        }
+
+        // A predicate-bearing N:1 subtree is more naturally represented as a
+        // factor anchored at its parent than as a local star at the middle
+        // table. Try this mode first; the ordinary one-hop star remains the
+        // fallback when the branch is too sparse to sample safely.
+        if let Some(branch) = self.extract_filtered_n1_branch_local_pcf(
+            degree_seq_graph,
+            flat_graph,
+            sample_size,
+            predicate_apply_type,
+            flat_vertex_cache,
+            max_star_degree,
+        )? {
+            return Ok(Some(branch));
         }
 
         let predicate_sampling_available = flat_graph.is_some()
