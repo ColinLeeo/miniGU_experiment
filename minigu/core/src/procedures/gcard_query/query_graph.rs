@@ -93,7 +93,13 @@ struct CompiledRawStarArm<'graph> {
     leaf_predicates: Vec<ResolvedPredicate>,
 }
 
-type RawStarExtraction = (HashMap<VertexId, Vec<Pcf>>, HashSet<EdgeId>);
+struct RawStarExtraction {
+    local_pcfs: HashMap<VertexId, Vec<Pcf>>,
+    consumed_edges: HashSet<EdgeId>,
+    /// Vertex predicates evaluated inside a local PCF. They must be removed
+    /// from residual path factors so the same filter is not applied twice.
+    owned_predicate_vertices: HashSet<VertexId>,
+}
 
 impl Endpoints for QueryEdge {
     fn src(&self) -> VertexId {
@@ -1286,6 +1292,110 @@ mod tests {
                 .is_none(),
             "local raw-star PCF must not hide a non-leaf endpoint that still joins residual edges"
         );
+    }
+
+    #[test]
+    fn predicate_star_transfers_partial_center_predicate_ownership() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "center"),
+                vertex(2, "a"),
+                vertex(3, "b"),
+                vertex(4, "mid"),
+                vertex(5, "tail"),
+            ],
+            edges: vec![
+                edge(10, "to_a", 1, 2),
+                edge(11, "to_b", 1, 3),
+                edge(12, "to_mid", 1, 4),
+                edge(13, "to_tail", 4, 5),
+            ],
+            predicates: vec![PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 1,
+                property: "keep".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::Int64(Some(1)),
+                values: Vec::new(),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("center", vec!["keep".to_string()]);
+        for offset in 0..5 {
+            let center = 100 + offset;
+            let a = 200 + offset;
+            let b = 300 + offset;
+            let mid = 400 + offset;
+            let tail = 500 + offset;
+            builder.add_vertex(center, "center", vec![ScalarValue::Int64(Some(1))]);
+            builder.add_vertex(a, "a", vec![]);
+            builder.add_vertex(b, "b", vec![]);
+            builder.add_vertex(mid, "mid", vec![]);
+            builder.add_vertex(tail, "tail", vec![]);
+            builder.add_edge(1000 + offset, center, "center", a, "a", "to_a", vec![]);
+            builder.add_edge(2000 + offset, center, "center", b, "b", "to_b", vec![]);
+            builder.add_edge(
+                3000 + offset,
+                center,
+                "center",
+                mid,
+                "mid",
+                "to_mid",
+                vec![],
+            );
+            builder.add_edge(4000 + offset, mid, "mid", tail, "tail", "to_tail", vec![]);
+        }
+        let flat_graph = builder.build();
+
+        let star_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["to_a".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["to_b".to_string()],
+                ),
+            ],
+        );
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            star_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(
+                    &[1, 1, 1, 1, 1],
+                    0.01,
+                    false,
+                )
+                .unwrap(),
+            },
+        );
+
+        let extraction = query_graph
+            .extract_raw_star_local_pcfs(
+                &degree_seq_graph,
+                Some(&flat_graph),
+                5,
+                &PredicateApplyType::SCALE,
+                &Arc::new(DashMap::new()),
+            )
+            .unwrap()
+            .expect("the two leaf arms should form a local predicate star");
+        assert_eq!(extraction.consumed_edges, HashSet::from([10, 11]));
+        assert_eq!(extraction.owned_predicate_vertices, HashSet::from([1]));
+
+        let residual = query_graph.subgraph_without_edges(
+            &extraction.consumed_edges,
+            &extraction.owned_predicate_vertices,
+        );
+        assert!(residual.inner.vertices[&1].predicates.is_empty());
+        assert!(residual.inner.edges.contains_key(&12));
+        assert!(residual.inner.edges.contains_key(&13));
     }
 
     #[test]
@@ -4753,16 +4863,21 @@ impl QueryGraph {
             })
             .collect::<GCardResult<Vec<_>>>()?;
 
-        if let Some((local_pcfs, consumed_edges)) = query_graph.extract_raw_star_local_pcfs(
+        if let Some(extraction) = query_graph.extract_raw_star_local_pcfs(
             degree_seq_graph,
             flat_graph,
             sample_size,
             predicate_apply_type,
             flat_vertex_cache,
         )? {
+            let RawStarExtraction {
+                local_pcfs,
+                consumed_edges,
+                owned_predicate_vertices,
+            } = extraction;
             if decomp_trace_enabled() {
                 decomp_trace_line(format!(
-                    "[raw-star-mode] accepted consumed_edges={:?} local_pcf_centers={:?}",
+                    "[raw-star-mode] accepted consumed_edges={:?} local_pcf_centers={:?} owned_predicate_vertices={:?}",
                     {
                         let mut ids: Vec<_> = consumed_edges.iter().copied().collect();
                         ids.sort_unstable();
@@ -4772,10 +4887,17 @@ impl QueryGraph {
                         let mut centers: Vec<_> = local_pcfs.keys().copied().collect();
                         centers.sort_unstable();
                         centers
+                    },
+                    {
+                        let mut vertices: Vec<_> =
+                            owned_predicate_vertices.iter().copied().collect();
+                        vertices.sort_unstable();
+                        vertices
                     }
                 ));
             }
-            let residual = query_graph.subgraph_without_edges(&consumed_edges);
+            let residual =
+                query_graph.subgraph_without_edges(&consumed_edges, &owned_predicate_vertices);
             let pivot_nodes = residual.find_pivot_nodes();
             let residual_paths = residual.find_paths_from_pivots(&pivot_nodes);
             if decomp_trace_enabled() {
@@ -4953,10 +5075,20 @@ impl QueryGraph {
         Ok(abstract_graph)
     }
 
-    fn subgraph_without_edges(&self, consumed_edges: &HashSet<EdgeId>) -> QueryGraph {
+    fn subgraph_without_edges(
+        &self,
+        consumed_edges: &HashSet<EdgeId>,
+        owned_predicate_vertices: &HashSet<VertexId>,
+    ) -> QueryGraph {
         let mut graph = QueryGraph::new();
         graph.inner.vertices = self.inner.vertices.clone();
         graph.predicate_index = self.predicate_index.clone();
+
+        for vertex_id in owned_predicate_vertices {
+            if let Some(vertex) = graph.inner.vertices.get_mut(vertex_id) {
+                vertex.predicates.clear();
+            }
+        }
 
         for (&edge_id, edge) in &self.inner.edges {
             if consumed_edges.contains(&edge_id) {
@@ -5065,6 +5197,7 @@ impl QueryGraph {
 
         let mut consumed_edges = HashSet::new();
         let mut local_pcfs: HashMap<VertexId, Vec<Pcf>> = HashMap::new();
+        let mut owned_predicate_vertices = HashSet::new();
         let mut centers: Vec<_> = candidates_by_center.keys().copied().collect();
         centers.sort_unstable();
 
@@ -5140,16 +5273,12 @@ impl QueryGraph {
                         (edge.src_vertex_id != center && edge.dst_vertex_id != center)
                             || selected_edge_ids.contains(&edge.id)
                     });
-                if selected_has_predicates && !center_predicate_is_fully_owned {
-                    // Otherwise the center predicate would be applied once in
-                    // this local factor and again on a residual incident edge.
-                    break;
-                }
-                let pcf = if selected_has_predicates
+                let predicate_sampled = selected_has_predicates
                     && matches!(
                         predicate_apply_type,
                         PredicateApplyType::INNER | PredicateApplyType::SCALE
-                    ) {
+                    );
+                let pcf = if predicate_sampled {
                     let Some(fg) = flat_graph else {
                         break;
                     };
@@ -5180,7 +5309,7 @@ impl QueryGraph {
                         "[raw-star-extract] center={} selected_edges={:?} predicate_sampled={} pcf_rows={:.0}",
                         center,
                         selected_edges,
-                        selected_has_predicates,
+                        predicate_sampled,
                         pcf.get_num_rows()
                     ));
                 }
@@ -5188,13 +5317,37 @@ impl QueryGraph {
                     consumed_edges.insert(mergeable[idx].edge_id);
                 }
                 local_pcfs.entry(center).or_default().push(pcf);
+                let owns_partial_center_predicate = predicate_sampled
+                    && !center_vertex.predicates.is_empty()
+                    && !center_predicate_is_fully_owned;
+                if predicate_sampled && !center_vertex.predicates.is_empty() {
+                    owned_predicate_vertices.insert(center);
+                }
                 for idx in selected_indices.into_iter().rev() {
                     mergeable.remove(idx);
+                }
+                if owns_partial_center_predicate {
+                    // The sampled local PCF now owns the center predicate. Keep
+                    // the remaining incident edges, but remove that predicate
+                    // from their residual path factors. Stop after one local
+                    // factor at this center so the predicate is not sampled
+                    // into multiple PCFs.
+                    if decomp_trace_enabled() {
+                        decomp_trace_line(format!(
+                            "[raw-star-extract] center={} transfers predicate ownership to local PCF",
+                            center
+                        ));
+                    }
+                    break;
                 }
             }
         }
 
-        Ok((!consumed_edges.is_empty()).then_some((local_pcfs, consumed_edges)))
+        Ok((!consumed_edges.is_empty()).then_some(RawStarExtraction {
+            local_pcfs,
+            consumed_edges,
+            owned_predicate_vertices,
+        }))
     }
 
     fn sample_filtered_raw_star_pcf(
