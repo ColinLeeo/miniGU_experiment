@@ -19,6 +19,9 @@ use minigu_storage::tp::MemoryGraph;
 
 use super::load_ldbc::build_flat_graph;
 use crate::procedures::common::Manifest;
+use crate::procedures::gcard_query::utils::{
+    edge_cardinalities_to_names, get_edges_from_catalog_with_dataset_cardinalities,
+};
 use crate::procedures::import_graph::get_graph_type_from_manifest;
 
 pub fn build_procedure() -> Procedure {
@@ -51,6 +54,9 @@ pub fn build_procedure() -> Procedure {
             .map_err(|e| anyhow::anyhow!("cannot parse manifest: {}", e))?;
         let graph_type = get_graph_type_from_manifest(&manifest)
             .map_err(|e| anyhow::anyhow!("get_graph_type_from_manifest: {}", e))?;
+        let edge_cardinalities = edge_cardinalities_to_names(
+            &get_edges_from_catalog_with_dataset_cardinalities(graph_type.as_ref(), dataset_path)?,
+        );
 
         // ── Build FlatGraph from CSVs ──
         eprintln!("[load_flatgraph] building FlatGraph from CSV...");
@@ -76,6 +82,7 @@ pub fn build_procedure() -> Procedure {
         // ── Build GraphContainer (empty MemoryGraph, no MVCC data) ──
         let empty_graph = MemoryGraph::in_memory();
         let container = GraphContainer::new(graph_type, GraphStorage::Memory(empty_graph));
+        container.set_gcard_edge_cardinalities(edge_cardinalities);
 
         container
             .set_gcard_flat_graph(Arc::new(flat_graph) as Arc<dyn std::any::Any + Send + Sync>);

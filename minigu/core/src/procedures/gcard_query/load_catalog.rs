@@ -13,7 +13,8 @@ use minigu_context::procedure::Procedure;
 use crate::procedures::gcard_query::create_catalog::add_functional_path_aliases_for_existing_catalog;
 use crate::procedures::gcard_query::statistic::load_statistic;
 use crate::procedures::gcard_query::utils::{
-    edge_cardinalities_from_schema, get_edges_from_catalog,
+    edge_cardinalities_from_names, edge_cardinalities_from_schema,
+    get_edges_from_catalog_with_cardinalities,
 };
 
 /// Procedure: `call load_catalog("<graph_name>")`
@@ -59,7 +60,11 @@ pub fn build_load_procedure() -> Procedure {
         let mut degree_seq_graph_compressed = statistic
             .to_degree_seq_graph_compressed()
             .map_err(|e| anyhow::anyhow!("to_degree_seq_graph_compressed: {}", e))?;
-        let edges = get_edges_from_catalog(graph_container.graph_type().as_ref())?;
+        let overrides = edge_cardinalities_from_names(&graph_container.gcard_edge_cardinalities());
+        let edges = get_edges_from_catalog_with_cardinalities(
+            graph_container.graph_type().as_ref(),
+            &overrides,
+        )?;
         degree_seq_graph_compressed.edge_cardinalities = edge_cardinalities_from_schema(&edges);
         let alias_count = add_functional_path_aliases_for_existing_catalog(
             &mut degree_seq_graph_compressed,

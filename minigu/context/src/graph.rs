@@ -115,6 +115,8 @@ pub struct GraphContainer {
     /// captured by `gcard_snapshot` and restored by `gcard_restore`.  Lets update
     /// experiments reset to the original graph without reloading it from disk.
     gcard_snapshot: RwLock<Option<GCardSnapshot>>,
+    /// Dataset-owned schema metadata used by GCard's functional-edge logic.
+    gcard_edge_cardinalities: RwLock<HashMap<String, String>>,
 }
 
 impl GraphContainer {
@@ -130,6 +132,7 @@ impl GraphContainer {
             gcard_scanned_hops: RwLock::new(None),
             gcard_flat_graph: RwLock::new(None),
             gcard_snapshot: RwLock::new(None),
+            gcard_edge_cardinalities: RwLock::new(HashMap::new()),
         }
     }
 
@@ -304,6 +307,17 @@ impl GraphContainer {
     /// GCard: get the in-memory snapshot, if one was captured.
     pub fn gcard_snapshot(&self) -> Option<GCardSnapshot> {
         self.gcard_snapshot.read().expect("RwLock read").clone()
+    }
+
+    pub fn set_gcard_edge_cardinalities(&self, values: HashMap<String, String>) {
+        *self.gcard_edge_cardinalities.write().expect("RwLock write") = values;
+    }
+
+    pub fn gcard_edge_cardinalities(&self) -> HashMap<String, String> {
+        self.gcard_edge_cardinalities
+            .read()
+            .expect("RwLock read")
+            .clone()
     }
 
     /// GCard: clear all cached GCard data (statistic, compressed degree sequence, update log).

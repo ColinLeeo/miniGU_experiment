@@ -14,7 +14,8 @@ use crate::procedures::gcard_query::catalog::{
 };
 use crate::procedures::gcard_query::statistic::save_statistic;
 use crate::procedures::gcard_query::utils::{
-    EdgeEndpoints, PathPattern, edge_cardinalities_from_schema, get_edges_from_catalog,
+    EdgeEndpoints, PathPattern, edge_cardinalities_from_names, edge_cardinalities_from_schema,
+    get_edges_from_catalog_with_cardinalities,
 };
 
 // ----- Schema path enumeration -----
@@ -687,7 +688,8 @@ pub fn build_procedure() -> Procedure {
             .ok_or_else(|| anyhow::anyhow!("FlatGraph not loaded (run load_ldbc first)"))?;
 
         // ── Build degree cache from FlatGraph ──
-        let edges = get_edges_from_catalog(graph_type_ref.as_ref())?;
+        let overrides = edge_cardinalities_from_names(&graph_container.gcard_edge_cardinalities());
+        let edges = get_edges_from_catalog_with_cardinalities(graph_type_ref.as_ref(), &overrides)?;
         let schema_path = enumerate_all_paths_walks_in_schema(&edges, max_k);
         {
             let total: usize = schema_path.values().map(|s| s.len()).sum();

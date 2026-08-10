@@ -73,6 +73,7 @@ impl Database {
 
                 let container =
                     Arc::new(GraphContainer::new(graph_type, GraphStorage::Memory(graph)));
+                container.set_gcard_edge_cardinalities(entry.edge_cardinalities.clone());
 
                 if let Some(fg) = flat_graph {
                     container.set_gcard_flat_graph(Arc::new(fg));

@@ -32,7 +32,8 @@ use super::flat_graph::{FlatGraph, FlatGraphBuilder};
 use crate::procedures::common::Manifest;
 use crate::procedures::gcard_query::statistic::save_statistic;
 use crate::procedures::gcard_query::utils::{
-    EdgeEndpoints, edge_cardinalities_from_schema, get_edges_from_catalog,
+    EdgeEndpoints, edge_cardinalities_from_schema, edge_cardinalities_to_names,
+    get_edges_from_catalog, get_edges_from_catalog_with_dataset_cardinalities,
 };
 use crate::procedures::import_graph::{get_graph_type_from_manifest, property_to_scalar_value};
 
@@ -612,7 +613,8 @@ pub fn build_procedure() -> Procedure {
         }
 
         // ── Compute degree sequences ──
-        let edges = get_edges_from_catalog(graph_type.as_ref())?;
+        let edges =
+            get_edges_from_catalog_with_dataset_cardinalities(graph_type.as_ref(), dataset_path)?;
         let schema_paths = enumerate_all_paths_walks_in_schema(&edges, max_k);
 
         let num_threads = std::thread::available_parallelism()
@@ -742,6 +744,7 @@ pub fn build_procedure() -> Procedure {
         let empty_graph = MemoryGraph::in_memory();
         let container =
             GraphContainer::new(Arc::clone(&graph_type), GraphStorage::Memory(empty_graph));
+        container.set_gcard_edge_cardinalities(edge_cardinalities_to_names(&edges));
         container.set_degree_seq_graph_compressed(Arc::new(degree_seq));
         container.set_statistic(Arc::new(statistic));
 

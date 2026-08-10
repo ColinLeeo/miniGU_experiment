@@ -47,6 +47,142 @@ pub fn manual_edge_cardinality(edge_label: &str) -> EdgeCardinality {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct EdgeCardinalitySidecar {
+    edges: HashMap<String, EdgeCardinalitySidecarEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EdgeCardinalitySidecarEntry {
+    src_label: String,
+    dst_label: String,
+    cardinality: EdgeCardinality,
+}
+
+pub fn edge_cardinality_name(cardinality: EdgeCardinality) -> &'static str {
+    match cardinality {
+        EdgeCardinality::ManyToMany => "ManyToMany",
+        EdgeCardinality::ManyToOne => "ManyToOne",
+        EdgeCardinality::OneToMany => "OneToMany",
+    }
+}
+
+pub fn edge_cardinality_from_name(value: &str) -> Option<EdgeCardinality> {
+    match value {
+        "ManyToMany" => Some(EdgeCardinality::ManyToMany),
+        "ManyToOne" => Some(EdgeCardinality::ManyToOne),
+        "OneToMany" => Some(EdgeCardinality::OneToMany),
+        _ => None,
+    }
+}
+
+pub fn edge_cardinalities_to_names(
+    edges: &HashMap<String, EdgeEndpoints>,
+) -> HashMap<String, String> {
+    edges
+        .iter()
+        .map(|(label, endpoint)| {
+            (
+                label.clone(),
+                edge_cardinality_name(endpoint.cardinality).to_string(),
+            )
+        })
+        .collect()
+}
+
+pub fn edge_cardinalities_from_names(
+    values: &HashMap<String, String>,
+) -> HashMap<String, EdgeCardinality> {
+    values
+        .iter()
+        .filter_map(|(label, value)| {
+            edge_cardinality_from_name(value).map(|cardinality| (label.clone(), cardinality))
+        })
+        .collect()
+}
+
+pub fn get_edges_from_catalog_with_cardinalities(
+    catalog: &dyn GraphTypeProvider,
+    overrides: &HashMap<String, EdgeCardinality>,
+) -> Result<HashMap<String, EdgeEndpoints>, anyhow::Error> {
+    let mut edges = get_edges_from_catalog(catalog)?;
+    for (label, endpoint) in &mut edges {
+        if let Some(cardinality) = overrides
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(label))
+            .map(|(_, cardinality)| cardinality)
+        {
+            endpoint.cardinality = *cardinality;
+        }
+    }
+    Ok(edges)
+}
+
+pub fn get_edges_from_catalog_with_dataset_cardinalities(
+    catalog: &dyn GraphTypeProvider,
+    dataset_dir: &std::path::Path,
+) -> Result<HashMap<String, EdgeEndpoints>, anyhow::Error> {
+    let path = dataset_dir.join("edge_cardinalities.json");
+    if !path.is_file() {
+        return get_edges_from_catalog(catalog);
+    }
+
+    let sidecar: EdgeCardinalitySidecar = serde_json::from_str(&std::fs::read_to_string(&path)?)
+        .map_err(|e| anyhow::anyhow!("cannot parse {}: {}", path.display(), e))?;
+    let mut edges = get_edges_from_catalog(catalog)?;
+
+    for (label, endpoint) in &mut edges {
+        let (described_label, described) = sidecar
+            .edges
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(label))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} does not describe schema edge '{}'",
+                    path.display(),
+                    label
+                )
+            })?;
+        if !described
+            .src_label
+            .eq_ignore_ascii_case(&endpoint.src_label)
+            || !described
+                .dst_label
+                .eq_ignore_ascii_case(&endpoint.dst_label)
+        {
+            return Err(anyhow::anyhow!(
+                "{} endpoint mismatch for '{}': expected {}->{}, got {}->{}",
+                path.display(),
+                described_label,
+                endpoint.src_label,
+                endpoint.dst_label,
+                described.src_label,
+                described.dst_label
+            ));
+        }
+        endpoint.cardinality = described.cardinality;
+    }
+    for described_label in sidecar.edges.keys() {
+        if !edges
+            .keys()
+            .any(|label| label.eq_ignore_ascii_case(described_label))
+        {
+            return Err(anyhow::anyhow!(
+                "{} describes unknown schema edge '{}'",
+                path.display(),
+                described_label
+            ));
+        }
+    }
+
+    eprintln!(
+        "loaded {} edge cardinalities from {}",
+        edges.len(),
+        path.display()
+    );
+    Ok(edges)
+}
+
 pub fn edge_cardinalities_from_schema(
     edges: &HashMap<String, EdgeEndpoints>,
 ) -> HashMap<String, EdgeCardinality> {

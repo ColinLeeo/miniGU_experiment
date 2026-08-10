@@ -28,6 +28,8 @@ pub struct GraphCatalogEntry {
     pub labels: Vec<LabelDef>,
     pub vertex_types: Vec<VertexTypeDef>,
     pub edge_types: Vec<EdgeTypeDef>,
+    #[serde(default)]
+    pub edge_cardinalities: HashMap<String, String>,
 }
 
 /// A label name with its original ID, so we can restore the exact same mapping.
@@ -63,7 +65,8 @@ pub fn save_catalog(db_path: &Path, schema: &MemorySchemaCatalog) -> Result<()> 
                 .downcast_ref::<GraphContainer>()
                 .expect("graph should be a GraphContainer");
             let graph_type = container.graph_type();
-            let entry = graph_type_to_catalog_entry(&graph_type);
+            let mut entry = graph_type_to_catalog_entry(&graph_type);
+            entry.edge_cardinalities = container.gcard_edge_cardinalities();
             catalog.graphs.insert(graph_name, entry);
         }
     }
@@ -161,6 +164,7 @@ fn graph_type_to_catalog_entry(graph_type: &MemoryGraphTypeCatalog) -> GraphCata
         labels,
         vertex_types,
         edge_types,
+        edge_cardinalities: HashMap::new(),
     }
 }
 
