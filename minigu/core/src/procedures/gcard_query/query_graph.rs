@@ -83,6 +83,16 @@ struct RawStarArm {
     pattern: PathPattern,
 }
 
+struct CompiledRawStarArm<'graph> {
+    edge_id: EdgeId,
+    edge_label: String,
+    leaf_label: String,
+    outgoing: bool,
+    csr: Option<&'graph CsrAdjWithEid>,
+    edge_predicates: Vec<ResolvedPredicate>,
+    leaf_predicates: Vec<ResolvedPredicate>,
+}
+
 type RawStarExtraction = (HashMap<VertexId, Vec<Pcf>>, HashSet<EdgeId>);
 
 impl Endpoints for QueryEdge {
@@ -946,6 +956,93 @@ mod tests {
             .find(|(graph, _)| graph.edges.is_empty())
             .expect("predicate-aware raw star should consume both leaf arms");
         assert_eq!(predicate_star.get_es().unwrap(), 2.0);
+    }
+
+    #[test]
+    fn predicate_star_edge_anchor_recovers_the_center_population() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "center"), vertex(2, "a"), vertex(3, "b")],
+            edges: vec![edge(10, "to_a", 1, 2), edge(11, "to_b", 1, 3)],
+            predicates: vec![PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 3,
+                property: "keep".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::Int64(Some(1)),
+                values: Vec::new(),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("b", vec!["keep".to_string()]);
+        for offset in 0..20u64 {
+            let center_id = 100 + offset;
+            let a_id = 200 + offset;
+            let b_id = 300 + offset;
+            builder.add_vertex(center_id, "center", vec![]);
+            builder.add_vertex(a_id, "a", vec![]);
+            builder.add_vertex(b_id, "b", vec![ScalarValue::Int64(Some(1))]);
+            builder.add_edge(
+                1000 + offset,
+                center_id,
+                "center",
+                a_id,
+                "a",
+                "to_a",
+                vec![],
+            );
+            builder.add_edge(
+                2000 + offset,
+                center_id,
+                "center",
+                b_id,
+                "b",
+                "to_b",
+                vec![],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let star_key = StarStatKey::new(
+            "center".to_string(),
+            vec![
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "a".to_string()],
+                    vec!["to_a".to_string()],
+                ),
+                PathPattern::new_without_reverse(
+                    vec!["center".to_string(), "b".to_string()],
+                    vec!["to_b".to_string()],
+                ),
+            ],
+        );
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph.star_stats.insert(
+            star_key,
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(&[1; 20], 0.01, false)
+                    .unwrap(),
+            },
+        );
+
+        let mut candidates = query_graph
+            .build_abstract_graph_flat(
+                1,
+                10,
+                &degree_seq_graph,
+                Some(&flat_graph),
+                5,
+                &PredicateApplyType::SCALE,
+                false,
+            )
+            .unwrap();
+        let (predicate_star, _) = candidates
+            .iter_mut()
+            .find(|(graph, _)| graph.edges.is_empty())
+            .expect("edge-anchored sampling should produce a predicate-star candidate");
+        assert_eq!(predicate_star.get_es().unwrap(), 20.0);
     }
 
     #[test]
@@ -5138,12 +5235,15 @@ impl QueryGraph {
                     Self::resolve_edge_predicates(flat_graph, &edge.label, &edge.predicates)?;
                 let leaf_predicates =
                     Self::resolve_vertex_predicates(flat_graph, &leaf.label, &leaf.predicates)?;
-                Ok((
-                    flat_graph.hop_csr_for_label(&center_vertex.label, &edge.label, outgoing),
-                    leaf.label.clone(),
+                Ok(CompiledRawStarArm {
+                    edge_id: edge.id,
+                    edge_label: edge.label.clone(),
+                    leaf_label: leaf.label.clone(),
+                    outgoing,
+                    csr: flat_graph.hop_csr_for_label(&center_vertex.label, &edge.label, outgoing),
                     edge_predicates,
                     leaf_predicates,
-                ))
+                })
             })
             .collect::<GCardResult<Vec<_>>>()?;
 
@@ -5151,96 +5251,189 @@ impl QueryGraph {
         if population == 0 || sample_size == 0 {
             return Ok(None);
         }
-        let sample_cache_key = format!(
+        let started = std::time::Instant::now();
+        crate::procedures::gcard_query::SAMPLING_CALLS.fetch_add(1, Ordering::Relaxed);
+        const MIN_POSITIVE_SAMPLES: usize = 5;
+        let sample_signature = format!(
             "predicate-star:{}:{:?}",
             center_vertex.label,
             arms.iter().map(|arm| arm.edge_id).collect::<Vec<_>>()
         );
-        let sampled_centers = if let Some(cached) = flat_vertex_cache.get(&sample_cache_key) {
-            cached.clone()
-        } else {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(Self::single_vertex_sample_seed(
-                &sample_cache_key,
-                &[],
-            ));
-            let sampled =
-                flat_graph.sample_vertices_by_label(&center_vertex.label, sample_size, &mut rng);
-            flat_vertex_cache.insert(sample_cache_key, sampled.clone());
-            sampled
-        };
-        if sampled_centers.is_empty() {
-            return Ok(None);
-        }
+        let anchor = compiled_arms
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, arm)| {
+                let edge_count = flat_graph.edge_count_by_label(&arm.edge_label);
+                (edge_count > 0).then_some((
+                    idx,
+                    edge_count,
+                    arm.edge_predicates.is_empty() && arm.leaf_predicates.is_empty(),
+                ))
+            })
+            .min_by_key(|&(_, edge_count, predicate_free)| (predicate_free, edge_count));
 
-        let started = std::time::Instant::now();
-        crate::procedures::gcard_query::SAMPLING_CALLS.fetch_add(1, Ordering::Relaxed);
-        crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED
-            .fetch_add(sampled_centers.len() as u64, Ordering::Relaxed);
-
-        let mut sampled_degrees = Vec::with_capacity(sampled_centers.len());
-        for &center_vid in &sampled_centers {
-            if !Self::properties_pass_predicates(
-                flat_graph.vertex_props(&center_vertex.label, center_vid),
-                &center_predicates,
-            )? {
-                sampled_degrees.push(0);
-                continue;
-            }
-
-            let mut joint_degree = 1u64;
-            for (csr, leaf_label, edge_predicates, leaf_predicates) in &compiled_arms {
-                let arm_degree = csr
-                    .map(|csr| csr.neighbors_slice(center_vid))
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|&(neighbor_vid, edge_id)| {
-                        (flat_graph.vertex_label(neighbor_vid) == Some(leaf_label.as_str()))
-                            .then_some((neighbor_vid, edge_id))
-                    })
-                    .try_fold(0u64, |count, (neighbor_vid, edge_id)| {
-                        let edge_passes = Self::properties_pass_predicates(
-                            flat_graph.edge_props(edge_id),
-                            edge_predicates,
-                        )?;
-                        let leaf_passes = Self::properties_pass_predicates(
-                            flat_graph.vertex_props(leaf_label, neighbor_vid),
-                            leaf_predicates,
-                        )?;
-                        Ok::<u64, GCardError>(count + u64::from(edge_passes && leaf_passes))
-                    })?;
-                joint_degree = joint_degree.saturating_mul(arm_degree);
-                if joint_degree == 0 {
-                    break;
+        let (pcf, sampling_mode, samples, positive_samples, sampled_rows, anchor_desc) =
+            if population <= sample_size || anchor.is_none() {
+                // Small graphs are cheaper and more accurate to enumerate by
+                // center. This is also the fallback when the FlatGraph has no
+                // edge bucket for any selected arm.
+                let sampled_centers = if let Some(cached) = flat_vertex_cache.get(&sample_signature)
+                {
+                    cached.clone()
+                } else {
+                    let mut rng = rand::rngs::StdRng::seed_from_u64(
+                        Self::single_vertex_sample_seed(&sample_signature, &[]),
+                    );
+                    let sampled = flat_graph.sample_vertices_by_label(
+                        &center_vertex.label,
+                        sample_size,
+                        &mut rng,
+                    );
+                    flat_vertex_cache.insert(sample_signature.clone(), sampled.clone());
+                    sampled
+                };
+                let mut sampled_degrees = Vec::with_capacity(sampled_centers.len());
+                for &center_vid in &sampled_centers {
+                    if !Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&center_vertex.label, center_vid),
+                        &center_predicates,
+                    )? {
+                        sampled_degrees.push(0);
+                        continue;
+                    }
+                    let mut joint_degree = 1u64;
+                    for arm in &compiled_arms {
+                        let (_, filtered_degree) =
+                            Self::raw_star_arm_degrees(flat_graph, arm, center_vid)?;
+                        joint_degree = joint_degree.saturating_mul(filtered_degree);
+                        if joint_degree == 0 {
+                            break;
+                        }
+                    }
+                    sampled_degrees.push(joint_degree);
                 }
-            }
-            sampled_degrees.push(joint_degree);
-        }
+                let positive = sampled_degrees.iter().filter(|&&degree| degree > 0).count();
+                let enough =
+                    sampled_centers.len() == population || positive >= MIN_POSITIVE_SAMPLES;
+                let sampled_rows = sampled_degrees
+                    .iter()
+                    .map(|&degree| degree as u128)
+                    .sum::<u128>();
+                (
+                    enough
+                        .then(|| Self::pcf_from_uniform_center_sample(&sampled_degrees, population))
+                        .flatten(),
+                    "uniform-center",
+                    sampled_centers.len(),
+                    positive,
+                    sampled_rows,
+                    "none".to_string(),
+                )
+            } else {
+                // Uniform edge sampling makes centers appear in proportion to
+                // their structural degree on the anchor arm. Weighting each
+                // observation by M / (n * degree(center)) is the
+                // Hansen-Hurwitz correction back to a center distribution.
+                // Prefer a predicate-bearing arm so sparse filtered stars are
+                // observed without scanning or materialising a filtered pool.
+                let (anchor_idx, anchor_edge_count, _) = anchor.unwrap();
+                let anchor_arm = &compiled_arms[anchor_idx];
+                let mut rng = rand::rngs::StdRng::seed_from_u64(Self::single_vertex_sample_seed(
+                    &sample_signature,
+                    &[],
+                ));
+                let mut weighted_degrees = Vec::with_capacity(sample_size);
+                let mut observed_joint_rows = 0u128;
+                for _ in 0..sample_size {
+                    let Some(edge_id) =
+                        flat_graph.sample_edge_id_by_label(&anchor_arm.edge_label, &mut rng)
+                    else {
+                        continue;
+                    };
+                    let Some((src, src_label, dst, dst_label, edge_label)) =
+                        flat_graph.edge_endpoints(edge_id)
+                    else {
+                        continue;
+                    };
+                    let center_vid = if anchor_arm.outgoing {
+                        if src_label != center_vertex.label
+                            || dst_label != anchor_arm.leaf_label
+                            || edge_label != anchor_arm.edge_label
+                        {
+                            continue;
+                        }
+                        src
+                    } else {
+                        if dst_label != center_vertex.label
+                            || src_label != anchor_arm.leaf_label
+                            || edge_label != anchor_arm.edge_label
+                        {
+                            continue;
+                        }
+                        dst
+                    };
+                    if !Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&center_vertex.label, center_vid),
+                        &center_predicates,
+                    )? {
+                        continue;
+                    }
 
+                    let mut joint_degree = 1u64;
+                    let mut anchor_degree = 0u64;
+                    for (arm_idx, arm) in compiled_arms.iter().enumerate() {
+                        let (structural_degree, filtered_degree) =
+                            Self::raw_star_arm_degrees(flat_graph, arm, center_vid)?;
+                        if arm_idx == anchor_idx {
+                            anchor_degree = structural_degree;
+                        }
+                        joint_degree = joint_degree.saturating_mul(filtered_degree);
+                        if joint_degree == 0 {
+                            break;
+                        }
+                    }
+                    if joint_degree == 0 || anchor_degree == 0 {
+                        continue;
+                    }
+                    observed_joint_rows = observed_joint_rows.saturating_add(joint_degree as u128);
+                    let weight =
+                        anchor_edge_count as f64 / (sample_size as f64 * anchor_degree as f64);
+                    weighted_degrees.push((joint_degree, weight));
+                }
+                let positive = weighted_degrees.len();
+                (
+                    (positive >= MIN_POSITIVE_SAMPLES)
+                        .then(|| {
+                            Self::pcf_from_weighted_center_sample(&weighted_degrees, population)
+                        })
+                        .flatten(),
+                    "edge-anchor",
+                    sample_size,
+                    positive,
+                    observed_joint_rows,
+                    format!(
+                        "edge={} label={} edge_population={}",
+                        anchor_arm.edge_id, anchor_arm.edge_label, anchor_edge_count
+                    ),
+                )
+            };
+
+        crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED
+            .fetch_add(samples as u64, Ordering::Relaxed);
         crate::procedures::gcard_query::SAMPLING_NANOS
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let positive_samples = sampled_degrees.iter().filter(|&&degree| degree > 0).count();
-        // A handful of hits from a partial population sample can create an
-        // unstable low candidate that wins merely because candidate selection
-        // takes the minimum. Exact (full-population) samples are exempt.
-        const MIN_POSITIVE_SAMPLES: usize = 5;
-        let enough_evidence =
-            sampled_centers.len() == population || positive_samples >= MIN_POSITIVE_SAMPLES;
-        let pcf = enough_evidence
-            .then(|| Self::pcf_from_uniform_center_sample(&sampled_degrees, population))
-            .flatten();
-        let sampled_rows = sampled_degrees
-            .iter()
-            .map(|&degree| degree as u128)
-            .sum::<u128>();
+        let enough_evidence = pcf.is_some();
         let estimated_rows = pcf.as_ref().map(Pcf::get_num_rows).unwrap_or(0.0);
         if decomp_trace_enabled() {
             decomp_trace_line(format!(
-                "[predicate-star-sample] center={} label={} arms={} population={} samples={} positive_samples={} enough_evidence={} sampled_rows={} estimated_rows={:.3}",
+                "[predicate-star-sample] center={} label={} arms={} mode={} anchor={} population={} samples={} positive_samples={} enough_evidence={} sampled_rows={} estimated_rows={:.3}",
                 center,
                 center_vertex.label,
                 arms.len(),
+                sampling_mode,
+                anchor_desc,
                 population,
-                sampled_centers.len(),
+                samples,
                 positive_samples,
                 enough_evidence,
                 sampled_rows,
@@ -5249,12 +5442,14 @@ impl QueryGraph {
         }
         if crate::procedures::gcard_query::GCARD_VERBOSE.load(Ordering::Relaxed) {
             eprintln!(
-                "[predicate-star-sample] center={} label={} arms={} population={} samples={} positive_samples={} enough_evidence={} sampled_rows={} estimated_rows={:.3}",
+                "[predicate-star-sample] center={} label={} arms={} mode={} anchor={} population={} samples={} positive_samples={} enough_evidence={} sampled_rows={} estimated_rows={:.3}",
                 center,
                 center_vertex.label,
                 arms.len(),
+                sampling_mode,
+                anchor_desc,
                 population,
-                sampled_centers.len(),
+                samples,
                 positive_samples,
                 enough_evidence,
                 sampled_rows,
@@ -5262,6 +5457,35 @@ impl QueryGraph {
             );
         }
         Ok(pcf)
+    }
+
+    fn raw_star_arm_degrees(
+        flat_graph: &FlatGraph,
+        arm: &CompiledRawStarArm<'_>,
+        center_vid: VertexId,
+    ) -> GCardResult<(u64, u64)> {
+        let mut structural_degree = 0u64;
+        let mut filtered_degree = 0u64;
+        for &(neighbor_vid, edge_id) in arm
+            .csr
+            .map(|csr| csr.neighbors_slice(center_vid))
+            .unwrap_or_default()
+        {
+            if flat_graph.vertex_label(neighbor_vid) != Some(arm.leaf_label.as_str()) {
+                continue;
+            }
+            structural_degree = structural_degree.saturating_add(1);
+            let edge_passes = Self::properties_pass_predicates(
+                flat_graph.edge_props(edge_id),
+                &arm.edge_predicates,
+            )?;
+            let leaf_passes = Self::properties_pass_predicates(
+                flat_graph.vertex_props(&arm.leaf_label, neighbor_vid),
+                &arm.leaf_predicates,
+            )?;
+            filtered_degree = filtered_degree.saturating_add(u64::from(edge_passes && leaf_passes));
+        }
+        Ok((structural_degree, filtered_degree))
     }
 
     fn resolve_vertex_predicates(
@@ -5356,6 +5580,56 @@ impl QueryGraph {
                 end += 1;
             }
             let width = (end - idx) as f64 * expansion;
+            support += width;
+            rows += degree as f64 * width;
+            constants.push(degree as f64);
+            right_interval_edges.push(support);
+            cumulative_rows.push(rows);
+            idx = end;
+        }
+
+        Some(Pcf {
+            constants,
+            right_interval_edges,
+            cumulative_rows,
+        })
+    }
+
+    fn pcf_from_weighted_center_sample(
+        sampled_degrees: &[(u64, f64)],
+        population: usize,
+    ) -> Option<Pcf> {
+        let mut positive = sampled_degrees
+            .iter()
+            .copied()
+            .filter(|(degree, weight)| *degree > 0 && weight.is_finite() && *weight > 0.0)
+            .collect::<Vec<_>>();
+        if positive.is_empty() || population == 0 {
+            return None;
+        }
+        positive.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+
+        let raw_support = positive.iter().map(|(_, weight)| weight).sum::<f64>();
+        let support_scale = if raw_support > population as f64 {
+            population as f64 / raw_support
+        } else {
+            1.0
+        };
+        let mut constants = Vec::new();
+        let mut right_interval_edges = Vec::new();
+        let mut cumulative_rows = Vec::new();
+        let mut support = 0.0;
+        let mut rows = 0.0;
+        let mut idx = 0;
+        while idx < positive.len() {
+            let degree = positive[idx].0;
+            let mut end = idx + 1;
+            let mut width = positive[idx].1;
+            while end < positive.len() && positive[end].0 == degree {
+                width += positive[end].1;
+                end += 1;
+            }
+            width *= support_scale;
             support += width;
             rows += degree as f64 * width;
             constants.push(degree as f64);
