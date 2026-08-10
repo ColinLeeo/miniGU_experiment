@@ -5344,6 +5344,10 @@ impl QueryGraph {
                 ));
                 let mut weighted_degrees = Vec::with_capacity(sample_size);
                 let mut observed_joint_rows = 0u128;
+                let mut valid_anchor_samples = 0usize;
+                let mut center_predicate_samples = 0usize;
+                let mut structural_positive = vec![0usize; compiled_arms.len()];
+                let mut filtered_positive = vec![0usize; compiled_arms.len()];
                 for _ in 0..sample_size {
                     let Some(edge_id) =
                         flat_graph.sample_edge_id_by_label(&anchor_arm.edge_label, &mut rng)
@@ -5372,12 +5376,14 @@ impl QueryGraph {
                         }
                         dst
                     };
+                    valid_anchor_samples += 1;
                     if !Self::properties_pass_predicates(
                         flat_graph.vertex_props(&center_vertex.label, center_vid),
                         &center_predicates,
                     )? {
                         continue;
                     }
+                    center_predicate_samples += 1;
 
                     let mut joint_degree = 1u64;
                     let mut anchor_degree = 0u64;
@@ -5387,10 +5393,9 @@ impl QueryGraph {
                         if arm_idx == anchor_idx {
                             anchor_degree = structural_degree;
                         }
+                        structural_positive[arm_idx] += usize::from(structural_degree > 0);
+                        filtered_positive[arm_idx] += usize::from(filtered_degree > 0);
                         joint_degree = joint_degree.saturating_mul(filtered_degree);
-                        if joint_degree == 0 {
-                            break;
-                        }
                     }
                     if joint_degree == 0 || anchor_degree == 0 {
                         continue;
@@ -5412,8 +5417,14 @@ impl QueryGraph {
                     positive,
                     observed_joint_rows,
                     format!(
-                        "edge={} label={} edge_population={}",
-                        anchor_arm.edge_id, anchor_arm.edge_label, anchor_edge_count
+                        "edge={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={} arm_structural_positive={:?} arm_filtered_positive={:?}",
+                        anchor_arm.edge_id,
+                        anchor_arm.edge_label,
+                        anchor_edge_count,
+                        valid_anchor_samples,
+                        center_predicate_samples,
+                        structural_positive,
+                        filtered_positive,
                     ),
                 )
             };
