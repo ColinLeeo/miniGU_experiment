@@ -114,6 +114,15 @@ struct CompiledN1Branch<'graph> {
     center_leaf_arms: Vec<CompiledRawStarArm<'graph>>,
 }
 
+struct ExactN1LeafScan {
+    pcf: Option<Pcf>,
+    scanned_leaf_vertices: usize,
+    matching_leaf_vertices: usize,
+    traversed_edges: usize,
+    cache_hit: bool,
+    completed: bool,
+}
+
 struct RawStarExtraction {
     local_pcfs: HashMap<VertexId, Vec<Pcf>>,
     consumed_edges: HashSet<EdgeId>,
@@ -1601,6 +1610,157 @@ mod tests {
             &extraction.owned_predicate_vertices,
         );
         assert!(residual.inner.edges.contains_key(&14));
+    }
+
+    #[test]
+    fn predicate_single_tail_uses_bounded_exact_leaf_anchor() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "title"),
+                vertex(2, "movie_keyword"),
+                vertex(3, "keyword"),
+                vertex(4, "movie_info"),
+            ],
+            edges: vec![
+                edge(10, "title_to_mk", 1, 2),
+                edge(11, "keyword_to_mk", 3, 2),
+                edge(12, "title_to_mi", 1, 4),
+            ],
+            predicates: vec![
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "keep".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::Int64(Some(1)),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 3,
+                    property: "keyword".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::String(Some("sequel".to_string())),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 4,
+                    property: "info".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::String(Some("Bulgaria".to_string())),
+                    values: Vec::new(),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("title", vec!["keep".to_string()]);
+        builder.set_vertex_prop_schema("movie_keyword", vec![]);
+        builder.set_vertex_prop_schema("keyword", vec!["keyword".to_string()]);
+        builder.set_vertex_prop_schema("movie_info", vec!["info".to_string()]);
+        for offset in 0..5 {
+            let title = 100 + offset;
+            let movie_keyword = 200 + offset;
+            let keyword = 300 + offset;
+            let movie_info = 400 + offset;
+            builder.add_vertex(title, "title", vec![ScalarValue::Int64(Some(1))]);
+            builder.add_vertex(movie_keyword, "movie_keyword", vec![]);
+            builder.add_vertex(
+                keyword,
+                "keyword",
+                vec![ScalarValue::String(Some(
+                    if offset < 2 { "sequel" } else { "other" }.to_string(),
+                ))],
+            );
+            builder.add_vertex(
+                movie_info,
+                "movie_info",
+                vec![ScalarValue::String(Some("Bulgaria".to_string()))],
+            );
+            builder.add_edge(
+                1000 + offset,
+                title,
+                "title",
+                movie_keyword,
+                "movie_keyword",
+                "title_to_mk",
+                vec![],
+            );
+            builder.add_edge(
+                2000 + offset,
+                keyword,
+                "keyword",
+                movie_keyword,
+                "movie_keyword",
+                "keyword_to_mk",
+                vec![],
+            );
+            builder.add_edge(
+                3000 + offset,
+                title,
+                "title",
+                movie_info,
+                "movie_info",
+                "title_to_mi",
+                vec![],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let mut degree_seq_graph = DegreeSeqGraphCompressed::new();
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("title_to_mk".to_string(), EdgeCardinality::OneToMany);
+        degree_seq_graph
+            .edge_cardinalities
+            .insert("keyword_to_mk".to_string(), EdgeCardinality::OneToMany);
+        degree_seq_graph.star_stats.insert(
+            StarStatKey::new(
+                "unused".to_string(),
+                vec![
+                    PathPattern::new_without_reverse(
+                        vec!["unused".to_string(), "leaf".to_string()],
+                        vec!["unused_edge".to_string()],
+                    ),
+                    PathPattern::new_without_reverse(
+                        vec!["unused".to_string(), "leaf2".to_string()],
+                        vec!["unused_edge2".to_string()],
+                    ),
+                ],
+            ),
+            CompressedDegreeSeq::SafeBound {
+                function: PiecewiseConstantFunction::from_degree_sequence(&[1, 1], 0.01, false)
+                    .unwrap(),
+            },
+        );
+
+        let extraction = query_graph
+            .extract_raw_star_local_pcfs(
+                &degree_seq_graph,
+                Some(&flat_graph),
+                5,
+                &PredicateApplyType::SCALE,
+                &Arc::new(DashMap::new()),
+            )
+            .unwrap()
+            .expect("the selective functional tail should use the exact leaf anchor");
+        assert_eq!(extraction.consumed_edges, HashSet::from([10, 11]));
+        assert_eq!(extraction.owned_predicate_vertices, HashSet::from([1]));
+        assert_eq!(
+            extraction.local_pcfs.get(&1).unwrap()[0].get_num_rows(),
+            2.0
+        );
+        let residual = query_graph.subgraph_without_edges(
+            &extraction.consumed_edges,
+            &extraction.owned_predicate_vertices,
+        );
+        assert!(residual.inner.edges.contains_key(&12));
+        assert!(!residual.inner.vertices[&4].predicates.is_empty());
     }
 
     #[test]
@@ -5374,7 +5534,7 @@ impl QueryGraph {
                     })
                     .collect::<Vec<_>>();
                 leaf_edge_ids.sort_unstable();
-                if leaf_edge_ids.len() < 2 || leaf_edge_ids.len() > max_star_degree {
+                if leaf_edge_ids.is_empty() || leaf_edge_ids.len() > max_star_degree {
                     continue;
                 }
                 // The branch owns all incident edges of the intermediate. If
@@ -5428,6 +5588,18 @@ impl QueryGraph {
                         leaf_vertex_id,
                         pattern,
                     });
+                }
+                if leaf_arms.len() == 1
+                    && self
+                        .inner
+                        .vertices
+                        .get(&leaf_arms[0].leaf_vertex_id)
+                        .is_none_or(|leaf| leaf.predicates.is_empty())
+                {
+                    // A single functional tail is useful only when its leaf
+                    // predicate can provide a selective, bounded exact anchor.
+                    // Otherwise the normal path decomposition is cheaper.
+                    continue;
                 }
                 if !all_functional || !has_predicates {
                     continue;
@@ -5497,7 +5669,14 @@ impl QueryGraph {
             }
         }
 
-        candidates.sort_by_key(|branch| (branch.center, branch.intermediate, branch.root_edge_id));
+        candidates.sort_by_key(|branch| {
+            (
+                branch.leaf_arms.len() == 1,
+                branch.center,
+                branch.intermediate,
+                branch.root_edge_id,
+            )
+        });
         candidates.into_iter().next()
     }
 
@@ -5633,6 +5812,37 @@ impl QueryGraph {
         let population = flat_graph.vertex_count_by_label(&compiled.center_label);
         if population == 0 || sample_size == 0 {
             return Ok(None);
+        }
+
+        if branch.leaf_arms.len() == 1 {
+            let started = std::time::Instant::now();
+            crate::procedures::gcard_query::SAMPLING_CALLS.fetch_add(1, Ordering::Relaxed);
+            let scan = self.exact_single_leaf_n1_branch_pcf(
+                branch,
+                &compiled,
+                &center_predicates,
+                flat_graph,
+                flat_vertex_cache,
+            )?;
+            crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED
+                .fetch_add(scan.scanned_leaf_vertices as u64, Ordering::Relaxed);
+            crate::procedures::gcard_query::SAMPLING_NANOS
+                .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[predicate-n1-exact-leaf] center={} intermediate={} scanned_leaf_vertices={} matching_leaf_vertices={} traversed_edges={} cache_hit={} completed={} enough_evidence={} estimated_rows={:.3}",
+                    branch.center,
+                    branch.intermediate,
+                    scan.scanned_leaf_vertices,
+                    scan.matching_leaf_vertices,
+                    scan.traversed_edges,
+                    scan.cache_hit,
+                    scan.completed,
+                    scan.pcf.is_some(),
+                    scan.pcf.as_ref().map(Pcf::get_num_rows).unwrap_or(0.0),
+                ));
+            }
+            return Ok(scan.pcf);
         }
 
         const MIN_POSITIVE_SAMPLES: usize = 5;
@@ -5883,6 +6093,174 @@ impl QueryGraph {
             ));
         }
         Ok(pcf)
+    }
+
+    fn exact_single_leaf_n1_branch_pcf(
+        &self,
+        branch: &RawN1Branch,
+        compiled: &CompiledN1Branch<'_>,
+        center_predicates: &[ResolvedPredicate],
+        flat_graph: &FlatGraph,
+        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
+    ) -> GCardResult<ExactN1LeafScan> {
+        const MAX_LEAF_VERTICES: usize = 200_000;
+        const MAX_MATCHING_LEAVES: usize = 20_000;
+        const MAX_TRAVERSED_EDGES: usize = 1_000_000;
+
+        let arm = &compiled.leaf_arms[0];
+        let leaf_population = flat_graph.vertex_count_by_label(&arm.leaf_label);
+        if leaf_population == 0 || leaf_population > MAX_LEAF_VERTICES {
+            return Ok(ExactN1LeafScan {
+                pcf: None,
+                scanned_leaf_vertices: 0,
+                matching_leaf_vertices: 0,
+                traversed_edges: 0,
+                cache_hit: false,
+                completed: false,
+            });
+        }
+
+        let leaf_vertex = self
+            .inner
+            .vertices
+            .get(&branch.leaf_arms[0].leaf_vertex_id)
+            .ok_or_else(|| {
+                GCardError::VertexNotFound(format!(
+                    "branch leaf vertex {} not found",
+                    branch.leaf_arms[0].leaf_vertex_id
+                ))
+            })?;
+        let cache_key = format!(
+            "predicate-n1-exact-leaf:{}:{:?}",
+            arm.leaf_label, leaf_vertex.predicates
+        );
+        let (matching_leaves, scanned_leaf_vertices, cache_hit) =
+            if let Some(cached) = flat_vertex_cache.get(&cache_key) {
+                (cached.clone(), 0, true)
+            } else {
+                let mut matching = Vec::new();
+                for &leaf_vid in flat_graph.all_vertex_ids_by_label(&arm.leaf_label) {
+                    if Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&arm.leaf_label, leaf_vid),
+                        &arm.leaf_predicates,
+                    )? {
+                        matching.push(leaf_vid);
+                    }
+                }
+                flat_vertex_cache.insert(cache_key, matching.clone());
+                (matching, leaf_population, false)
+            };
+        if matching_leaves.len() > MAX_MATCHING_LEAVES {
+            return Ok(ExactN1LeafScan {
+                pcf: None,
+                scanned_leaf_vertices,
+                matching_leaf_vertices: matching_leaves.len(),
+                traversed_edges: 0,
+                cache_hit,
+                completed: false,
+            });
+        }
+
+        let Some(leaf_to_intermediate) =
+            flat_graph.hop_csr_for_label(&arm.leaf_label, &arm.edge_label, !arm.outgoing)
+        else {
+            return Ok(ExactN1LeafScan {
+                pcf: None,
+                scanned_leaf_vertices,
+                matching_leaf_vertices: matching_leaves.len(),
+                traversed_edges: 0,
+                cache_hit,
+                completed: false,
+            });
+        };
+        let Some(intermediate_to_center) = flat_graph.hop_csr_for_label(
+            &compiled.intermediate_label,
+            &compiled.root_edge_label,
+            !compiled.root_outgoing,
+        ) else {
+            return Ok(ExactN1LeafScan {
+                pcf: None,
+                scanned_leaf_vertices,
+                matching_leaf_vertices: matching_leaves.len(),
+                traversed_edges: 0,
+                cache_hit,
+                completed: false,
+            });
+        };
+
+        let mut traversed_edges = 0usize;
+        let mut center_degrees = HashMap::<VertexId, u64>::new();
+        for leaf_vid in matching_leaves.iter().copied() {
+            for &(intermediate_vid, leaf_edge_id) in leaf_to_intermediate.neighbors_slice(leaf_vid)
+            {
+                if traversed_edges >= MAX_TRAVERSED_EDGES {
+                    return Ok(ExactN1LeafScan {
+                        pcf: None,
+                        scanned_leaf_vertices,
+                        matching_leaf_vertices: matching_leaves.len(),
+                        traversed_edges,
+                        cache_hit,
+                        completed: false,
+                    });
+                }
+                traversed_edges += 1;
+                if !Self::properties_pass_predicates(
+                    flat_graph.edge_props(leaf_edge_id),
+                    &arm.edge_predicates,
+                )? || !Self::properties_pass_predicates(
+                    flat_graph.vertex_props(&compiled.intermediate_label, intermediate_vid),
+                    &compiled.intermediate_predicates,
+                )? {
+                    continue;
+                }
+                for &(center_vid, root_edge_id) in
+                    intermediate_to_center.neighbors_slice(intermediate_vid)
+                {
+                    if traversed_edges >= MAX_TRAVERSED_EDGES {
+                        return Ok(ExactN1LeafScan {
+                            pcf: None,
+                            scanned_leaf_vertices,
+                            matching_leaf_vertices: matching_leaves.len(),
+                            traversed_edges,
+                            cache_hit,
+                            completed: false,
+                        });
+                    }
+                    traversed_edges += 1;
+                    if !Self::properties_pass_predicates(
+                        flat_graph.edge_props(root_edge_id),
+                        &compiled.root_edge_predicates,
+                    )? || !Self::properties_pass_predicates(
+                        flat_graph.vertex_props(&compiled.center_label, center_vid),
+                        center_predicates,
+                    )? {
+                        continue;
+                    }
+                    let degree = center_degrees.entry(center_vid).or_default();
+                    *degree = degree.saturating_add(1);
+                }
+            }
+        }
+
+        for (&center_vid, degree) in &mut center_degrees {
+            for center_arm in &compiled.center_leaf_arms {
+                let (_, arm_degree) =
+                    Self::raw_star_arm_degrees(flat_graph, center_arm, center_vid)?;
+                *degree = degree.saturating_mul(arm_degree);
+                if *degree == 0 {
+                    break;
+                }
+            }
+        }
+        center_degrees.retain(|_, degree| *degree > 0);
+        Ok(ExactN1LeafScan {
+            pcf: Self::pcf_from_exact_positive_center_degrees(center_degrees.values().copied()),
+            scanned_leaf_vertices,
+            matching_leaf_vertices: matching_leaves.len(),
+            traversed_edges,
+            cache_hit,
+            completed: true,
+        })
     }
 
     fn filtered_n1_branch_degree(
@@ -6663,6 +7041,46 @@ impl QueryGraph {
                 end += 1;
             }
             let width = (end - idx) as f64 * expansion;
+            support += width;
+            rows += degree as f64 * width;
+            constants.push(degree as f64);
+            right_interval_edges.push(support);
+            cumulative_rows.push(rows);
+            idx = end;
+        }
+
+        Some(Pcf {
+            constants,
+            right_interval_edges,
+            cumulative_rows,
+        })
+    }
+
+    fn pcf_from_exact_positive_center_degrees(
+        degrees: impl IntoIterator<Item = u64>,
+    ) -> Option<Pcf> {
+        let mut positive = degrees
+            .into_iter()
+            .filter(|&degree| degree > 0)
+            .collect::<Vec<_>>();
+        if positive.is_empty() {
+            return None;
+        }
+        positive.sort_unstable_by(|a, b| b.cmp(a));
+
+        let mut constants = Vec::new();
+        let mut right_interval_edges = Vec::new();
+        let mut cumulative_rows = Vec::new();
+        let mut support = 0.0;
+        let mut rows = 0.0;
+        let mut idx = 0;
+        while idx < positive.len() {
+            let degree = positive[idx];
+            let mut end = idx + 1;
+            while end < positive.len() && positive[end] == degree {
+                end += 1;
+            }
+            let width = (end - idx) as f64;
             support += width;
             rows += degree as f64 * width;
             constants.push(degree as f64);
