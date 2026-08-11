@@ -30,6 +30,7 @@ pub mod update;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -120,6 +121,15 @@ pub struct FlatGraph {
     /// invalidated whenever pending graph changes are applied.
     #[serde(skip)]
     predicate_vertex_cache: Arc<DashMap<String, Vec<VertexId>>>,
+
+    /// Exact-value lookup for bounded dimension-table columns.
+    ///
+    /// Values are represented by their hash; callers re-evaluate predicates
+    /// against the property row, so a hash collision can only add candidates,
+    /// never change correctness. The index is rebuilt while loading the graph
+    /// and excluded from the persisted FlatGraph payload.
+    #[serde(skip)]
+    bounded_vertex_value_index: Arc<HashMap<String, Vec<HashMap<u64, Vec<VertexId>>>>>,
 
     // ── Pending structural changes ─────────────────────────────────────────────
     pending: PendingChanges,
@@ -271,7 +281,7 @@ impl FlatGraphBuilder {
             .map(|(key, triples)| (key, CsrAdjWithEid::build(triples)))
             .collect();
 
-        FlatGraph {
+        let mut graph = FlatGraph {
             vertices_by_label: self.vertices_by_label,
             vertex_label_map: self.vertex_label_map,
             hop_csrs,
@@ -283,14 +293,78 @@ impl FlatGraphBuilder {
             edge_info: self.edge_info,
             graph_stats: self.graph_stats,
             predicate_vertex_cache: Arc::new(DashMap::new()),
+            bounded_vertex_value_index: Arc::new(HashMap::new()),
             pending: PendingChanges::default(),
-        }
+        };
+        graph.rebuild_bounded_vertex_value_index();
+        graph
     }
 }
 
 // ── FlatGraph public API ──────────────────────────────────────────────────────
 
 impl FlatGraph {
+    const MAX_VALUE_INDEX_VERTICES: usize = 200_000;
+
+    fn scalar_hash(value: &ScalarValue) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Rebuild exact-value indexes for small dimension tables.
+    ///
+    /// The returned tuple is `(labels, columns, distinct_hashes, vertex_ids)`
+    /// and is used only for load-time observability. Large fact tables are
+    /// deliberately excluded so estimator latency does not buy an unbounded
+    /// memory footprint.
+    fn rebuild_bounded_vertex_value_index(&mut self) -> (usize, usize, usize, usize) {
+        let mut index = HashMap::<String, Vec<HashMap<u64, Vec<VertexId>>>>::new();
+        let mut indexed_columns = 0usize;
+        let mut indexed_values = 0usize;
+        let mut indexed_vertex_ids = 0usize;
+
+        for (label, vertex_ids) in &self.vertices_by_label {
+            if vertex_ids.len() > Self::MAX_VALUE_INDEX_VERTICES {
+                continue;
+            }
+            let Some(schema) = self.vertex_prop_schema.get(label) else {
+                continue;
+            };
+            let Some(rows) = self.vertex_props.get(label) else {
+                continue;
+            };
+            let mut columns = vec![HashMap::<u64, Vec<VertexId>>::new(); schema.len()];
+            for (&vertex_id, properties) in rows {
+                for (prop_index, value) in properties.iter().take(schema.len()).enumerate() {
+                    columns[prop_index]
+                        .entry(Self::scalar_hash(value))
+                        .or_default()
+                        .push(vertex_id);
+                }
+            }
+            for vertex_ids in columns.iter_mut().flat_map(HashMap::values_mut) {
+                vertex_ids.sort_unstable();
+            }
+            indexed_columns += columns.iter().filter(|column| !column.is_empty()).count();
+            indexed_values += columns.iter().map(HashMap::len).sum::<usize>();
+            indexed_vertex_ids += columns
+                .iter()
+                .flat_map(HashMap::values)
+                .map(Vec::len)
+                .sum::<usize>();
+            index.insert(label.clone(), columns);
+        }
+        let indexed_labels = index.len();
+        self.bounded_vertex_value_index = Arc::new(index);
+        (
+            indexed_labels,
+            indexed_columns,
+            indexed_values,
+            indexed_vertex_ids,
+        )
+    }
+
     pub fn export_bincode<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         let bytes = bincode::serialize(self)
             .map_err(|e| anyhow::anyhow!("failed to serialize FlatGraph: {}", e))?;
@@ -300,8 +374,13 @@ impl FlatGraph {
 
     pub fn import_bincode<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let bytes = fs::read(path.as_ref())?;
-        let graph = bincode::deserialize(&bytes)
+        let mut graph: Self = bincode::deserialize(&bytes)
             .map_err(|e| anyhow::anyhow!("failed to deserialize FlatGraph: {}", e))?;
+        let (labels, columns, values, vertex_ids) = graph.rebuild_bounded_vertex_value_index();
+        eprintln!(
+            "[database] bounded value index: labels={} columns={} values={} vertex_ids={}",
+            labels, columns, values, vertex_ids,
+        );
         Ok(graph)
     }
 
@@ -497,6 +576,27 @@ impl FlatGraph {
         &self.predicate_vertex_cache
     }
 
+    pub(crate) fn vertex_ids_by_exact_value(
+        &self,
+        label: &str,
+        prop_index: usize,
+        value: &ScalarValue,
+    ) -> Option<&[VertexId]> {
+        let hash = Self::scalar_hash(value);
+        self.bounded_vertex_value_index
+            .get(label)?
+            .get(prop_index)?
+            .get(&hash)
+            .map(Vec::as_slice)
+    }
+
+    pub(crate) fn has_exact_vertex_value_index(&self, label: &str, prop_index: usize) -> bool {
+        self.bounded_vertex_value_index
+            .get(label)
+            .and_then(|columns| columns.get(prop_index))
+            .is_some_and(|column| !column.is_empty())
+    }
+
     /// Property values for an edge (indexed by schema position), or `None`.
     pub fn edge_props(&self, eid: EdgeId) -> Option<&[ScalarValue]> {
         self.edge_props.get(&eid).map(Vec::as_slice)
@@ -641,6 +741,7 @@ impl FlatGraph {
             return;
         }
         self.predicate_vertex_cache.clear();
+        self.bounded_vertex_value_index = Arc::new(HashMap::new());
         let t_total = std::time::Instant::now();
         let pending = std::mem::take(&mut self.pending);
         eprintln!(
@@ -987,6 +1088,43 @@ mod tests {
         assert_eq!(
             restored.edge_endpoints(10),
             Some((1, "person", 2, "person", "knows"))
+        );
+    }
+
+    #[test]
+    fn bounded_value_index_returns_exact_candidates_after_roundtrip() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("keyword", vec!["value".to_string()]);
+        builder.add_vertex(
+            1,
+            "keyword",
+            vec![ScalarValue::String(Some("sequel".to_string()))],
+        );
+        builder.add_vertex(
+            2,
+            "keyword",
+            vec![ScalarValue::String(Some("other".to_string()))],
+        );
+        builder.add_vertex(
+            3,
+            "keyword",
+            vec![ScalarValue::String(Some("sequel".to_string()))],
+        );
+        let graph = builder.build();
+        let sequel = ScalarValue::String(Some("sequel".to_string()));
+        assert!(graph.has_exact_vertex_value_index("keyword", 0));
+        assert_eq!(
+            graph.vertex_ids_by_exact_value("keyword", 0, &sequel),
+            Some([1, 3].as_slice())
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        graph.export_bincode(&path).unwrap();
+        let restored = super::FlatGraph::import_bincode(&path).unwrap();
+        assert_eq!(
+            restored.vertex_ids_by_exact_value("keyword", 0, &sequel),
+            Some([1, 3].as_slice())
         );
     }
 

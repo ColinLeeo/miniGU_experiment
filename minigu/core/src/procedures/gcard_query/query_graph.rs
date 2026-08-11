@@ -121,6 +121,7 @@ struct ExactN1LeafScan {
     planned_edges: usize,
     traversed_edges: usize,
     cache_hit: bool,
+    value_index_hit: bool,
     completed: bool,
 }
 
@@ -1786,6 +1787,46 @@ mod tests {
                 3,
             ),
             Err(4)
+        );
+    }
+
+    #[test]
+    fn exact_leaf_candidates_use_value_index_for_in_but_not_wildcard_like() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("keyword", vec!["keyword".to_string()]);
+        builder.add_vertex(
+            1,
+            "keyword",
+            vec![ScalarValue::String(Some("sequel".to_string()))],
+        );
+        builder.add_vertex(
+            2,
+            "keyword",
+            vec![ScalarValue::String(Some("other".to_string()))],
+        );
+        let flat_graph = builder.build();
+        let in_predicate = ResolvedPredicate {
+            predicate_id: None,
+            prop_index: 0,
+            op: ComparisonOp::In,
+            value: ScalarValue::Null,
+            values: vec![ScalarValue::String(Some("sequel".to_string()))],
+        };
+        assert_eq!(
+            QueryGraph::exact_leaf_index_candidates(&flat_graph, "keyword", &[in_predicate]),
+            Some(vec![1])
+        );
+
+        let like_predicate = ResolvedPredicate {
+            predicate_id: None,
+            prop_index: 0,
+            op: ComparisonOp::Like,
+            value: ScalarValue::String(Some("%sequel%".to_string())),
+            values: Vec::new(),
+        };
+        assert_eq!(
+            QueryGraph::exact_leaf_index_candidates(&flat_graph, "keyword", &[like_predicate]),
+            None
         );
     }
 
@@ -5864,7 +5905,7 @@ impl QueryGraph {
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             if decomp_trace_enabled() {
                 decomp_trace_line(format!(
-                    "[predicate-n1-exact-leaf] center={} intermediate={} scanned_leaf_vertices={} matching_leaf_vertices={} planned_edges={} traversed_edges={} cache_hit={} completed={} enough_evidence={} estimated_rows={:.3}",
+                    "[predicate-n1-exact-leaf] center={} intermediate={} scanned_leaf_vertices={} matching_leaf_vertices={} planned_edges={} traversed_edges={} cache_hit={} value_index_hit={} completed={} enough_evidence={} estimated_rows={:.3}",
                     branch.center,
                     branch.intermediate,
                     scan.scanned_leaf_vertices,
@@ -5872,6 +5913,7 @@ impl QueryGraph {
                     scan.planned_edges,
                     scan.traversed_edges,
                     scan.cache_hit,
+                    scan.value_index_hit,
                     scan.completed,
                     scan.pcf.is_some(),
                     scan.pcf.as_ref().map(Pcf::get_num_rows).unwrap_or(0.0),
@@ -6139,6 +6181,7 @@ impl QueryGraph {
     ) -> GCardResult<ExactN1LeafScan> {
         const MAX_LEAF_VERTICES: usize = 200_000;
         const MAX_MATCHING_LEAVES: usize = 20_000;
+        const MAX_RUNTIME_LEAF_SCAN_VERTICES: usize = 50_000;
         // Keep runtime exact work inside the estimator's latency envelope.
         // On JOB-M, 4,630 visits complete in ~5 ms while 25,902 visits can
         // exceed 200 ms on a cold predicate cache. Larger tails retain the
@@ -6155,6 +6198,7 @@ impl QueryGraph {
                 planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit: false,
+                value_index_hit: false,
                 completed: false,
             });
         }
@@ -6185,24 +6229,59 @@ impl QueryGraph {
             arm.leaf_label,
             predicate_parts.join("&")
         );
-        let (matching_leaves, scanned_leaf_vertices, cache_hit) =
-            match flat_graph.predicate_vertex_cache().entry(cache_key) {
-                dashmap::mapref::entry::Entry::Occupied(cached) => (cached.get().clone(), 0, true),
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    let mut matching = Vec::new();
-                    if let Some(rows) = flat_graph.vertex_property_rows(&arm.leaf_label) {
-                        for (&leaf_vid, properties) in rows {
-                            if Self::properties_pass_predicates(
-                                Some(properties.as_slice()),
-                                &arm.leaf_predicates,
-                            )? {
-                                matching.push(leaf_vid);
-                            }
+        let (matching_leaves, scanned_leaf_vertices, cache_hit, value_index_hit) =
+            if let Some(cached) = flat_graph.predicate_vertex_cache().get(&cache_key) {
+                (cached.clone(), 0, true, false)
+            } else {
+                let indexed_candidates = Self::exact_leaf_index_candidates(
+                    flat_graph,
+                    &arm.leaf_label,
+                    &arm.leaf_predicates,
+                );
+                if indexed_candidates.is_none() && leaf_population > MAX_RUNTIME_LEAF_SCAN_VERTICES
+                {
+                    return Ok(ExactN1LeafScan {
+                        pcf: None,
+                        scanned_leaf_vertices: 0,
+                        matching_leaf_vertices: 0,
+                        planned_edges: 0,
+                        traversed_edges: 0,
+                        cache_hit: false,
+                        value_index_hit: false,
+                        completed: false,
+                    });
+                }
+
+                let value_index_hit = indexed_candidates.is_some();
+                let mut matching = Vec::new();
+                if let Some(candidates) = indexed_candidates {
+                    for leaf_vid in candidates {
+                        if Self::properties_pass_predicates(
+                            flat_graph.vertex_props(&arm.leaf_label, leaf_vid),
+                            &arm.leaf_predicates,
+                        )? {
+                            matching.push(leaf_vid);
                         }
                     }
-                    entry.insert(matching.clone());
-                    (matching, leaf_population, false)
+                } else if let Some(rows) = flat_graph.vertex_property_rows(&arm.leaf_label) {
+                    for (&leaf_vid, properties) in rows {
+                        if Self::properties_pass_predicates(
+                            Some(properties.as_slice()),
+                            &arm.leaf_predicates,
+                        )? {
+                            matching.push(leaf_vid);
+                        }
+                    }
                 }
+                flat_graph
+                    .predicate_vertex_cache()
+                    .insert(cache_key, matching.clone());
+                (
+                    matching,
+                    if value_index_hit { 0 } else { leaf_population },
+                    false,
+                    value_index_hit,
+                )
             };
         if matching_leaves.len() > MAX_MATCHING_LEAVES {
             return Ok(ExactN1LeafScan {
@@ -6212,6 +6291,7 @@ impl QueryGraph {
                 planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
+                value_index_hit,
                 completed: false,
             });
         }
@@ -6226,6 +6306,7 @@ impl QueryGraph {
                 planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
+                value_index_hit,
                 completed: false,
             });
         };
@@ -6241,6 +6322,7 @@ impl QueryGraph {
                 planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
+                value_index_hit,
                 completed: false,
             });
         };
@@ -6267,6 +6349,7 @@ impl QueryGraph {
                     planned_edges,
                     traversed_edges: 0,
                     cache_hit,
+                    value_index_hit,
                     completed: false,
                 });
             }
@@ -6285,6 +6368,7 @@ impl QueryGraph {
                         planned_edges,
                         traversed_edges,
                         cache_hit,
+                        value_index_hit,
                         completed: false,
                     });
                 }
@@ -6309,6 +6393,7 @@ impl QueryGraph {
                             planned_edges,
                             traversed_edges,
                             cache_hit,
+                            value_index_hit,
                             completed: false,
                         });
                     }
@@ -6346,8 +6431,52 @@ impl QueryGraph {
             planned_edges,
             traversed_edges,
             cache_hit,
+            value_index_hit,
             completed: true,
         })
+    }
+
+    /// Return a bounded exact-value candidate set for an equality/IN leaf
+    /// predicate. Hash collisions and additional predicates are verified by
+    /// the caller against the original property row.
+    fn exact_leaf_index_candidates(
+        flat_graph: &FlatGraph,
+        label: &str,
+        predicates: &[ResolvedPredicate],
+    ) -> Option<Vec<VertexId>> {
+        let mut best: Option<Vec<VertexId>> = None;
+        for predicate in predicates {
+            if !flat_graph.has_exact_vertex_value_index(label, predicate.prop_index) {
+                continue;
+            }
+            let mut candidates = match predicate.op {
+                ComparisonOp::Eq => flat_graph
+                    .vertex_ids_by_exact_value(label, predicate.prop_index, &predicate.value)
+                    .unwrap_or_default()
+                    .to_vec(),
+                ComparisonOp::In => predicate
+                    .values
+                    .iter()
+                    .flat_map(|value| {
+                        flat_graph
+                            .vertex_ids_by_exact_value(label, predicate.prop_index, value)
+                            .unwrap_or_default()
+                            .iter()
+                            .copied()
+                    })
+                    .collect(),
+                _ => continue,
+            };
+            candidates.sort_unstable();
+            candidates.dedup();
+            if best
+                .as_ref()
+                .is_none_or(|current| candidates.len() < current.len())
+            {
+                best = Some(candidates);
+            }
+        }
+        best
     }
 
     fn exact_n1_tail_planned_edges(
