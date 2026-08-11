@@ -214,6 +214,10 @@ pub fn build_procedure() -> Procedure {
     )]));
 
     Procedure::new(parameters, Some(schema), move |context, args| {
+        let stage_trace = std::env::var_os("GCARD_DECOMP_TRACE_LOG").is_some();
+        if stage_trace {
+            eprintln!("[gcard-stage] procedure-enter");
+        }
         let graph_ref = context.current_graph.clone().ok_or_else(|| {
             ExecutionError::Custom(Box::new(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -227,6 +231,9 @@ pub fn build_procedure() -> Procedure {
                 "only in-memory graphs support vector scans",
             )))
         })?;
+        if stage_trace {
+            eprintln!("[gcard-stage] before-metadata-clone");
+        }
         let metadata: DegreeSeqGraphCompressed = container
             .degree_seq_graph_compressed()
             .as_ref()
@@ -234,6 +241,9 @@ pub fn build_procedure() -> Procedure {
             .ok_or_else(|| {
                 anyhow::anyhow!("degree_seq_graph_compressed not set (run GCard_build first)")
             })?;
+        if stage_trace {
+            eprintln!("[gcard-stage] after-metadata-clone");
+        }
 
         let query_json_path = args[0]
             .try_as_string()
@@ -253,6 +263,9 @@ pub fn build_procedure() -> Procedure {
             .unwrap_or(false);
         GCARD_VERBOSE.store(verbose, Ordering::Relaxed);
 
+        if stage_trace {
+            eprintln!("[gcard-stage] before-query-read");
+        }
         let query_json = fs::read_to_string(&query_json_path).map_err(|e| {
             anyhow::anyhow!("Failed to read query JSON file {}: {}", query_json_path, e)
         })?;
@@ -263,6 +276,9 @@ pub fn build_procedure() -> Procedure {
         let query_graph: QueryGraph = query
             .build_graph()
             .map_err(|e| anyhow::anyhow!("Failed to build query graph: {}", e))?;
+        if stage_trace {
+            eprintln!("[gcard-stage] after-query-build");
+        }
 
         let max_path_length = args[1]
             .to_i32()
@@ -339,6 +355,9 @@ pub fn build_procedure() -> Procedure {
         let flat_graph_arc: Option<std::sync::Arc<FlatGraphType>> = container
             .gcard_flat_graph()
             .and_then(|arc| std::sync::Arc::downcast::<FlatGraphType>(arc).ok());
+        if stage_trace {
+            eprintln!("[gcard-stage] after-flatgraph-downcast");
+        }
 
         let inference_nanos: u128;
         let build_start = Instant::now();
@@ -348,6 +367,9 @@ pub fn build_procedure() -> Procedure {
                 "FlatGraph not loaded (run load_ldbc first)",
             )))
         })?;
+        if stage_trace {
+            eprintln!("[gcard-stage] before-abstract-build");
+        }
         let build_result = if let Some(ref decomp) = decomposition {
             query_graph.build_abstract_graph_flat_from_decomposition(
                 decomp,
@@ -368,6 +390,9 @@ pub fn build_procedure() -> Procedure {
                 unit_selectivity_walks,
             )
         };
+        if stage_trace {
+            eprintln!("[gcard-stage] after-abstract-build");
+        }
         let cardinality = match build_result {
             Ok(abstract_graphs_with_scores) => {
                 let build_elapsed = build_start.elapsed();

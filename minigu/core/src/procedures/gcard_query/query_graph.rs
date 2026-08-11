@@ -5511,6 +5511,17 @@ impl QueryGraph {
                 .collect::<Vec<_>>()
         );
         let root_edge_population = flat_graph.edge_count_by_label(&compiled.root_edge_label);
+        if decomp_trace_enabled() {
+            decomp_trace_line(format!(
+                "[predicate-n1-branch-start] center={} intermediate={} arms={} population={} root_edge_population={} sample_size={}",
+                branch.center,
+                branch.intermediate,
+                branch.leaf_arms.len(),
+                population,
+                root_edge_population,
+                sample_size,
+            ));
+        }
 
         let (pcf, sampling_mode, samples, positive_samples, sampled_rows, anchor_desc) =
             if population <= sample_size || root_edge_population == 0 {
