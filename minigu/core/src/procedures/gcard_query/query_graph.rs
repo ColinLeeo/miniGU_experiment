@@ -5711,6 +5711,9 @@ impl QueryGraph {
                 let mut observed_rows = 0u128;
                 let mut valid_anchor_samples = 0usize;
                 let mut center_predicate_samples = 0usize;
+                let mut center_degree_cache: HashMap<VertexId, (bool, u64, u64)> = HashMap::new();
+                let mut center_cache_hits = 0usize;
+                let mut center_cache_misses = 0usize;
                 let mut attempted_samples = 0usize;
                 let mut target_samples = sample_size;
                 let mut adaptive_rounds = 0usize;
@@ -5764,25 +5767,42 @@ impl QueryGraph {
                             dst
                         };
                         valid_anchor_samples += 1;
-                        if !Self::properties_pass_predicates(
-                            flat_graph.vertex_props(&compiled.center_label, center_vid),
-                            &center_predicates,
-                        )? {
+                        let (center_passes, branch_degree, anchor_degree) = if let Some(cached) =
+                            center_degree_cache.get(&center_vid)
+                        {
+                            center_cache_hits += 1;
+                            *cached
+                        } else {
+                            center_cache_misses += 1;
+                            let center_passes = Self::properties_pass_predicates(
+                                flat_graph.vertex_props(&compiled.center_label, center_vid),
+                                &center_predicates,
+                            )?;
+                            let degrees = if center_passes {
+                                let (root_degree, branch_degree) = Self::filtered_n1_branch_degree(
+                                    flat_graph, &compiled, center_vid,
+                                )?;
+                                let anchor_degree = if let Some(index) = anchor_arm_index {
+                                    Self::raw_star_arm_degrees(
+                                        flat_graph,
+                                        &compiled.center_leaf_arms[index],
+                                        center_vid,
+                                    )?
+                                    .0
+                                } else {
+                                    root_degree
+                                };
+                                (true, branch_degree, anchor_degree)
+                            } else {
+                                (false, 0, 0)
+                            };
+                            center_degree_cache.insert(center_vid, degrees);
+                            degrees
+                        };
+                        if !center_passes {
                             continue;
                         }
                         center_predicate_samples += 1;
-                        let (root_degree, branch_degree) =
-                            Self::filtered_n1_branch_degree(flat_graph, &compiled, center_vid)?;
-                        let anchor_degree = if let Some(index) = anchor_arm_index {
-                            Self::raw_star_arm_degrees(
-                                flat_graph,
-                                &compiled.center_leaf_arms[index],
-                                center_vid,
-                            )?
-                            .0
-                        } else {
-                            root_degree
-                        };
                         if anchor_degree == 0 || branch_degree == 0 {
                             continue;
                         }
@@ -5819,7 +5839,7 @@ impl QueryGraph {
                     positive,
                     observed_rows,
                     format!(
-                        "kind={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={} adaptive_rounds={} max_samples={}",
+                        "kind={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={} adaptive_rounds={} max_samples={} center_cache_hits={} center_cache_misses={}",
                         if anchor_arm_index.is_some() {
                             "center-leaf"
                         } else {
@@ -5831,6 +5851,8 @@ impl QueryGraph {
                         center_predicate_samples,
                         adaptive_rounds,
                         max_samples,
+                        center_cache_hits,
+                        center_cache_misses,
                     ),
                 )
             };
