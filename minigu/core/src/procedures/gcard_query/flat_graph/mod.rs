@@ -471,6 +471,18 @@ impl FlatGraph {
         self.vertex_props.get(label)?.get(&vid).map(Vec::as_slice)
     }
 
+    /// Property rows for one label without repeating a hash lookup per vertex.
+    ///
+    /// Selective scans over bounded dimension tables use this view so their
+    /// cost is a single sequential hash-table iteration rather than one lookup
+    /// through both property maps for every label-local vertex ID.
+    pub(crate) fn vertex_property_rows(
+        &self,
+        label: &str,
+    ) -> Option<&HashMap<VertexId, Vec<ScalarValue>>> {
+        self.vertex_props.get(label)
+    }
+
     /// Property values for an edge (indexed by schema position), or `None`.
     pub fn edge_props(&self, eid: EdgeId) -> Option<&[ScalarValue]> {
         self.edge_props.get(&eid).map(Vec::as_slice)

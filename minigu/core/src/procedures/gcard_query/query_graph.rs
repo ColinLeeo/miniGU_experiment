@@ -6105,7 +6105,7 @@ impl QueryGraph {
     ) -> GCardResult<ExactN1LeafScan> {
         const MAX_LEAF_VERTICES: usize = 200_000;
         const MAX_MATCHING_LEAVES: usize = 20_000;
-        const MAX_TRAVERSED_EDGES: usize = 1_000_000;
+        const MAX_TRAVERSED_EDGES: usize = 160_000;
 
         let arm = &compiled.leaf_arms[0];
         let leaf_population = flat_graph.vertex_count_by_label(&arm.leaf_label);
@@ -6139,12 +6139,14 @@ impl QueryGraph {
                 (cached.clone(), 0, true)
             } else {
                 let mut matching = Vec::new();
-                for &leaf_vid in flat_graph.all_vertex_ids_by_label(&arm.leaf_label) {
-                    if Self::properties_pass_predicates(
-                        flat_graph.vertex_props(&arm.leaf_label, leaf_vid),
-                        &arm.leaf_predicates,
-                    )? {
-                        matching.push(leaf_vid);
+                if let Some(rows) = flat_graph.vertex_property_rows(&arm.leaf_label) {
+                    for (&leaf_vid, properties) in rows {
+                        if Self::properties_pass_predicates(
+                            Some(properties.as_slice()),
+                            &arm.leaf_predicates,
+                        )? {
+                            matching.push(leaf_vid);
+                        }
                     }
                 }
                 flat_vertex_cache.insert(cache_key, matching.clone());
