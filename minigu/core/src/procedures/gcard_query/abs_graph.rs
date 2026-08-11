@@ -190,7 +190,10 @@ impl GraphSkeleton<AbstractEdge> {
         let active_for_scoring: HashSet<VertexId> = candidates.iter().copied().collect();
 
         let mut best_root = candidates[0];
-        let mut min_max_gen = usize::MAX;
+        let mut best_max_gen = usize::MAX;
+        let mut best_local_pcf_count = 0usize;
+        let mut best_active_degree = 0usize;
+        let mut best_total_degree = 0usize;
 
         for &candidate in &candidates {
             let generations = self.get_topological_generations(candidate);
@@ -199,8 +202,37 @@ impl GraphSkeleton<AbstractEdge> {
                 .filter_map(|vertex_id| generations.get(vertex_id).copied())
                 .max()
                 .unwrap_or(0);
-            if max_gen < min_max_gen {
-                min_max_gen = max_gen;
+            let local_pcf_count = self.local_pcfs.get(&candidate).map(Vec::len).unwrap_or(0);
+            let active_degree = self
+                .get_neighbors(candidate)
+                .into_iter()
+                .filter(|neighbor| active_for_scoring.contains(neighbor))
+                .count();
+            let total_degree = self.get_degree(candidate);
+
+            // Eccentricity remains the primary criterion. For equally central
+            // roots, keep predicate-owned local PCFs in their native coordinate
+            // and prefer the denser star center. Both tie-breakers avoid an
+            // otherwise unnecessary beta projection without doing more sampling.
+            let is_better = max_gen < best_max_gen
+                || (max_gen == best_max_gen && local_pcf_count > best_local_pcf_count)
+                || (max_gen == best_max_gen
+                    && local_pcf_count == best_local_pcf_count
+                    && active_degree > best_active_degree)
+                || (max_gen == best_max_gen
+                    && local_pcf_count == best_local_pcf_count
+                    && active_degree == best_active_degree
+                    && total_degree > best_total_degree)
+                || (max_gen == best_max_gen
+                    && local_pcf_count == best_local_pcf_count
+                    && active_degree == best_active_degree
+                    && total_degree == best_total_degree
+                    && candidate < best_root);
+            if is_better {
+                best_max_gen = max_gen;
+                best_local_pcf_count = local_pcf_count;
+                best_active_degree = active_degree;
+                best_total_degree = total_degree;
                 best_root = candidate;
             }
         }
@@ -1089,5 +1121,41 @@ mod tests {
         );
 
         assert_eq!(graph.get_es().unwrap(), src_side.get_num_rows());
+    }
+
+    #[test]
+    fn equally_central_root_prefers_predicate_owned_local_pcf() {
+        let neutral = pcf(vec![1.0], vec![10.0]);
+        let local = pcf(vec![2.0], vec![5.0]);
+
+        let mut graph = AbstractGraph::new();
+        for id in 1..=4 {
+            graph.add_vertex(vertex(id, "node"));
+        }
+        graph.add_edge(1, edge(1, 2, neutral.clone(), neutral.clone()));
+        graph.add_edge(2, edge(2, 3, neutral.clone(), neutral.clone()));
+        graph.add_edge(3, edge(3, 4, neutral.clone(), neutral.clone()));
+        graph.add_local_pcf(3, local);
+
+        // Vertices 2 and 3 have the same eccentricity. Vertex 3 owns the
+        // predicate-aware PCF, so rooting there avoids projecting it via beta.
+        assert_eq!(graph.pick_root(), Some(3));
+    }
+
+    #[test]
+    fn equally_central_root_prefers_higher_degree_star_center() {
+        let neutral = pcf(vec![1.0], vec![10.0]);
+
+        let mut graph = AbstractGraph::new();
+        for id in 1..=5 {
+            graph.add_vertex(vertex(id, "node"));
+        }
+        graph.add_edge(1, edge(1, 2, neutral.clone(), neutral.clone()));
+        graph.add_edge(2, edge(2, 3, neutral.clone(), neutral.clone()));
+        graph.add_edge(3, edge(3, 4, neutral.clone(), neutral.clone()));
+        graph.add_edge(4, edge(3, 5, neutral.clone(), neutral));
+
+        // Vertices 2 and 3 are both centers, but vertex 3 owns the wider star.
+        assert_eq!(graph.pick_root(), Some(3));
     }
 }
