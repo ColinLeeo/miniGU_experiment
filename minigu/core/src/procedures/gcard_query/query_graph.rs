@@ -118,6 +118,7 @@ struct ExactN1LeafScan {
     pcf: Option<Pcf>,
     scanned_leaf_vertices: usize,
     matching_leaf_vertices: usize,
+    planned_edges: usize,
     traversed_edges: usize,
     cache_hit: bool,
     completed: bool,
@@ -1761,6 +1762,31 @@ mod tests {
         );
         assert!(residual.inner.edges.contains_key(&12));
         assert!(!residual.inner.vertices[&4].predicates.is_empty());
+    }
+
+    #[test]
+    fn exact_tail_preflight_rejects_an_over_budget_csr_walk() {
+        let leaf_to_intermediate = CsrAdjWithEid::build(vec![(1, 10, 100), (1, 11, 101)]);
+        let intermediate_to_center = CsrAdjWithEid::build(vec![(10, 20, 200), (11, 21, 201)]);
+
+        assert_eq!(
+            QueryGraph::exact_n1_tail_planned_edges(
+                &[1],
+                &leaf_to_intermediate,
+                &intermediate_to_center,
+                4,
+            ),
+            Ok(4)
+        );
+        assert_eq!(
+            QueryGraph::exact_n1_tail_planned_edges(
+                &[1],
+                &leaf_to_intermediate,
+                &intermediate_to_center,
+                3,
+            ),
+            Err(4)
+        );
     }
 
     #[test]
@@ -5829,11 +5855,12 @@ impl QueryGraph {
                 .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
             if decomp_trace_enabled() {
                 decomp_trace_line(format!(
-                    "[predicate-n1-exact-leaf] center={} intermediate={} scanned_leaf_vertices={} matching_leaf_vertices={} traversed_edges={} cache_hit={} completed={} enough_evidence={} estimated_rows={:.3}",
+                    "[predicate-n1-exact-leaf] center={} intermediate={} scanned_leaf_vertices={} matching_leaf_vertices={} planned_edges={} traversed_edges={} cache_hit={} completed={} enough_evidence={} estimated_rows={:.3}",
                     branch.center,
                     branch.intermediate,
                     scan.scanned_leaf_vertices,
                     scan.matching_leaf_vertices,
+                    scan.planned_edges,
                     scan.traversed_edges,
                     scan.cache_hit,
                     scan.completed,
@@ -6112,6 +6139,7 @@ impl QueryGraph {
                 pcf: None,
                 scanned_leaf_vertices: 0,
                 matching_leaf_vertices: 0,
+                planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit: false,
                 completed: false,
@@ -6168,6 +6196,7 @@ impl QueryGraph {
                 pcf: None,
                 scanned_leaf_vertices,
                 matching_leaf_vertices: matching_leaves.len(),
+                planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
                 completed: false,
@@ -6181,6 +6210,7 @@ impl QueryGraph {
                 pcf: None,
                 scanned_leaf_vertices,
                 matching_leaf_vertices: matching_leaves.len(),
+                planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
                 completed: false,
@@ -6195,10 +6225,38 @@ impl QueryGraph {
                 pcf: None,
                 scanned_leaf_vertices,
                 matching_leaf_vertices: matching_leaves.len(),
+                planned_edges: 0,
                 traversed_edges: 0,
                 cache_hit,
                 completed: false,
             });
+        };
+
+        // Reject an over-budget exact tail before doing predicate probes or
+        // building the center-degree hash table.  The old in-loop guard only
+        // discovered this after paying for 100K edge visits, even though CSR
+        // row lengths are enough to prove up front that the scan cannot
+        // finish.  This is a conservative structural upper bound: predicates
+        // may remove work, but declining an over-budget exact optimization is
+        // always safe because the caller retains the sampled fallback.
+        let planned_edges = match Self::exact_n1_tail_planned_edges(
+            &matching_leaves,
+            leaf_to_intermediate,
+            intermediate_to_center,
+            MAX_TRAVERSED_EDGES,
+        ) {
+            Ok(planned_edges) => planned_edges,
+            Err(planned_edges) => {
+                return Ok(ExactN1LeafScan {
+                    pcf: None,
+                    scanned_leaf_vertices,
+                    matching_leaf_vertices: matching_leaves.len(),
+                    planned_edges,
+                    traversed_edges: 0,
+                    cache_hit,
+                    completed: false,
+                });
+            }
         };
 
         let mut traversed_edges = 0usize;
@@ -6211,6 +6269,7 @@ impl QueryGraph {
                         pcf: None,
                         scanned_leaf_vertices,
                         matching_leaf_vertices: matching_leaves.len(),
+                        planned_edges,
                         traversed_edges,
                         cache_hit,
                         completed: false,
@@ -6234,6 +6293,7 @@ impl QueryGraph {
                             pcf: None,
                             scanned_leaf_vertices,
                             matching_leaf_vertices: matching_leaves.len(),
+                            planned_edges,
                             traversed_edges,
                             cache_hit,
                             completed: false,
@@ -6270,10 +6330,38 @@ impl QueryGraph {
             pcf: Self::pcf_from_exact_positive_center_degrees(center_degrees.values().copied()),
             scanned_leaf_vertices,
             matching_leaf_vertices: matching_leaves.len(),
+            planned_edges,
             traversed_edges,
             cache_hit,
             completed: true,
         })
+    }
+
+    fn exact_n1_tail_planned_edges(
+        matching_leaves: &[VertexId],
+        leaf_to_intermediate: &CsrAdjWithEid,
+        intermediate_to_center: &CsrAdjWithEid,
+        max_edges: usize,
+    ) -> Result<usize, usize> {
+        let mut planned_edges = 0usize;
+        for leaf_vid in matching_leaves.iter().copied() {
+            let intermediates = leaf_to_intermediate.neighbors_slice(leaf_vid);
+            planned_edges = planned_edges.saturating_add(intermediates.len());
+            if planned_edges > max_edges {
+                return Err(planned_edges);
+            }
+            for &(intermediate_vid, _) in intermediates {
+                planned_edges = planned_edges.saturating_add(
+                    intermediate_to_center
+                        .neighbors_slice(intermediate_vid)
+                        .len(),
+                );
+                if planned_edges > max_edges {
+                    return Err(planned_edges);
+                }
+            }
+        }
+        Ok(planned_edges)
     }
 
     fn filtered_n1_branch_degree(
