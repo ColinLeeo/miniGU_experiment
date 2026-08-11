@@ -1428,12 +1428,14 @@ mod tests {
                 vertex(3, "company_name"),
                 vertex(4, "company_type"),
                 vertex(5, "aka_title"),
+                vertex(6, "movie_info"),
             ],
             edges: vec![
                 edge(10, "title_to_mc", 1, 2),
                 edge(11, "cn_to_mc", 3, 2),
                 edge(12, "ct_to_mc", 4, 2),
                 edge(13, "title_to_aka", 1, 5),
+                edge(14, "title_to_mi", 1, 6),
             ],
             predicates: vec![
                 PredicateDef {
@@ -1466,7 +1468,7 @@ mod tests {
                 PredicateDef {
                     predicate_id: None,
                     target: "vertex".to_string(),
-                    id: 5,
+                    id: 6,
                     property: "keep".to_string(),
                     op: ComparisonOp::Eq,
                     value: ScalarValue::Int64(Some(1)),
@@ -1481,13 +1483,15 @@ mod tests {
         builder.set_vertex_prop_schema("movie_companies", vec!["keep".to_string()]);
         builder.set_vertex_prop_schema("company_name", vec!["country".to_string()]);
         builder.set_vertex_prop_schema("company_type", vec![]);
-        builder.set_vertex_prop_schema("aka_title", vec!["keep".to_string()]);
+        builder.set_vertex_prop_schema("aka_title", vec![]);
+        builder.set_vertex_prop_schema("movie_info", vec!["keep".to_string()]);
         for offset in 0..5 {
             let title = 100 + offset;
             let mc = 200 + offset;
             let cn = 300 + offset;
             let ct = 400 + offset;
             let aka = 500 + offset;
+            let movie_info = 600 + offset;
             builder.add_vertex(title, "title", vec![ScalarValue::Int64(Some(1))]);
             builder.add_vertex(mc, "movie_companies", vec![ScalarValue::Int64(Some(1))]);
             builder.add_vertex(
@@ -1496,11 +1500,8 @@ mod tests {
                 vec![ScalarValue::String(Some("us".to_string()))],
             );
             builder.add_vertex(ct, "company_type", vec![]);
-            builder.add_vertex(
-                aka,
-                "aka_title",
-                vec![ScalarValue::Int64(Some(i64::from(offset != 4)))],
-            );
+            builder.add_vertex(aka, "aka_title", vec![]);
+            builder.add_vertex(movie_info, "movie_info", vec![ScalarValue::Int64(Some(1))]);
             builder.add_edge(
                 1000 + offset,
                 title,
@@ -1535,6 +1536,15 @@ mod tests {
                 aka,
                 "aka_title",
                 "title_to_aka",
+                vec![],
+            );
+            builder.add_edge(
+                5000 + offset,
+                title,
+                "title",
+                movie_info,
+                "movie_info",
+                "title_to_mi",
                 vec![],
             );
         }
@@ -1584,8 +1594,13 @@ mod tests {
         assert_eq!(extraction.owned_predicate_vertices, HashSet::from([1, 2]));
         assert_eq!(
             extraction.local_pcfs.get(&1).unwrap()[0].get_num_rows(),
-            4.0
+            5.0
         );
+        let residual = query_graph.subgraph_without_edges(
+            &extraction.consumed_edges,
+            &extraction.owned_predicate_vertices,
+        );
+        assert!(residual.inner.edges.contains_key(&14));
     }
 
     #[test]
@@ -5428,7 +5443,18 @@ impl QueryGraph {
                             } else {
                                 edge.src_vertex_id
                             };
+                            // Keep predicate-bearing leaf arms in the residual
+                            // sampler. Folding a selective leaf predicate into
+                            // the joint branch sample makes positive samples
+                            // sparse and would require a much larger sampling
+                            // budget to recover stable estimates.
                             self.get_degree(other) == 1
+                                && edge.predicates.is_empty()
+                                && self
+                                    .inner
+                                    .vertices
+                                    .get(&other)
+                                    .is_some_and(|vertex| vertex.predicates.is_empty())
                         })
                     })
                     .collect::<Vec<_>>();
@@ -5449,8 +5475,6 @@ impl QueryGraph {
                     let Some(leaf_vertex) = self.inner.vertices.get(&leaf_vertex_id) else {
                         continue;
                     };
-                    has_predicates |=
-                        !edge.predicates.is_empty() || !leaf_vertex.predicates.is_empty();
                     center_leaf_arms.push(RawStarArm {
                         edge_id,
                         leaf_vertex_id,
