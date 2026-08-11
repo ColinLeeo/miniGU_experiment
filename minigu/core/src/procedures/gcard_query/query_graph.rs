@@ -5689,56 +5689,124 @@ impl QueryGraph {
                     &sample_signature,
                     &[],
                 ));
-                let mut weighted_degrees = Vec::with_capacity(sample_size);
+                let (anchor_arm_index, anchor_edge_population) = compiled
+                    .center_leaf_arms
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, arm)| {
+                        let edge_population = flat_graph.edge_count_by_label(&arm.edge_label);
+                        (edge_population > 0).then_some((Some(index), edge_population))
+                    })
+                    .chain(std::iter::once((None, root_edge_population)))
+                    .min_by_key(|(_, edge_population)| *edge_population)
+                    .unwrap_or((None, root_edge_population));
+                let anchor_edge_label = anchor_arm_index
+                    .map(|index| compiled.center_leaf_arms[index].edge_label.as_str())
+                    .unwrap_or(compiled.root_edge_label.as_str());
+                // Keep latency bounded: at most one additional batch, and only
+                // when the initial sample was already close to the evidence
+                // threshold. Zero/one-hit samples fall back immediately.
+                let max_samples = sample_size.saturating_mul(2);
+                let mut weighted_observations = Vec::with_capacity(max_samples);
                 let mut observed_rows = 0u128;
                 let mut valid_anchor_samples = 0usize;
                 let mut center_predicate_samples = 0usize;
-                for _ in 0..sample_size {
-                    let Some(edge_id) =
-                        flat_graph.sample_edge_id_by_label(&compiled.root_edge_label, &mut rng)
-                    else {
-                        continue;
-                    };
-                    let Some((src, src_label, dst, dst_label, edge_label)) =
-                        flat_graph.edge_endpoints(edge_id)
-                    else {
-                        continue;
-                    };
-                    let center_vid = if compiled.root_outgoing {
-                        if src_label != compiled.center_label
-                            || dst_label != compiled.intermediate_label
-                            || edge_label != compiled.root_edge_label
-                        {
+                let mut attempted_samples = 0usize;
+                let mut target_samples = sample_size;
+                let mut adaptive_rounds = 0usize;
+                loop {
+                    while attempted_samples < target_samples {
+                        attempted_samples += 1;
+                        let Some(edge_id) =
+                            flat_graph.sample_edge_id_by_label(anchor_edge_label, &mut rng)
+                        else {
+                            continue;
+                        };
+                        let Some((src, src_label, dst, dst_label, edge_label)) =
+                            flat_graph.edge_endpoints(edge_id)
+                        else {
+                            continue;
+                        };
+                        let center_vid = if let Some(index) = anchor_arm_index {
+                            let anchor_arm = &compiled.center_leaf_arms[index];
+                            if anchor_arm.outgoing {
+                                if src_label != compiled.center_label
+                                    || dst_label != anchor_arm.leaf_label
+                                    || edge_label != anchor_arm.edge_label
+                                {
+                                    continue;
+                                }
+                                src
+                            } else {
+                                if dst_label != compiled.center_label
+                                    || src_label != anchor_arm.leaf_label
+                                    || edge_label != anchor_arm.edge_label
+                                {
+                                    continue;
+                                }
+                                dst
+                            }
+                        } else if compiled.root_outgoing {
+                            if src_label != compiled.center_label
+                                || dst_label != compiled.intermediate_label
+                                || edge_label != compiled.root_edge_label
+                            {
+                                continue;
+                            }
+                            src
+                        } else {
+                            if dst_label != compiled.center_label
+                                || src_label != compiled.intermediate_label
+                                || edge_label != compiled.root_edge_label
+                            {
+                                continue;
+                            }
+                            dst
+                        };
+                        valid_anchor_samples += 1;
+                        if !Self::properties_pass_predicates(
+                            flat_graph.vertex_props(&compiled.center_label, center_vid),
+                            &center_predicates,
+                        )? {
                             continue;
                         }
-                        src
-                    } else {
-                        if dst_label != compiled.center_label
-                            || src_label != compiled.intermediate_label
-                            || edge_label != compiled.root_edge_label
-                        {
+                        center_predicate_samples += 1;
+                        let (root_degree, branch_degree) =
+                            Self::filtered_n1_branch_degree(flat_graph, &compiled, center_vid)?;
+                        let anchor_degree = if let Some(index) = anchor_arm_index {
+                            Self::raw_star_arm_degrees(
+                                flat_graph,
+                                &compiled.center_leaf_arms[index],
+                                center_vid,
+                            )?
+                            .0
+                        } else {
+                            root_degree
+                        };
+                        if anchor_degree == 0 || branch_degree == 0 {
                             continue;
                         }
-                        dst
-                    };
-                    valid_anchor_samples += 1;
-                    if !Self::properties_pass_predicates(
-                        flat_graph.vertex_props(&compiled.center_label, center_vid),
-                        &center_predicates,
-                    )? {
-                        continue;
+                        observed_rows = observed_rows.saturating_add(branch_degree as u128);
+                        weighted_observations.push((branch_degree, anchor_degree));
                     }
-                    center_predicate_samples += 1;
-                    let (root_degree, branch_degree) =
-                        Self::filtered_n1_branch_degree(flat_graph, &compiled, center_vid)?;
-                    if root_degree == 0 || branch_degree == 0 {
-                        continue;
+                    let positive = weighted_observations.len();
+                    if positive >= MIN_POSITIVE_SAMPLES
+                        || positive < 2
+                        || target_samples >= max_samples
+                    {
+                        break;
                     }
-                    observed_rows = observed_rows.saturating_add(branch_degree as u128);
-                    let weight =
-                        root_edge_population as f64 / (sample_size as f64 * root_degree as f64);
-                    weighted_degrees.push((branch_degree, weight));
+                    adaptive_rounds += 1;
+                    target_samples = target_samples.saturating_mul(2).min(max_samples);
                 }
+                let weighted_degrees = weighted_observations
+                    .iter()
+                    .map(|&(degree, anchor_degree)| {
+                        let weight = anchor_edge_population as f64
+                            / (attempted_samples as f64 * anchor_degree as f64);
+                        (degree, weight)
+                    })
+                    .collect::<Vec<_>>();
                 let positive = weighted_degrees.len();
                 (
                     (positive >= MIN_POSITIVE_SAMPLES)
@@ -5747,16 +5815,22 @@ impl QueryGraph {
                         })
                         .flatten(),
                     "edge-anchor",
-                    sample_size,
+                    attempted_samples,
                     positive,
                     observed_rows,
                     format!(
-                        "edge={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={}",
-                        branch.root_edge_id,
-                        compiled.root_edge_label,
-                        root_edge_population,
+                        "kind={} label={} edge_population={} valid_anchor_samples={} center_predicate_samples={} adaptive_rounds={} max_samples={}",
+                        if anchor_arm_index.is_some() {
+                            "center-leaf"
+                        } else {
+                            "root"
+                        },
+                        anchor_edge_label,
+                        anchor_edge_population,
                         valid_anchor_samples,
                         center_predicate_samples,
+                        adaptive_rounds,
+                        max_samples,
                     ),
                 )
             };
