@@ -1790,6 +1790,15 @@ mod tests {
     }
 
     #[test]
+    fn high_degree_walk_hop_respects_the_single_branch_latency_budget() {
+        assert_eq!(QueryGraph::bounded_branch_sample_count(0), 0);
+        assert_eq!(QueryGraph::bounded_branch_sample_count(1), 1);
+        assert_eq!(QueryGraph::bounded_branch_sample_count(32), 1);
+        assert_eq!(QueryGraph::bounded_branch_sample_count(33), 1);
+        assert_eq!(QueryGraph::bounded_branch_sample_count(1_000_000), 1);
+    }
+
+    #[test]
     fn star_matching_deduplicates_repeated_leaf_arms_like_pathce() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![
@@ -8842,12 +8851,6 @@ impl QueryGraph {
         prof: &mut WalkProf,
         local_pred_cache: &mut HashMap<(u32, u64), bool>,
     ) -> GCardResult<(f64, f64)> {
-        // Branching factor (Alley default 1/32: sample ⌈n/32⌉ neighbors at
-        // each step, with a floor of 1).  For small degrees this matches
-        // Wander Join's single-pick; only high-fanout vertices actually fan
-        // out into multiple branches.
-        const BRANCH_FACTOR_B: f64 = 1.0 / 32.0;
-
         if depth >= segment.len() {
             return Ok((1.0, 1.0));
         }
@@ -8908,7 +8911,7 @@ impl QueryGraph {
                     return Ok((0.0, 0.0));
                 }
 
-                let k = ((BRANCH_FACTOR_B * degree as f64).ceil() as usize).clamp(1, degree);
+                let k = Self::bounded_branch_sample_count(degree);
 
                 let mut sum_s = 0.0;
                 let mut sum_p = 0.0;
@@ -8974,6 +8977,26 @@ impl QueryGraph {
                 Ok((degree as f64 * avg_s, degree as f64 * avg_p))
             }
         }
+    }
+
+    /// Number of neighbors retained at one Wander Join hop.
+    ///
+    /// Alley-style `ceil(degree / 32)` branching reduces variance, but one
+    /// high-degree IMDb vertex can expand a nominal 500-start sample into
+    /// tens of thousands of predicate probes. Estimation latency is a hard
+    /// constraint, so keep the independent start samples and bound each hop
+    /// to one uniformly selected neighbor. The Horvitz-Thompson degree weight
+    /// in `walk_segment_branched` preserves unbiased structural weighting.
+    fn bounded_branch_sample_count(degree: usize) -> usize {
+        const BRANCH_FACTOR_B: f64 = 1.0 / 32.0;
+        const MAX_BRANCHES_PER_HOP: usize = 1;
+
+        if degree == 0 {
+            return 0;
+        }
+        ((BRANCH_FACTOR_B * degree as f64).ceil() as usize)
+            .clamp(1, degree)
+            .min(MAX_BRANCHES_PER_HOP)
     }
 
     /// Evaluate the edge predicate for one selected branch and recurse into
