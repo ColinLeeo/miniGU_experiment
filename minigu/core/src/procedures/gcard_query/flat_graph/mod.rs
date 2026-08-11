@@ -31,8 +31,10 @@ pub mod update;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 use csr::CsrAdjWithEid;
+use dashmap::DashMap;
 use minigu_common::types::{EdgeId, VertexId};
 use minigu_common::value::ScalarValue;
 use rand::Rng;
@@ -111,6 +113,13 @@ pub struct FlatGraph {
     /// Per-label, per-property statistics (NDV, min/max) collected at build time.
     #[serde(default)]
     graph_stats: stats::GraphStats,
+
+    /// Exact filtered vertex IDs for bounded dimension-table anchors.
+    /// Query-local caches cannot reuse these results across a workload, so the
+    /// immutable FlatGraph owns the cache. It is excluded from persistence and
+    /// invalidated whenever pending graph changes are applied.
+    #[serde(skip)]
+    predicate_vertex_cache: Arc<DashMap<String, Vec<VertexId>>>,
 
     // ── Pending structural changes ─────────────────────────────────────────────
     pending: PendingChanges,
@@ -273,6 +282,7 @@ impl FlatGraphBuilder {
             edge_type_schema: self.edge_type_schema,
             edge_info: self.edge_info,
             graph_stats: self.graph_stats,
+            predicate_vertex_cache: Arc::new(DashMap::new()),
             pending: PendingChanges::default(),
         }
     }
@@ -483,6 +493,10 @@ impl FlatGraph {
         self.vertex_props.get(label)
     }
 
+    pub(crate) fn predicate_vertex_cache(&self) -> &DashMap<String, Vec<VertexId>> {
+        &self.predicate_vertex_cache
+    }
+
     /// Property values for an edge (indexed by schema position), or `None`.
     pub fn edge_props(&self, eid: EdgeId) -> Option<&[ScalarValue]> {
         self.edge_props.get(&eid).map(Vec::as_slice)
@@ -626,6 +640,7 @@ impl FlatGraph {
         if self.pending.is_empty() {
             return;
         }
+        self.predicate_vertex_cache.clear();
         let t_total = std::time::Instant::now();
         let pending = std::mem::take(&mut self.pending);
         eprintln!(

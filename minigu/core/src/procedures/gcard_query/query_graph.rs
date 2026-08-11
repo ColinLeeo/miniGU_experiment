@@ -5822,7 +5822,6 @@ impl QueryGraph {
                 &compiled,
                 &center_predicates,
                 flat_graph,
-                flat_vertex_cache,
             )?;
             crate::procedures::gcard_query::SAMPLING_VERTICES_PROCESSED
                 .fetch_add(scan.scanned_leaf_vertices as u64, Ordering::Relaxed);
@@ -6101,7 +6100,6 @@ impl QueryGraph {
         compiled: &CompiledN1Branch<'_>,
         center_predicates: &[ResolvedPredicate],
         flat_graph: &FlatGraph,
-        flat_vertex_cache: &Arc<DashMap<String, Vec<VertexId>>>,
     ) -> GCardResult<ExactN1LeafScan> {
         const MAX_LEAF_VERTICES: usize = 200_000;
         const MAX_MATCHING_LEAVES: usize = 20_000;
@@ -6130,27 +6128,40 @@ impl QueryGraph {
                     branch.leaf_arms[0].leaf_vertex_id
                 ))
             })?;
+        let mut predicate_parts = leaf_vertex
+            .predicates
+            .iter()
+            .map(|predicate| {
+                format!(
+                    "{}:{:?}:{:?}:{:?}",
+                    predicate.property, predicate.op, predicate.value, predicate.values
+                )
+            })
+            .collect::<Vec<_>>();
+        predicate_parts.sort_unstable();
         let cache_key = format!(
-            "predicate-n1-exact-leaf:{}:{:?}",
-            arm.leaf_label, leaf_vertex.predicates
+            "predicate-n1-exact-leaf:{}:{}",
+            arm.leaf_label,
+            predicate_parts.join("&")
         );
         let (matching_leaves, scanned_leaf_vertices, cache_hit) =
-            if let Some(cached) = flat_vertex_cache.get(&cache_key) {
-                (cached.clone(), 0, true)
-            } else {
-                let mut matching = Vec::new();
-                if let Some(rows) = flat_graph.vertex_property_rows(&arm.leaf_label) {
-                    for (&leaf_vid, properties) in rows {
-                        if Self::properties_pass_predicates(
-                            Some(properties.as_slice()),
-                            &arm.leaf_predicates,
-                        )? {
-                            matching.push(leaf_vid);
+            match flat_graph.predicate_vertex_cache().entry(cache_key) {
+                dashmap::mapref::entry::Entry::Occupied(cached) => (cached.get().clone(), 0, true),
+                dashmap::mapref::entry::Entry::Vacant(entry) => {
+                    let mut matching = Vec::new();
+                    if let Some(rows) = flat_graph.vertex_property_rows(&arm.leaf_label) {
+                        for (&leaf_vid, properties) in rows {
+                            if Self::properties_pass_predicates(
+                                Some(properties.as_slice()),
+                                &arm.leaf_predicates,
+                            )? {
+                                matching.push(leaf_vid);
+                            }
                         }
                     }
+                    entry.insert(matching.clone());
+                    (matching, leaf_population, false)
                 }
-                flat_vertex_cache.insert(cache_key, matching.clone());
-                (matching, leaf_population, false)
             };
         if matching_leaves.len() > MAX_MATCHING_LEAVES {
             return Ok(ExactN1LeafScan {
