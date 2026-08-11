@@ -6130,7 +6130,11 @@ impl QueryGraph {
     ) -> GCardResult<ExactN1LeafScan> {
         const MAX_LEAF_VERTICES: usize = 200_000;
         const MAX_MATCHING_LEAVES: usize = 20_000;
-        const MAX_TRAVERSED_EDGES: usize = 100_000;
+        // Keep runtime exact work inside the estimator's latency envelope.
+        // On JOB-M, 4,630 visits complete in ~5 ms while 25,902 visits can
+        // exceed 200 ms on a cold predicate cache. Larger tails retain the
+        // sampled fallback instead of spending the query's entire budget.
+        const MAX_TRAVERSED_EDGES: usize = 5_000;
 
         let arm = &compiled.leaf_arms[0];
         let leaf_population = flat_graph.vertex_count_by_label(&arm.leaf_label);
