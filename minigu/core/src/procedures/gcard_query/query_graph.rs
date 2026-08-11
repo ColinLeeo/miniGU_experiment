@@ -6103,7 +6103,7 @@ impl QueryGraph {
     ) -> GCardResult<ExactN1LeafScan> {
         const MAX_LEAF_VERTICES: usize = 200_000;
         const MAX_MATCHING_LEAVES: usize = 20_000;
-        const MAX_TRAVERSED_EDGES: usize = 160_000;
+        const MAX_TRAVERSED_EDGES: usize = 100_000;
 
         let arm = &compiled.leaf_arms[0];
         let leaf_population = flat_graph.vertex_count_by_label(&arm.leaf_label);
