@@ -125,6 +125,13 @@ struct ExactN1LeafScan {
     completed: bool,
 }
 
+struct ExactTreeCount {
+    cardinality: u64,
+    anchor_query_vertex: VertexId,
+    anchor_candidates: usize,
+    adjacency_work: usize,
+}
+
 struct RawStarExtraction {
     local_pcfs: HashMap<VertexId, Vec<Pcf>>,
     consumed_edges: HashSet<EdgeId>,
@@ -1213,7 +1220,10 @@ mod tests {
                 target: "vertex".to_string(),
                 id: 3,
                 property: "keep".to_string(),
-                op: ComparisonOp::Eq,
+                // Use a non-indexable range predicate so this test continues
+                // to exercise the sampled zero-hit fallback. Equality empty
+                // sets are now proved by bounded exact tree enumeration.
+                op: ComparisonOp::Gt,
                 value: ScalarValue::Int64(Some(1)),
                 values: Vec::new(),
             }],
@@ -1828,6 +1838,147 @@ mod tests {
             QueryGraph::exact_leaf_index_candidates(&flat_graph, "keyword", &[like_predicate]),
             None
         );
+    }
+
+    #[test]
+    fn bounded_exact_tree_proves_empty_cross_branch_join() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "movie_keyword"),
+                vertex(2, "title"),
+                vertex(3, "keyword"),
+                vertex(4, "link_type"),
+                vertex(5, "movie_link"),
+            ],
+            edges: vec![
+                edge(1, "keyword_to_mk", 3, 1),
+                edge(2, "title_to_mk", 2, 1),
+                edge(3, "title_to_ml", 2, 5),
+                edge(4, "link_type_to_ml", 4, 5),
+            ],
+            predicates: vec![PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 3,
+                property: "keyword".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::String(Some("rare".to_string())),
+                values: Vec::new(),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("keyword", vec!["keyword".to_string()]);
+        builder.add_vertex(
+            30,
+            "keyword",
+            vec![ScalarValue::String(Some("rare".to_string()))],
+        );
+        builder.add_vertex(20, "movie_keyword", vec![]);
+        builder.add_vertex(10, "title", vec![]);
+        builder.add_edge(
+            1,
+            30,
+            "keyword",
+            20,
+            "movie_keyword",
+            "keyword_to_mk",
+            vec![],
+        );
+        builder.add_edge(2, 10, "title", 20, "movie_keyword", "title_to_mk", vec![]);
+        // The selective title has no movie_link. Add the edge type for a
+        // different title so the exact traversal observes an empty CSR row.
+        builder.add_vertex(11, "title", vec![]);
+        builder.add_vertex(40, "movie_link", vec![]);
+        builder.add_vertex(50, "link_type", vec![]);
+        builder.add_edge(3, 11, "title", 40, "movie_link", "title_to_ml", vec![]);
+        builder.add_edge(
+            4,
+            50,
+            "link_type",
+            40,
+            "movie_link",
+            "link_type_to_ml",
+            vec![],
+        );
+        let flat_graph = builder.build();
+
+        let exact = query_graph
+            .bounded_exact_tree_cardinality(&flat_graph)
+            .unwrap()
+            .expect("the rare keyword should make the whole tree enumerable");
+        assert_eq!(exact.anchor_query_vertex, 3);
+        assert_eq!(exact.anchor_candidates, 1);
+        assert_eq!(exact.cardinality, 0);
+    }
+
+    #[test]
+    fn bounded_exact_tree_reads_unfiltered_leaf_degree_without_expansion() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "movie_keyword"),
+                vertex(2, "title"),
+                vertex(3, "keyword"),
+                vertex(4, "cast_info"),
+            ],
+            edges: vec![
+                edge(1, "keyword_to_mk", 3, 1),
+                edge(2, "title_to_mk", 2, 1),
+                edge(3, "title_to_cast", 2, 4),
+            ],
+            predicates: vec![PredicateDef {
+                predicate_id: None,
+                target: "vertex".to_string(),
+                id: 3,
+                property: "keyword".to_string(),
+                op: ComparisonOp::Eq,
+                value: ScalarValue::String(Some("rare".to_string())),
+                values: Vec::new(),
+            }],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("keyword", vec!["keyword".to_string()]);
+        builder.add_vertex(
+            30,
+            "keyword",
+            vec![ScalarValue::String(Some("rare".to_string()))],
+        );
+        builder.add_vertex(20, "movie_keyword", vec![]);
+        builder.add_vertex(10, "title", vec![]);
+        builder.add_edge(
+            1,
+            30,
+            "keyword",
+            20,
+            "movie_keyword",
+            "keyword_to_mk",
+            vec![],
+        );
+        builder.add_edge(2, 10, "title", 20, "movie_keyword", "title_to_mk", vec![]);
+        for offset in 0..3 {
+            let cast = 40 + offset;
+            builder.add_vertex(cast, "cast_info", vec![]);
+            builder.add_edge(
+                10 + offset,
+                10,
+                "title",
+                cast,
+                "cast_info",
+                "title_to_cast",
+                vec![],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let exact = query_graph
+            .bounded_exact_tree_cardinality(&flat_graph)
+            .unwrap()
+            .expect("the selective tree should complete exactly");
+        assert_eq!(exact.cardinality, 3);
+        assert_eq!(exact.adjacency_work, 3);
     }
 
     #[test]
@@ -4813,6 +4964,53 @@ impl QueryGraph {
             return Ok(vec![(abstract_graph, 0)]);
         }
 
+        // A rare equality/IN predicate can make the whole acyclic query cheap
+        // enough to enumerate exactly. The helper has both a structural work
+        // cap and a wall-time cap; exceeding either returns None and preserves
+        // the normal sampled estimator unchanged.
+        if !matches!(predicate_apply_type, PredicateApplyType::IGNORE) {
+            if let Some(exact) =
+                self.bounded_exact_tree_cardinality(flat_graph.ok_or_else(|| {
+                    GCardError::InvalidState(
+                        "predicate-aware exact tree counting requires FlatGraph".to_string(),
+                    )
+                })?)?
+            {
+                if decomp_trace_enabled() {
+                    decomp_trace_line(format!(
+                        "[bounded-exact-tree] anchor={} candidates={} adjacency_work={} cardinality={} completed=true",
+                        exact.anchor_query_vertex,
+                        exact.anchor_candidates,
+                        exact.adjacency_work,
+                        exact.cardinality,
+                    ));
+                }
+                let local_pcf = if exact.cardinality == 0 {
+                    Pcf {
+                        constants: vec![0.0],
+                        right_interval_edges: vec![0.0],
+                        cumulative_rows: vec![0.0],
+                    }
+                } else {
+                    Pcf::from_degree_sequence(&[exact.cardinality], 0.01, false)?
+                };
+                let anchor = self
+                    .inner
+                    .vertices
+                    .get(&exact.anchor_query_vertex)
+                    .ok_or_else(|| {
+                        GCardError::VertexNotFound(format!(
+                            "exact tree anchor {} is missing",
+                            exact.anchor_query_vertex
+                        ))
+                    })?;
+                let mut abstract_graph = AbstractGraph::new();
+                abstract_graph.add_vertex(anchor.clone());
+                abstract_graph.add_local_pcf(anchor.id, local_pcf);
+                return Ok(vec![(abstract_graph, 0)]);
+            }
+        }
+
         if decomp_trace_enabled() {
             decomp_trace_line("==== GCARD decomposition trace begin ====");
             decomp_trace_line(format!(
@@ -6434,6 +6632,224 @@ impl QueryGraph {
             value_index_hit,
             completed: true,
         })
+    }
+
+    fn bounded_exact_tree_cardinality(
+        &self,
+        flat_graph: &FlatGraph,
+    ) -> GCardResult<Option<ExactTreeCount>> {
+        const MAX_ANCHOR_CANDIDATES: usize = 1_024;
+        const MAX_ADJACENCY_WORK: usize = 20_000;
+        const MAX_WALL_TIME: std::time::Duration = std::time::Duration::from_millis(20);
+
+        if self.inner.vertices.len() < 2
+            || self.inner.edges.len() + 1 != self.inner.vertices.len()
+            || self.has_cycle()
+        {
+            return Ok(None);
+        }
+
+        let mut resolved_vertices = HashMap::<VertexId, Vec<ResolvedPredicate>>::new();
+        for (&vertex_id, vertex) in &self.inner.vertices {
+            resolved_vertices.insert(
+                vertex_id,
+                Self::resolve_vertex_predicates(flat_graph, &vertex.label, &vertex.predicates)?,
+            );
+        }
+        let mut resolved_edges = HashMap::<EdgeId, Vec<ResolvedPredicate>>::new();
+        for (&edge_id, edge) in &self.inner.edges {
+            resolved_edges.insert(
+                edge_id,
+                Self::resolve_edge_predicates(flat_graph, &edge.label, &edge.predicates)?,
+            );
+        }
+
+        let mut best_anchor: Option<(VertexId, Vec<VertexId>)> = None;
+        for (&vertex_id, vertex) in &self.inner.vertices {
+            let predicates = &resolved_vertices[&vertex_id];
+            let Some(candidates) =
+                Self::exact_leaf_index_candidates(flat_graph, &vertex.label, predicates)
+            else {
+                continue;
+            };
+            if candidates.len() > MAX_ANCHOR_CANDIDATES {
+                continue;
+            }
+            let mut matching = Vec::with_capacity(candidates.len());
+            for candidate in candidates {
+                if Self::properties_pass_predicates(
+                    flat_graph.vertex_props(&vertex.label, candidate),
+                    predicates,
+                )? {
+                    matching.push(candidate);
+                }
+            }
+            if matching.is_empty() {
+                return Ok(Some(ExactTreeCount {
+                    cardinality: 0,
+                    anchor_query_vertex: vertex_id,
+                    anchor_candidates: 0,
+                    adjacency_work: 0,
+                }));
+            }
+            if best_anchor
+                .as_ref()
+                .is_none_or(|(_, current)| matching.len() < current.len())
+            {
+                best_anchor = Some((vertex_id, matching));
+            }
+        }
+
+        let Some((anchor_query_vertex, anchor_candidates)) = best_anchor else {
+            return Ok(None);
+        };
+        let started = std::time::Instant::now();
+        let mut adjacency_work = 0usize;
+        let mut cardinality = 0u128;
+        for &anchor_data_vertex in &anchor_candidates {
+            let Some(rows) = self.bounded_exact_tree_count_from(
+                anchor_query_vertex,
+                None,
+                anchor_data_vertex,
+                flat_graph,
+                &resolved_vertices,
+                &resolved_edges,
+                &mut adjacency_work,
+                MAX_ADJACENCY_WORK,
+                started,
+                MAX_WALL_TIME,
+            )?
+            else {
+                if decomp_trace_enabled() {
+                    decomp_trace_line(format!(
+                        "[bounded-exact-tree] anchor={} candidates={} adjacency_work={} completed=false reason=budget",
+                        anchor_query_vertex,
+                        anchor_candidates.len(),
+                        adjacency_work,
+                    ));
+                }
+                return Ok(None);
+            };
+            cardinality = cardinality.saturating_add(rows);
+        }
+
+        Ok(Some(ExactTreeCount {
+            cardinality: cardinality.min(u64::MAX as u128) as u64,
+            anchor_query_vertex,
+            anchor_candidates: anchor_candidates.len(),
+            adjacency_work,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bounded_exact_tree_count_from(
+        &self,
+        query_vertex_id: VertexId,
+        parent_query_vertex: Option<VertexId>,
+        data_vertex_id: VertexId,
+        flat_graph: &FlatGraph,
+        resolved_vertices: &HashMap<VertexId, Vec<ResolvedPredicate>>,
+        resolved_edges: &HashMap<EdgeId, Vec<ResolvedPredicate>>,
+        adjacency_work: &mut usize,
+        max_adjacency_work: usize,
+        started: std::time::Instant,
+        max_wall_time: std::time::Duration,
+    ) -> GCardResult<Option<u128>> {
+        if *adjacency_work > max_adjacency_work || started.elapsed() > max_wall_time {
+            return Ok(None);
+        }
+        let query_vertex = self.inner.vertices.get(&query_vertex_id).ok_or_else(|| {
+            GCardError::VertexNotFound(format!("query vertex {} not found", query_vertex_id))
+        })?;
+        if !Self::properties_pass_predicates(
+            flat_graph.vertex_props(&query_vertex.label, data_vertex_id),
+            &resolved_vertices[&query_vertex_id],
+        )? {
+            return Ok(Some(0));
+        }
+
+        let mut result = 1u128;
+        for (child_query_vertex, edge_id) in self.get_neighbor_edge_pairs(query_vertex_id) {
+            if Some(child_query_vertex) == parent_query_vertex {
+                continue;
+            }
+            let edge = self.inner.edges.get(&edge_id).ok_or_else(|| {
+                GCardError::EdgeNotFound(format!("query edge {} not found", edge_id))
+            })?;
+            let child = self
+                .inner
+                .vertices
+                .get(&child_query_vertex)
+                .ok_or_else(|| {
+                    GCardError::VertexNotFound(format!(
+                        "query child vertex {} not found",
+                        child_query_vertex
+                    ))
+                })?;
+            let outgoing = edge.src_vertex_id == query_vertex_id;
+            let Some(csr) =
+                flat_graph.hop_csr_for_label(&query_vertex.label, &edge.label, outgoing)
+            else {
+                return Ok(Some(0));
+            };
+            let neighbors = csr.neighbors_slice(data_vertex_id);
+            let child_is_unfiltered_leaf = child.predicates.is_empty()
+                && edge.predicates.is_empty()
+                && self
+                    .get_neighbor_edge_pairs(child_query_vertex)
+                    .into_iter()
+                    .all(|(neighbor, _)| neighbor == query_vertex_id);
+            let branch_rows = if child_is_unfiltered_leaf {
+                // Exact degree is already encoded in the CSR row length.
+                // Charge one bounded operation rather than scanning the row.
+                if adjacency_work.saturating_add(1) > max_adjacency_work {
+                    return Ok(None);
+                }
+                *adjacency_work = adjacency_work.saturating_add(1);
+                neighbors.len() as u128
+            } else {
+                if adjacency_work.saturating_add(neighbors.len()) > max_adjacency_work {
+                    return Ok(None);
+                }
+                *adjacency_work += neighbors.len();
+                let mut subtotal = 0u128;
+                for (neighbor_index, &(child_data_vertex, data_edge_id)) in
+                    neighbors.iter().enumerate()
+                {
+                    if neighbor_index % 64 == 0 && started.elapsed() > max_wall_time {
+                        return Ok(None);
+                    }
+                    if !Self::properties_pass_predicates(
+                        flat_graph.edge_props(data_edge_id),
+                        &resolved_edges[&edge_id],
+                    )? {
+                        continue;
+                    }
+                    let Some(child_rows) = self.bounded_exact_tree_count_from(
+                        child_query_vertex,
+                        Some(query_vertex_id),
+                        child_data_vertex,
+                        flat_graph,
+                        resolved_vertices,
+                        resolved_edges,
+                        adjacency_work,
+                        max_adjacency_work,
+                        started,
+                        max_wall_time,
+                    )?
+                    else {
+                        return Ok(None);
+                    };
+                    subtotal = subtotal.saturating_add(child_rows);
+                }
+                subtotal
+            };
+            result = result.saturating_mul(branch_rows);
+            if result == 0 {
+                break;
+            }
+        }
+        Ok(Some(result))
     }
 
     /// Return a bounded exact-value candidate set for an equality/IN leaf

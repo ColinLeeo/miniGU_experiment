@@ -304,7 +304,9 @@ impl FlatGraphBuilder {
 // ── FlatGraph public API ──────────────────────────────────────────────────────
 
 impl FlatGraph {
-    const MAX_VALUE_INDEX_VERTICES: usize = 200_000;
+    // Include JOB-M's company_name dimension while still excluding million-row
+    // fact tables. This adds one bounded dimension, not a general fact index.
+    const MAX_VALUE_INDEX_VERTICES: usize = 300_000;
 
     fn scalar_hash(value: &ScalarValue) -> u64 {
         let mut hasher = DefaultHasher::new();
