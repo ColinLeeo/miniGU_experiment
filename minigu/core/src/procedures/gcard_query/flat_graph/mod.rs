@@ -131,6 +131,14 @@ pub struct FlatGraph {
     #[serde(skip)]
     bounded_vertex_value_index: Arc<HashMap<String, Vec<HashMap<u64, Vec<VertexId>>>>>,
 
+    /// Exact candidates for structured `LIKE "%(... )%"` predicates.
+    ///
+    /// Only balanced parenthesized segments from bounded `note` columns are
+    /// indexed. Callers re-evaluate the original SQL LIKE predicate, so hash
+    /// collisions can add work but cannot change the result.
+    #[serde(skip)]
+    bounded_structured_token_index: Arc<HashMap<String, Vec<HashMap<u64, Vec<VertexId>>>>>,
+
     // ── Pending structural changes ─────────────────────────────────────────────
     pending: PendingChanges,
 }
@@ -294,9 +302,11 @@ impl FlatGraphBuilder {
             graph_stats: self.graph_stats,
             predicate_vertex_cache: Arc::new(DashMap::new()),
             bounded_vertex_value_index: Arc::new(HashMap::new()),
+            bounded_structured_token_index: Arc::new(HashMap::new()),
             pending: PendingChanges::default(),
         };
         graph.rebuild_bounded_vertex_value_index();
+        graph.rebuild_bounded_structured_token_index();
         graph
     }
 }
@@ -304,6 +314,9 @@ impl FlatGraphBuilder {
 // ── FlatGraph public API ──────────────────────────────────────────────────────
 
 impl FlatGraph {
+    const MAX_STRUCTURED_TOKEN_BYTES: usize = 128;
+    const MAX_STRUCTURED_TOKEN_INDEX_VERTICES: usize = 5_000_000;
+    const MAX_STRUCTURED_TOKEN_REFS_PER_COLUMN: usize = 5_000_000;
     // Include JOB-M's company_name dimension while still excluding million-row
     // fact tables. This adds one bounded dimension, not a general fact index.
     const MAX_VALUE_INDEX_VERTICES: usize = 300_000;
@@ -367,6 +380,114 @@ impl FlatGraph {
         )
     }
 
+    fn parenthesized_token_hashes(value: &str) -> Vec<u64> {
+        let mut starts = Vec::new();
+        let mut hashes = HashSet::new();
+        for (index, character) in value.char_indices() {
+            match character {
+                '(' => starts.push(index),
+                ')' => {
+                    let Some(start) = starts.pop() else {
+                        continue;
+                    };
+                    let end = index + character.len_utf8();
+                    if end - start <= Self::MAX_STRUCTURED_TOKEN_BYTES {
+                        hashes.insert(Self::scalar_hash(&ScalarValue::String(Some(
+                            value[start..end].to_string(),
+                        ))));
+                    }
+                }
+                _ => {}
+            }
+        }
+        hashes.into_iter().collect()
+    }
+
+    fn structured_like_literal(pattern: &ScalarValue) -> Option<&str> {
+        let ScalarValue::String(Some(pattern)) = pattern else {
+            return None;
+        };
+        let literal = pattern.strip_prefix('%')?.strip_suffix('%')?;
+        if literal.len() > Self::MAX_STRUCTURED_TOKEN_BYTES
+            || !literal.starts_with('(')
+            || !literal.ends_with(')')
+            || literal.contains('%')
+            || literal.contains('_')
+        {
+            return None;
+        }
+        Some(literal)
+    }
+
+    /// Build a complete, bounded inverted index for parenthesized `note`
+    /// tokens. A column that exceeds the reference cap is discarded entirely;
+    /// a partial index could incorrectly prove that a value is absent.
+    fn rebuild_bounded_structured_token_index(&mut self) -> (usize, usize, usize) {
+        let mut index = HashMap::<String, Vec<HashMap<u64, Vec<VertexId>>>>::new();
+        let mut indexed_columns = 0usize;
+        let mut indexed_values = 0usize;
+        let mut indexed_vertex_ids = 0usize;
+        let mut labels = self.vertices_by_label.keys().cloned().collect::<Vec<_>>();
+        labels.sort_unstable();
+
+        for label in labels {
+            let Some(vertex_ids) = self.vertices_by_label.get(&label) else {
+                continue;
+            };
+            if vertex_ids.len() > Self::MAX_STRUCTURED_TOKEN_INDEX_VERTICES {
+                continue;
+            }
+            let Some(schema) = self.vertex_prop_schema.get(&label) else {
+                continue;
+            };
+            let Some(rows) = self.vertex_props.get(&label) else {
+                continue;
+            };
+            let mut columns = vec![HashMap::<u64, Vec<VertexId>>::new(); schema.len()];
+            let mut retained_any = false;
+            for (prop_index, property_name) in schema.iter().enumerate() {
+                if !property_name.eq_ignore_ascii_case("note") {
+                    continue;
+                }
+                let mut column = HashMap::<u64, Vec<VertexId>>::new();
+                let mut refs = 0usize;
+                let mut exceeded = false;
+                for (&vertex_id, properties) in rows {
+                    let Some(ScalarValue::String(Some(value))) = properties.get(prop_index) else {
+                        continue;
+                    };
+                    let token_hashes = Self::parenthesized_token_hashes(value);
+                    if refs.saturating_add(token_hashes.len())
+                        > Self::MAX_STRUCTURED_TOKEN_REFS_PER_COLUMN
+                    {
+                        exceeded = true;
+                        break;
+                    }
+                    refs += token_hashes.len();
+                    for token_hash in token_hashes {
+                        column.entry(token_hash).or_default().push(vertex_id);
+                    }
+                }
+                if exceeded {
+                    continue;
+                }
+                for vertex_ids in column.values_mut() {
+                    vertex_ids.sort_unstable();
+                }
+                indexed_columns += 1;
+                indexed_values += column.len();
+                indexed_vertex_ids += refs;
+                columns[prop_index] = column;
+                retained_any = true;
+            }
+            if retained_any {
+                index.insert(label, columns);
+            }
+        }
+        self.bounded_structured_token_index = Arc::new(index);
+        (indexed_columns, indexed_values, indexed_vertex_ids)
+    }
+
     pub fn export_bincode<P: AsRef<Path>>(&self, path: P) -> anyhow::Result<()> {
         let bytes = bincode::serialize(self)
             .map_err(|e| anyhow::anyhow!("failed to serialize FlatGraph: {}", e))?;
@@ -379,9 +500,11 @@ impl FlatGraph {
         let mut graph: Self = bincode::deserialize(&bytes)
             .map_err(|e| anyhow::anyhow!("failed to deserialize FlatGraph: {}", e))?;
         let (labels, columns, values, vertex_ids) = graph.rebuild_bounded_vertex_value_index();
+        let (token_columns, token_values, token_vertex_ids) =
+            graph.rebuild_bounded_structured_token_index();
         eprintln!(
-            "[database] bounded value index: labels={} columns={} values={} vertex_ids={}",
-            labels, columns, values, vertex_ids,
+            "[database] bounded value index: labels={} columns={} values={} vertex_ids={} structured_token_columns={} structured_token_values={} structured_token_vertex_ids={}",
+            labels, columns, values, vertex_ids, token_columns, token_values, token_vertex_ids,
         );
         Ok(graph)
     }
@@ -599,6 +722,21 @@ impl FlatGraph {
             .is_some_and(|column| !column.is_empty())
     }
 
+    pub(crate) fn structured_like_index_candidates(
+        &self,
+        label: &str,
+        prop_index: usize,
+        pattern: &ScalarValue,
+    ) -> Option<Vec<VertexId>> {
+        let literal = Self::structured_like_literal(pattern)?;
+        let column = self
+            .bounded_structured_token_index
+            .get(label)?
+            .get(prop_index)?;
+        let hash = Self::scalar_hash(&ScalarValue::String(Some(literal.to_string())));
+        Some(column.get(&hash).cloned().unwrap_or_default())
+    }
+
     /// Property values for an edge (indexed by schema position), or `None`.
     pub fn edge_props(&self, eid: EdgeId) -> Option<&[ScalarValue]> {
         self.edge_props.get(&eid).map(Vec::as_slice)
@@ -744,6 +882,7 @@ impl FlatGraph {
         }
         self.predicate_vertex_cache.clear();
         self.bounded_vertex_value_index = Arc::new(HashMap::new());
+        self.bounded_structured_token_index = Arc::new(HashMap::new());
         let t_total = std::time::Instant::now();
         let pending = std::mem::take(&mut self.pending);
         eprintln!(
@@ -1127,6 +1266,54 @@ mod tests {
         assert_eq!(
             restored.vertex_ids_by_exact_value("keyword", 0, &sequel),
             Some([1, 3].as_slice())
+        );
+    }
+
+    #[test]
+    fn structured_note_index_returns_exact_like_candidates_after_roundtrip() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("movie_companies", vec!["note".to_string()]);
+        builder.add_vertex(
+            1,
+            "movie_companies",
+            vec![ScalarValue::String(Some(
+                "released in (USA) on (VHS)".to_string(),
+            ))],
+        );
+        builder.add_vertex(
+            2,
+            "movie_companies",
+            vec![ScalarValue::String(Some("released in (USA)".to_string()))],
+        );
+        builder.add_vertex(
+            3,
+            "movie_companies",
+            vec![ScalarValue::String(Some(
+                "released in (France)".to_string(),
+            ))],
+        );
+        let graph = builder.build();
+        let usa = ScalarValue::String(Some("%(USA)%".to_string()));
+        assert_eq!(
+            graph.structured_like_index_candidates("movie_companies", 0, &usa),
+            Some(vec![1, 2])
+        );
+        assert_eq!(
+            graph.structured_like_index_candidates(
+                "movie_companies",
+                0,
+                &ScalarValue::String(Some("%USA%".to_string())),
+            ),
+            None
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        graph.export_bincode(&path).unwrap();
+        let restored = super::FlatGraph::import_bincode(&path).unwrap();
+        assert_eq!(
+            restored.structured_like_index_candidates("movie_companies", 0, &usa),
+            Some(vec![1, 2])
         );
     }
 

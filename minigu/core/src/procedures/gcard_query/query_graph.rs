@@ -1914,6 +1914,60 @@ mod tests {
     }
 
     #[test]
+    fn bounded_exact_tree_proves_disjoint_structured_like_tokens() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![vertex(1, "title"), vertex(2, "movie_companies")],
+            edges: vec![edge(1, "title_to_mc", 1, 2)],
+            predicates: vec![
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 2,
+                    property: "note".to_string(),
+                    op: ComparisonOp::Like,
+                    value: ScalarValue::String(Some("%(VHS)%".to_string())),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 2,
+                    property: "note".to_string(),
+                    op: ComparisonOp::Like,
+                    value: ScalarValue::String(Some("%(USA)%".to_string())),
+                    values: Vec::new(),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("movie_companies", vec!["note".to_string()]);
+        builder.add_vertex(10, "title", vec![]);
+        builder.add_vertex(
+            20,
+            "movie_companies",
+            vec![ScalarValue::String(Some("released on (VHS)".to_string()))],
+        );
+        builder.add_vertex(
+            21,
+            "movie_companies",
+            vec![ScalarValue::String(Some("released in (USA)".to_string()))],
+        );
+        builder.add_edge(1, 10, "title", 20, "movie_companies", "title_to_mc", vec![]);
+        builder.add_edge(2, 10, "title", 21, "movie_companies", "title_to_mc", vec![]);
+        let flat_graph = builder.build();
+
+        let exact = query_graph
+            .bounded_exact_tree_cardinality(&flat_graph)
+            .unwrap()
+            .expect("disjoint exact LIKE candidates should prove an empty tree");
+        assert_eq!(exact.anchor_query_vertex, 2);
+        assert_eq!(exact.anchor_candidates, 0);
+        assert_eq!(exact.cardinality, 0);
+    }
+
+    #[test]
     fn bounded_exact_tree_reads_unfiltered_leaf_degree_without_expansion() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![
@@ -6852,9 +6906,9 @@ impl QueryGraph {
         Ok(Some(result))
     }
 
-    /// Return a bounded exact-value candidate set for an equality/IN leaf
-    /// predicate. Hash collisions and additional predicates are verified by
-    /// the caller against the original property row.
+    /// Return a bounded indexed candidate set for equality/IN or a supported
+    /// structured LIKE predicate. Hash collisions and additional predicates
+    /// are verified by the caller against the original property row.
     fn exact_leaf_index_candidates(
         flat_graph: &FlatGraph,
         label: &str,
@@ -6862,26 +6916,47 @@ impl QueryGraph {
     ) -> Option<Vec<VertexId>> {
         let mut best: Option<Vec<VertexId>> = None;
         for predicate in predicates {
-            if !flat_graph.has_exact_vertex_value_index(label, predicate.prop_index) {
-                continue;
-            }
-            let mut candidates = match predicate.op {
-                ComparisonOp::Eq => flat_graph
-                    .vertex_ids_by_exact_value(label, predicate.prop_index, &predicate.value)
-                    .unwrap_or_default()
-                    .to_vec(),
-                ComparisonOp::In => predicate
-                    .values
-                    .iter()
-                    .flat_map(|value| {
+            let candidates = match predicate.op {
+                ComparisonOp::Eq
+                    if flat_graph.has_exact_vertex_value_index(label, predicate.prop_index) =>
+                {
+                    Some(
                         flat_graph
-                            .vertex_ids_by_exact_value(label, predicate.prop_index, value)
+                            .vertex_ids_by_exact_value(
+                                label,
+                                predicate.prop_index,
+                                &predicate.value,
+                            )
                             .unwrap_or_default()
+                            .to_vec(),
+                    )
+                }
+                ComparisonOp::In
+                    if flat_graph.has_exact_vertex_value_index(label, predicate.prop_index) =>
+                {
+                    Some(
+                        predicate
+                            .values
                             .iter()
-                            .copied()
-                    })
-                    .collect(),
-                _ => continue,
+                            .flat_map(|value| {
+                                flat_graph
+                                    .vertex_ids_by_exact_value(label, predicate.prop_index, value)
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .copied()
+                            })
+                            .collect(),
+                    )
+                }
+                ComparisonOp::Like => flat_graph.structured_like_index_candidates(
+                    label,
+                    predicate.prop_index,
+                    &predicate.value,
+                ),
+                _ => None,
+            };
+            let Some(mut candidates) = candidates else {
+                continue;
             };
             candidates.sort_unstable();
             candidates.dedup();
