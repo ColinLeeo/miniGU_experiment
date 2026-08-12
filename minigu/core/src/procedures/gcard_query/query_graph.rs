@@ -1953,6 +1953,114 @@ mod tests {
     }
 
     #[test]
+    fn bounded_exact_tree_prefers_the_cheaper_indexed_anchor() {
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "company_name"),
+                vertex(2, "movie_companies"),
+                vertex(3, "title"),
+                vertex(4, "movie_keyword"),
+                vertex(5, "keyword"),
+            ],
+            edges: vec![
+                edge(1, "company_name_to_mc", 1, 2),
+                edge(2, "title_to_mc", 3, 2),
+                edge(3, "title_to_mk", 3, 4),
+                edge(4, "keyword_to_mk", 5, 4),
+            ],
+            predicates: vec![
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 1,
+                    property: "country_code".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::String(Some("[sm]".to_string())),
+                    values: Vec::new(),
+                },
+                PredicateDef {
+                    predicate_id: None,
+                    target: "vertex".to_string(),
+                    id: 5,
+                    property: "keyword".to_string(),
+                    op: ComparisonOp::Eq,
+                    value: ScalarValue::String(Some("rare".to_string())),
+                    values: Vec::new(),
+                },
+            ],
+        };
+        let query_graph = query.build_graph().unwrap();
+
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("company_name", vec!["country_code".to_string()]);
+        builder.set_vertex_prop_schema("keyword", vec!["keyword".to_string()]);
+        builder.add_vertex(
+            10,
+            "company_name",
+            vec![ScalarValue::String(Some("[sm]".to_string()))],
+        );
+        builder.add_vertex(
+            11,
+            "company_name",
+            vec![ScalarValue::String(Some("[us]".to_string()))],
+        );
+        builder.add_vertex(
+            50,
+            "keyword",
+            vec![ScalarValue::String(Some("rare".to_string()))],
+        );
+
+        // The matching company has an empty first-hop row. A non-matching
+        // company establishes the edge type without changing that fact.
+        builder.add_vertex(20, "movie_companies", vec![]);
+        builder.add_vertex(30, "title", vec![]);
+        builder.add_edge(
+            1,
+            11,
+            "company_name",
+            20,
+            "movie_companies",
+            "company_name_to_mc",
+            vec![],
+        );
+        builder.add_edge(2, 30, "title", 20, "movie_companies", "title_to_mc", vec![]);
+
+        // The competing one-row keyword index has a more expensive first hop.
+        for offset in 0..3 {
+            let movie_keyword = 40 + offset;
+            builder.add_vertex(movie_keyword, "movie_keyword", vec![]);
+            builder.add_edge(
+                10 + offset,
+                50,
+                "keyword",
+                movie_keyword,
+                "movie_keyword",
+                "keyword_to_mk",
+                vec![],
+            );
+            builder.add_edge(
+                20 + offset,
+                30,
+                "title",
+                movie_keyword,
+                "movie_keyword",
+                "title_to_mk",
+                vec![],
+            );
+        }
+        let flat_graph = builder.build();
+
+        let exact = query_graph
+            .bounded_exact_tree_cardinality(&flat_graph)
+            .unwrap()
+            .expect("the cheaper company anchor should prove the tree empty");
+        assert_eq!(exact.anchor_query_vertex, 1);
+        assert_eq!(exact.anchor_candidates, 1);
+        assert_eq!(exact.adjacency_work, 0);
+        assert_eq!(exact.cardinality, 0);
+    }
+
+    #[test]
     fn bounded_exact_tree_proves_disjoint_structured_like_tokens() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![vertex(1, "title"), vertex(2, "movie_companies")],
@@ -6731,9 +6839,10 @@ impl QueryGraph {
         &self,
         flat_graph: &FlatGraph,
     ) -> GCardResult<Option<ExactTreeCount>> {
-        const MAX_ANCHOR_CANDIDATES: usize = 1_024;
+        const MAX_ANCHOR_CANDIDATES: usize = 20_000;
         const MAX_ADJACENCY_WORK: usize = 20_000;
         const MAX_WALL_TIME: std::time::Duration = std::time::Duration::from_millis(20);
+        let started = std::time::Instant::now();
 
         if self.inner.vertices.len() < 2
             || self.inner.edges.len() + 1 != self.inner.vertices.len()
@@ -6757,8 +6866,11 @@ impl QueryGraph {
             );
         }
 
-        let mut best_anchor: Option<(VertexId, Vec<VertexId>)> = None;
+        let mut best_anchor: Option<(usize, VertexId, Vec<VertexId>)> = None;
         for (&vertex_id, vertex) in &self.inner.vertices {
+            if started.elapsed() > MAX_WALL_TIME {
+                return Ok(None);
+            }
             let predicates = &resolved_vertices[&vertex_id];
             let Some(candidates) =
                 Self::exact_leaf_index_candidates(flat_graph, &vertex.label, predicates)
@@ -6769,7 +6881,10 @@ impl QueryGraph {
                 continue;
             }
             let mut matching = Vec::with_capacity(candidates.len());
-            for candidate in candidates {
+            for (candidate_index, candidate) in candidates.into_iter().enumerate() {
+                if candidate_index % 64 == 0 && started.elapsed() > MAX_WALL_TIME {
+                    return Ok(None);
+                }
                 if Self::properties_pass_predicates(
                     flat_graph.vertex_props(&vertex.label, candidate),
                     predicates,
@@ -6785,18 +6900,30 @@ impl QueryGraph {
                     adjacency_work: 0,
                 }));
             }
+            let Some(first_hop_work) = self.bounded_exact_tree_anchor_first_hop_work(
+                vertex_id,
+                &matching,
+                flat_graph,
+                MAX_ADJACENCY_WORK,
+                started,
+                MAX_WALL_TIME,
+            ) else {
+                continue;
+            };
+            let candidate_key = (first_hop_work, matching.len(), vertex_id);
             if best_anchor
                 .as_ref()
-                .is_none_or(|(_, current)| matching.len() < current.len())
+                .is_none_or(|(work, current_vertex, current)| {
+                    candidate_key < (*work, current.len(), *current_vertex)
+                })
             {
-                best_anchor = Some((vertex_id, matching));
+                best_anchor = Some((first_hop_work, vertex_id, matching));
             }
         }
 
-        let Some((anchor_query_vertex, anchor_candidates)) = best_anchor else {
+        let Some((_first_hop_work, anchor_query_vertex, anchor_candidates)) = best_anchor else {
             return Ok(None);
         };
-        let started = std::time::Instant::now();
         let mut adjacency_work = 0usize;
         let mut cardinality = 0u128;
         for &anchor_data_vertex in &anchor_candidates {
@@ -6832,6 +6959,48 @@ impl QueryGraph {
             anchor_candidates: anchor_candidates.len(),
             adjacency_work,
         }))
+    }
+
+    fn bounded_exact_tree_anchor_first_hop_work(
+        &self,
+        query_vertex_id: VertexId,
+        candidates: &[VertexId],
+        flat_graph: &FlatGraph,
+        max_work: usize,
+        started: std::time::Instant,
+        max_wall_time: std::time::Duration,
+    ) -> Option<usize> {
+        let query_vertex = self.inner.vertices.get(&query_vertex_id)?;
+        let mut work = 0usize;
+        for (candidate_index, &data_vertex_id) in candidates.iter().enumerate() {
+            if candidate_index % 64 == 0 && started.elapsed() > max_wall_time {
+                return None;
+            }
+            for (child_query_vertex, edge_id) in self.get_neighbor_edge_pairs(query_vertex_id) {
+                let edge = self.inner.edges.get(&edge_id)?;
+                let child = self.inner.vertices.get(&child_query_vertex)?;
+                let outgoing = edge.src_vertex_id == query_vertex_id;
+                let neighbors = flat_graph
+                    .hop_csr_for_label(&query_vertex.label, &edge.label, outgoing)
+                    .map(|csr| csr.neighbors_slice(data_vertex_id))
+                    .unwrap_or_default();
+                let child_is_unfiltered_leaf = child.predicates.is_empty()
+                    && edge.predicates.is_empty()
+                    && self
+                        .get_neighbor_edge_pairs(child_query_vertex)
+                        .into_iter()
+                        .all(|(neighbor, _)| neighbor == query_vertex_id);
+                work = work.saturating_add(if child_is_unfiltered_leaf {
+                    1
+                } else {
+                    neighbors.len()
+                });
+                if work > max_work {
+                    return None;
+                }
+            }
+        }
+        Some(work)
     }
 
     #[allow(clippy::too_many_arguments)]
