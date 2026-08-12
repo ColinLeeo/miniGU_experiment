@@ -1841,6 +1841,45 @@ mod tests {
     }
 
     #[test]
+    fn indexed_predicate_candidates_intersect_conjuncts() {
+        let mut builder = FlatGraphBuilder::new();
+        builder.set_vertex_prop_schema("movie_companies", vec!["note".to_string()]);
+        for (vertex_id, note) in [
+            (1, "released on (VHS)"),
+            (2, "released in (USA)"),
+            (3, "released on (VHS) in (USA)"),
+        ] {
+            builder.add_vertex(
+                vertex_id,
+                "movie_companies",
+                vec![ScalarValue::String(Some(note.to_string()))],
+            );
+        }
+        let flat_graph = builder.build();
+        let predicates = [
+            ResolvedPredicate {
+                predicate_id: None,
+                prop_index: 0,
+                op: ComparisonOp::Like,
+                value: ScalarValue::String(Some("%(VHS)%".to_string())),
+                values: Vec::new(),
+            },
+            ResolvedPredicate {
+                predicate_id: None,
+                prop_index: 0,
+                op: ComparisonOp::Like,
+                value: ScalarValue::String(Some("%(USA)%".to_string())),
+                values: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            QueryGraph::exact_leaf_index_candidates(&flat_graph, "movie_companies", &predicates,),
+            Some(vec![3])
+        );
+    }
+
+    #[test]
     fn bounded_exact_tree_proves_empty_cross_branch_join() {
         let query = crate::procedures::gcard_query::types::Query {
             vertices: vec![
@@ -6914,7 +6953,7 @@ impl QueryGraph {
         label: &str,
         predicates: &[ResolvedPredicate],
     ) -> Option<Vec<VertexId>> {
-        let mut best: Option<Vec<VertexId>> = None;
+        let mut combined: Option<Vec<VertexId>> = None;
         for predicate in predicates {
             let candidates = match predicate.op {
                 ComparisonOp::Eq
@@ -6960,14 +6999,32 @@ impl QueryGraph {
             };
             candidates.sort_unstable();
             candidates.dedup();
-            if best
-                .as_ref()
-                .is_none_or(|current| candidates.len() < current.len())
-            {
-                best = Some(candidates);
+            combined = Some(match combined {
+                None => candidates,
+                Some(current) => Self::intersect_sorted_vertex_ids(&current, &candidates),
+            });
+            if combined.as_ref().is_some_and(Vec::is_empty) {
+                break;
             }
         }
-        best
+        combined
+    }
+
+    fn intersect_sorted_vertex_ids(left: &[VertexId], right: &[VertexId]) -> Vec<VertexId> {
+        let mut result = Vec::with_capacity(left.len().min(right.len()));
+        let (mut left_index, mut right_index) = (0usize, 0usize);
+        while left_index < left.len() && right_index < right.len() {
+            match left[left_index].cmp(&right[right_index]) {
+                std::cmp::Ordering::Less => left_index += 1,
+                std::cmp::Ordering::Greater => right_index += 1,
+                std::cmp::Ordering::Equal => {
+                    result.push(left[left_index]);
+                    left_index += 1;
+                    right_index += 1;
+                }
+            }
+        }
+        result
     }
 
     fn exact_n1_tail_planned_edges(
