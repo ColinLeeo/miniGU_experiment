@@ -2583,7 +2583,9 @@ mod tests {
             .build_abstract_edge_candidates_for_path(&path, 2, &catalog)
             .unwrap();
 
-        assert_eq!(candidates.len(), 3);
+        // Three original decompositions plus one bounded N1 refinement for
+        // each of the two mixed-direction ranges.
+        assert_eq!(candidates.len(), 5);
         assert!(
             candidates
                 .iter()
@@ -2595,6 +2597,54 @@ mod tests {
                 .iter()
                 .map(|edge| edge.original_edge_ids.as_slice())
                 .eq([&[5][..], &[4, 3][..], &[1, 2][..]])
+        }));
+    }
+
+    #[test]
+    fn mixed_direction_functional_range_keeps_unit_edge_candidate() {
+        // company -> movie_company is one-to-many while movie_company -> title
+        // is many-to-one. The two-hop path is not functional end-to-end, but the
+        // first edge must remain visible so adding company to an existing
+        // movie_company state cannot multiply its cardinality.
+        let query = crate::procedures::gcard_query::types::Query {
+            vertices: vec![
+                vertex(1, "company"),
+                vertex(2, "movie_company"),
+                vertex(3, "title"),
+            ],
+            edges: vec![
+                edge(10, "company_to_movie_company", 1, 2),
+                edge(11, "title_to_movie_company", 3, 2),
+            ],
+            predicates: Vec::new(),
+        };
+        let query_graph = query.build_graph().unwrap();
+        let path = Path {
+            start: 1,
+            end: 3,
+            vertices: vec![1, 2, 3],
+            edges: vec![10, 11],
+        };
+        let mut catalog = DegreeSeqGraphCompressed::new();
+        catalog.edge_cardinalities.insert(
+            "company_to_movie_company".to_string(),
+            EdgeCardinality::OneToMany,
+        );
+        catalog.edge_cardinalities.insert(
+            "title_to_movie_company".to_string(),
+            EdgeCardinality::OneToMany,
+        );
+
+        let candidates = query_graph
+            .build_abstract_edge_candidates_for_path(&path, 2, &catalog)
+            .unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates.iter().any(|edges| {
+            edges
+                .iter()
+                .map(|edge| edge.original_edge_ids.as_slice())
+                .eq([&[10][..], &[11][..]])
         }));
     }
 }
@@ -4455,6 +4505,22 @@ impl QueryGraph {
                 Self::trace_abstract_edge_set(candidates.last().map(Vec::as_slice).unwrap_or(&[]))
             ));
         }
+        if let Some(refined_ranges) = self.refine_ranges_at_internal_functional_edges(
+            path,
+            &functional_ranges,
+            degree_seq_graph,
+        )? {
+            add_ranges(refined_ranges.clone(), &mut candidates)?;
+            if decomp_trace_enabled() {
+                decomp_trace_line(format!(
+                    "[path-candidate] mode=internal_functional_refine ranges={} abstract_edges={}",
+                    self.trace_ranges(path, &refined_ranges),
+                    Self::trace_abstract_edge_set(
+                        candidates.last().map(Vec::as_slice).unwrap_or(&[])
+                    )
+                ));
+            }
+        }
 
         for ranges in self.abstract_edge_range_variants_for_path(path, k) {
             let before = candidates.len();
@@ -4475,12 +4541,73 @@ impl QueryGraph {
                     ));
                 }
             }
+            if let Some(refined_ranges) =
+                self.refine_ranges_at_internal_functional_edges(path, &ranges, degree_seq_graph)?
+            {
+                let before = candidates.len();
+                add_ranges(refined_ranges.clone(), &mut candidates)?;
+                if decomp_trace_enabled() && candidates.len() > before {
+                    decomp_trace_line(format!(
+                        "[path-candidate] mode=range_variant_internal_functional_refine ranges={} abstract_edges={}",
+                        self.trace_ranges(path, &refined_ranges),
+                        Self::trace_abstract_edge_set(
+                            candidates.last().map(Vec::as_slice).unwrap_or(&[])
+                        )
+                    ));
+                }
+            }
         }
 
         if decomp_trace_enabled() {
             decomp_trace_line(format!("[path-candidate] total={}", candidates.len()));
         }
         Ok(candidates)
+    }
+
+    fn refine_ranges_at_internal_functional_edges(
+        &self,
+        path: &Path,
+        ranges: &[(usize, usize)],
+        degree_seq_graph: &DegreeSeqGraphCompressed,
+    ) -> GCardResult<Option<Vec<(usize, usize)>>> {
+        if !functional_refine_enabled() {
+            return Ok(None);
+        }
+
+        let mut refined = Vec::with_capacity(ranges.len());
+        let mut changed = false;
+        for &(start, end) in ranges {
+            if end.saturating_sub(start) <= 1 {
+                refined.push((start, end));
+                continue;
+            }
+
+            let abstract_edge = self.build_abstract_edge_from_range(path, start, end)?;
+            if self.functional_direction_for_abstract_edge(&abstract_edge, degree_seq_graph)
+                != FunctionalDirection::None
+            {
+                refined.push((start, end));
+                continue;
+            }
+
+            let mut nonfunctional_start = start;
+            for edge_idx in start..end {
+                if !self.edge_is_functional(path.edges[edge_idx], degree_seq_graph) {
+                    continue;
+                }
+                if nonfunctional_start < edge_idx {
+                    refined.push((nonfunctional_start, edge_idx));
+                }
+                refined.push((edge_idx, edge_idx + 1));
+                nonfunctional_start = edge_idx + 1;
+                changed = true;
+            }
+            if nonfunctional_start < end {
+                refined.push((nonfunctional_start, end));
+            }
+        }
+
+        Ok(changed.then_some(refined))
     }
 
     fn abstract_edge_ranges_for_path(&self, path: &Path, k: usize) -> Vec<(usize, usize)> {
