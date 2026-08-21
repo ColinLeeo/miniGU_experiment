@@ -2364,6 +2364,77 @@ mod tests {
     }
 
     #[test]
+    fn predicate_guided_split_assigns_shared_boundary_predicate_once() {
+        let shared = PredicateDef {
+            predicate_id: Some(9),
+            target: "vertex".to_string(),
+            id: 2,
+            property: "p".to_string(),
+            op: ComparisonOp::Eq,
+            value: ScalarValue::Int32(Some(2)),
+            values: Vec::new(),
+        };
+        let left_only = PredicateDef {
+            predicate_id: Some(10),
+            target: "edge".to_string(),
+            id: 1,
+            property: "q".to_string(),
+            op: ComparisonOp::Eq,
+            value: ScalarValue::Int32(Some(1)),
+            values: Vec::new(),
+        };
+        let mut edges = vec![
+            AbstractEdge {
+                src: 1,
+                dst: 2,
+                src_pcf: Arc::new(Pcf::empty()),
+                dst_pcf: Arc::new(Pcf::empty()),
+                functional: FunctionalDirection::None,
+                predicates: vec![shared.clone(), left_only],
+                original_edge_ids: vec![1],
+                path_vertices: vec![1, 2],
+                selectivity: 1.0,
+                path_str: String::new(),
+            },
+            AbstractEdge {
+                src: 2,
+                dst: 3,
+                src_pcf: Arc::new(Pcf::empty()),
+                dst_pcf: Arc::new(Pcf::empty()),
+                functional: FunctionalDirection::None,
+                predicates: vec![shared],
+                original_edge_ids: vec![2],
+                path_vertices: vec![2, 3],
+                selectivity: 1.0,
+                path_str: String::new(),
+            },
+        ];
+
+        QueryGraph::assign_predicate_ownership(&mut edges);
+
+        assert_eq!(
+            edges
+                .iter()
+                .flat_map(|edge| edge.predicates.iter())
+                .filter(|predicate| predicate.predicate_id == Some(9))
+                .count(),
+            1
+        );
+        assert!(
+            edges[0]
+                .predicates
+                .iter()
+                .any(|predicate| predicate.predicate_id == Some(9))
+        );
+        assert!(
+            !edges[1]
+                .predicates
+                .iter()
+                .any(|predicate| predicate.predicate_id == Some(9))
+        );
+    }
+
+    #[test]
     fn star_matching_falls_back_to_smaller_available_degree() {
         let arms = vec![
             (
@@ -2580,7 +2651,7 @@ mod tests {
         assert!(!catalog.path_has_materialized_endpoint_pair(&alias_key, "country", "person"));
 
         let candidates = query_graph
-            .build_abstract_edge_candidates_for_path(&path, 2, &catalog)
+            .build_abstract_edge_candidates_for_path(&path, 2, &catalog, None)
             .unwrap();
 
         assert_eq!(candidates.len(), 3);
@@ -4395,6 +4466,7 @@ impl QueryGraph {
         path: &Path,
         k: usize,
         degree_seq_graph: &DegreeSeqGraphCompressed,
+        flat_graph: Option<&FlatGraph>,
     ) -> GCardResult<Vec<Vec<AbstractEdge>>> {
         let mut seen = HashSet::new();
         let mut candidates = Vec::new();
@@ -4479,6 +4551,9 @@ impl QueryGraph {
 
         if decomp_trace_enabled() {
             decomp_trace_line(format!("[path-candidate] total={}", candidates.len()));
+        }
+        if Self::predicate_guided_split_enabled() {
+            self.sort_abstract_edge_sets_for_predicates(&mut candidates, flat_graph);
         }
         Ok(candidates)
     }
@@ -4580,12 +4655,197 @@ impl QueryGraph {
         path: &Path,
         ranges: &[(usize, usize)],
     ) -> GCardResult<Vec<AbstractEdge>> {
-        ranges
+        let mut abstract_edges = ranges
             .iter()
             .map(|&(start_edge_idx, end_edge_idx)| {
                 self.build_abstract_edge_from_range(path, start_edge_idx, end_edge_idx)
             })
-            .collect()
+            .collect::<GCardResult<Vec<_>>>()?;
+        if Self::predicate_guided_split_enabled() {
+            Self::assign_predicate_ownership(&mut abstract_edges);
+        }
+        Ok(abstract_edges)
+    }
+
+    /// A vertex at a path cut or pivot can appear in several abstract edges.
+    /// Keep its predicate on one edge only, preferring the edge that already
+    /// carries more predicates so attribute-bearing structure stays compact.
+    fn assign_predicate_ownership(abstract_edges: &mut [AbstractEdge]) {
+        let mut locations: HashMap<String, Vec<usize>> = HashMap::new();
+        for (edge_idx, abstract_edge) in abstract_edges.iter().enumerate() {
+            for predicate in &abstract_edge.predicates {
+                locations
+                    .entry(Self::predicate_key(predicate))
+                    .or_default()
+                    .push(edge_idx);
+            }
+        }
+
+        let unique_predicate_counts: Vec<usize> = abstract_edges
+            .iter()
+            .map(|abstract_edge| {
+                abstract_edge
+                    .predicates
+                    .iter()
+                    .map(Self::predicate_key)
+                    .collect::<HashSet<_>>()
+                    .len()
+            })
+            .collect();
+
+        for (key, mut owners) in locations {
+            owners.sort_unstable();
+            owners.dedup();
+            if owners.len() < 2 {
+                continue;
+            }
+            let owner = owners
+                .into_iter()
+                .max_by_key(|&idx| {
+                    (
+                        unique_predicate_counts[idx],
+                        abstract_edges[idx].original_edge_ids.len(),
+                        usize::MAX - idx,
+                    )
+                })
+                .unwrap();
+            for (idx, abstract_edge) in abstract_edges.iter_mut().enumerate() {
+                if idx != owner {
+                    abstract_edge
+                        .predicates
+                        .retain(|predicate| Self::predicate_key(predicate) != key);
+                }
+            }
+        }
+    }
+
+    fn predicate_key(predicate: &PredicateDef) -> String {
+        if let Some(predicate_id) = predicate.predicate_id {
+            return format!("id:{predicate_id}");
+        }
+        format!(
+            "{}:{}:{}:{:?}:{:?}:{:?}",
+            predicate.target,
+            predicate.id,
+            predicate.property,
+            predicate.op,
+            predicate.value,
+            predicate.values
+        )
+    }
+
+    fn sort_abstract_edge_sets_for_predicates(
+        &self,
+        candidates: &mut [Vec<AbstractEdge>],
+        flat_graph: Option<&FlatGraph>,
+    ) {
+        candidates.sort_by(|left, right| {
+            let left_key = self.predicate_guided_candidate_key(left, flat_graph);
+            let right_key = self.predicate_guided_candidate_key(right, flat_graph);
+            left_key
+                .0
+                .cmp(&right_key.0)
+                .then(left_key.1.cmp(&right_key.1))
+                .then(left_key.2.cmp(&right_key.2))
+                .then_with(|| {
+                    left_key
+                        .3
+                        .partial_cmp(&right_key.3)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+    }
+
+    /// Rank candidates by the stated objective: fewer predicate-bearing
+    /// abstract edges first, then fewer abstract edges, then more compact
+    /// predicate placement. The last term uses column statistics to prefer a
+    /// candidate that keeps selective predicates together.
+    fn predicate_guided_candidate_key(
+        &self,
+        candidate: &[AbstractEdge],
+        flat_graph: Option<&FlatGraph>,
+    ) -> (usize, usize, usize, f64) {
+        let mut predicate_units = 0;
+        let mut predicate_positions = Vec::new();
+        let mut max_unit_surprisal: f64 = 0.0;
+
+        for (idx, abstract_edge) in candidate.iter().enumerate() {
+            let mut seen = HashSet::new();
+            let mut unit_surprisal = 0.0;
+            for predicate in &abstract_edge.predicates {
+                if !seen.insert(Self::predicate_key(predicate)) {
+                    continue;
+                }
+                unit_surprisal += self.predicate_surprisal_from_stats(predicate, flat_graph);
+            }
+            if !seen.is_empty() {
+                predicate_units += 1;
+                predicate_positions.push(idx);
+                max_unit_surprisal = max_unit_surprisal.max(unit_surprisal);
+            }
+        }
+
+        let predicate_span = match (predicate_positions.first(), predicate_positions.last()) {
+            (Some(first), Some(last)) => last.saturating_sub(*first),
+            _ => 0,
+        };
+        (
+            predicate_units,
+            candidate.len(),
+            predicate_span,
+            -max_unit_surprisal,
+        )
+    }
+
+    fn predicate_surprisal_from_stats(
+        &self,
+        predicate: &PredicateDef,
+        flat_graph: Option<&FlatGraph>,
+    ) -> f64 {
+        let Some(flat_graph) = flat_graph else {
+            return 0.0;
+        };
+        let location = predicate
+            .predicate_id
+            .and_then(|predicate_id| self.get_predicate_location(predicate_id))
+            .or_else(|| match predicate.target.as_str() {
+                "vertex" => Some(PredicateLocation::Vertex(predicate.id as VertexId)),
+                "edge" => Some(PredicateLocation::Edge(predicate.id as EdgeId)),
+                _ => None,
+            });
+        let Some(location) = location else {
+            return 0.0;
+        };
+        let (label, is_edge) = match location {
+            PredicateLocation::Vertex(vertex_id) => {
+                let Some(vertex) = self.inner.vertices.get(&vertex_id) else {
+                    return 0.0;
+                };
+                (vertex.label.as_str(), false)
+            }
+            PredicateLocation::Edge(edge_id) => {
+                let Some(edge) = self.inner.edges.get(&edge_id) else {
+                    return 0.0;
+                };
+                (edge.label.as_str(), true)
+            }
+        };
+        let prop_index = if is_edge {
+            flat_graph.edge_prop_index(label, &predicate.property)
+        } else {
+            flat_graph.vertex_prop_index(label, &predicate.property)
+        };
+        let Some(prop_index) = prop_index else {
+            return 0.0;
+        };
+        let resolved = ResolvedPredicate::new(prop_index, predicate);
+        let selectivity = Self::stats_predicate_selectivity(
+            flat_graph,
+            label,
+            is_edge,
+            std::slice::from_ref(&resolved),
+        );
+        -selectivity.max(1e-12).ln()
     }
 
     fn build_abstract_edge_from_range(
@@ -5614,8 +5874,12 @@ impl QueryGraph {
         let limit = Self::split_candidate_limit();
         let mut edge_sets: Vec<Vec<AbstractEdge>> = vec![Vec::new()];
         for (path_idx, path) in paths.into_iter().enumerate() {
-            let path_candidates =
-                query_graph.build_abstract_edge_candidates_for_path(&path, k, degree_seq_graph)?;
+            let path_candidates = query_graph.build_abstract_edge_candidates_for_path(
+                &path,
+                k,
+                degree_seq_graph,
+                flat_graph,
+            )?;
             if decomp_trace_enabled() {
                 decomp_trace_line(format!(
                     "[cross-product] path_index={} incoming_sets={} path_candidates={} limit={}",
@@ -5651,14 +5915,21 @@ impl QueryGraph {
                     }
                     let mut combined = existing.clone();
                     combined.extend(candidate.clone());
+                    if Self::predicate_guided_split_enabled() {
+                        Self::assign_predicate_ownership(&mut combined);
+                    }
                     next.push(combined);
-                    if next.len() >= limit {
+                    if !Self::predicate_guided_split_enabled() && next.len() >= limit {
                         break;
                     }
                 }
-                if next.len() >= limit {
+                if !Self::predicate_guided_split_enabled() && next.len() >= limit {
                     break;
                 }
+            }
+            if Self::predicate_guided_split_enabled() {
+                query_graph.sort_abstract_edge_sets_for_predicates(&mut next, flat_graph);
+                next.truncate(limit);
             }
             edge_sets = next;
             if decomp_trace_enabled() {
@@ -5751,8 +6022,12 @@ impl QueryGraph {
             }
             let mut residual_edge_sets: Vec<Vec<AbstractEdge>> = vec![Vec::new()];
             for (path_idx, path) in residual_paths.into_iter().enumerate() {
-                let path_candidates =
-                    residual.build_abstract_edge_candidates_for_path(&path, k, degree_seq_graph)?;
+                let path_candidates = residual.build_abstract_edge_candidates_for_path(
+                    &path,
+                    k,
+                    degree_seq_graph,
+                    flat_graph,
+                )?;
                 if decomp_trace_enabled() {
                     decomp_trace_line(format!(
                         "[raw-star-cross-product] path_index={} incoming_sets={} path_candidates={} limit={}",
@@ -5767,14 +6042,21 @@ impl QueryGraph {
                     for candidate in &path_candidates {
                         let mut combined = existing.clone();
                         combined.extend(candidate.clone());
+                        if Self::predicate_guided_split_enabled() {
+                            Self::assign_predicate_ownership(&mut combined);
+                        }
                         next.push(combined);
-                        if next.len() >= limit {
+                        if !Self::predicate_guided_split_enabled() && next.len() >= limit {
                             break;
                         }
                     }
-                    if next.len() >= limit {
+                    if !Self::predicate_guided_split_enabled() && next.len() >= limit {
                         break;
                     }
+                }
+                if Self::predicate_guided_split_enabled() {
+                    residual.sort_abstract_edge_sets_for_predicates(&mut next, flat_graph);
+                    next.truncate(limit);
                 }
                 residual_edge_sets = next;
             }
@@ -5820,6 +6102,13 @@ impl QueryGraph {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(16)
+    }
+
+    fn predicate_guided_split_enabled() -> bool {
+        std::env::var("GCARD_PREDICATE_GUIDED_SPLIT")
+            .ok()
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
     }
 
     fn build_abstract_graph_from_edges_flat(
