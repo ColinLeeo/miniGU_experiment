@@ -4552,7 +4552,7 @@ impl QueryGraph {
         if decomp_trace_enabled() {
             decomp_trace_line(format!("[path-candidate] total={}", candidates.len()));
         }
-        if Self::predicate_guided_split_enabled() {
+        if Self::predicate_guided_ranking_enabled() {
             self.sort_abstract_edge_sets_for_predicates(&mut candidates, flat_graph);
         }
         Ok(candidates)
@@ -4661,7 +4661,7 @@ impl QueryGraph {
                 self.build_abstract_edge_from_range(path, start_edge_idx, end_edge_idx)
             })
             .collect::<GCardResult<Vec<_>>>()?;
-        if Self::predicate_guided_split_enabled() {
+        if Self::predicate_ownership_enabled() {
             Self::assign_predicate_ownership(&mut abstract_edges);
         }
         Ok(abstract_edges)
@@ -5915,19 +5915,19 @@ impl QueryGraph {
                     }
                     let mut combined = existing.clone();
                     combined.extend(candidate.clone());
-                    if Self::predicate_guided_split_enabled() {
+                    if Self::predicate_ownership_enabled() {
                         Self::assign_predicate_ownership(&mut combined);
                     }
                     next.push(combined);
-                    if !Self::predicate_guided_split_enabled() && next.len() >= limit {
+                    if !Self::predicate_guided_ranking_enabled() && next.len() >= limit {
                         break;
                     }
                 }
-                if !Self::predicate_guided_split_enabled() && next.len() >= limit {
+                if !Self::predicate_guided_ranking_enabled() && next.len() >= limit {
                     break;
                 }
             }
-            if Self::predicate_guided_split_enabled() {
+            if Self::predicate_guided_ranking_enabled() {
                 query_graph.sort_abstract_edge_sets_for_predicates(&mut next, flat_graph);
                 next.truncate(limit);
             }
@@ -6042,19 +6042,19 @@ impl QueryGraph {
                     for candidate in &path_candidates {
                         let mut combined = existing.clone();
                         combined.extend(candidate.clone());
-                        if Self::predicate_guided_split_enabled() {
+                        if Self::predicate_ownership_enabled() {
                             Self::assign_predicate_ownership(&mut combined);
                         }
                         next.push(combined);
-                        if !Self::predicate_guided_split_enabled() && next.len() >= limit {
+                        if !Self::predicate_guided_ranking_enabled() && next.len() >= limit {
                             break;
                         }
                     }
-                    if !Self::predicate_guided_split_enabled() && next.len() >= limit {
+                    if !Self::predicate_guided_ranking_enabled() && next.len() >= limit {
                         break;
                     }
                 }
-                if Self::predicate_guided_split_enabled() {
+                if Self::predicate_guided_ranking_enabled() {
                     residual.sort_abstract_edge_sets_for_predicates(&mut next, flat_graph);
                     next.truncate(limit);
                 }
@@ -6104,10 +6104,27 @@ impl QueryGraph {
             .unwrap_or(16)
     }
 
-    fn predicate_guided_split_enabled() -> bool {
+    fn predicate_guided_ranking_enabled() -> bool {
         std::env::var("GCARD_PREDICATE_GUIDED_SPLIT")
             .ok()
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "rank" | "full"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn predicate_ownership_enabled() -> bool {
+        std::env::var("GCARD_PREDICATE_GUIDED_SPLIT")
+            .ok()
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on" | "owner" | "full"
+                )
+            })
             .unwrap_or(false)
     }
 
