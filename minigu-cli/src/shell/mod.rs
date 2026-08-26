@@ -43,14 +43,22 @@ pub struct ShellArgs {
     /// If set, query metrics will be printed.
     #[arg(long)]
     show_metrics: bool,
+
+    /// Number of database worker threads.
+    #[arg(long, default_value_t = 1)]
+    threads: usize,
 }
 
 impl ShellArgs {
     pub fn run(self) -> Result<()> {
+        let config = DatabaseConfig {
+            num_threads: self.threads,
+            ..DatabaseConfig::default()
+        };
         let db = if let Some(path) = self.path {
-            Database::open(path, DatabaseConfig::default())?
+            Database::open(path, config)?
         } else {
-            Database::open_in_memory(DatabaseConfig::default())?
+            Database::open_in_memory(config)?
         };
         let session = db.session()?;
         let editor = build_editor()?;
